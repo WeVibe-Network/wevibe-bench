@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# venv
+.venv/
+venv/
+env/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# WeVibe: NEVER commit the corpus, keys, tokens, or run artifacts.
+# The adapter is open-sourced; the corpus/keys/epoch_sk are NOT.
+*.wevibe-session-token
+runs/
+scorecards/
+*.scorecard.json

@@ -1,0 +1,2 @@
+# Runtime dependencies are stdlib-only; pytest is used for tests/development only.
+pytest>=8
