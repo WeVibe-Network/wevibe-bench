@@ -47,11 +47,13 @@ DEFAULT_TEST_COMMANDS: dict[str, list[str]] = {
 
 _TOKEN_VALUE_RE = re.compile(r"^\s*(?P<number>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<suffix>[kKmM]?)\s*$")
 _COST_VALUE_RE = re.compile(r"^\s*\$?(?P<number>[0-9][0-9,]*(?:\.[0-9]+)?)\s*$")
+# Aider always emits the Tokens segment; the Cost segment is optional (absent
+# for local/zero-cost models like LM Studio).
 _AIDER_USAGE_RE = re.compile(
     r"Tokens:\s*(?P<sent>[0-9][0-9,]*(?:\.[0-9]+)?[kKmM]?)\s*sent,\s*"
-    r"(?P<received>[0-9][0-9,]*(?:\.[0-9]+)?[kKmM]?)\s*received\.\s*"
-    r"Cost:\s*\$(?P<message>[0-9][0-9,]*(?:\.[0-9]+)?)\s*message,\s*"
-    r"\$(?P<session>[0-9][0-9,]*(?:\.[0-9]+)?)\s*session\.",
+    r"(?P<received>[0-9][0-9,]*(?:\.[0-9]+)?[kKmM]?)\s*received\."
+    r"(?:\s*Cost:\s*\$(?P<message>[0-9][0-9,]*(?:\.[0-9]+)?)\s*message,\s*"
+    r"\$(?P<session>[0-9][0-9,]*(?:\.[0-9]+)?)\s*session\.)?",
     re.IGNORECASE,
 )
 
@@ -575,7 +577,8 @@ def _parse_aider_usage(stdout: str) -> tuple[int, int, float] | None:
 
     sent_tokens = _parse_token_count(last_match.group("sent"))
     received_tokens = _parse_token_count(last_match.group("received"))
-    session_cost = _parse_cost(last_match.group("session"))
+    session_raw = last_match.group("session")
+    session_cost = _parse_cost(session_raw) if session_raw is not None else 0.0
     return (sent_tokens, received_tokens, session_cost)
 
 

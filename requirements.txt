@@ -1,2 +1,3 @@
-# Runtime dependencies are stdlib-only; pytest is used for tests/development only.
+# Runtime dependency for lifecycle Ed25519 signing + pytest for tests/development.
+cryptography>=42
 pytest>=8

@@ -1,0 +1,10 @@
+- name: lm_studio/qwen/qwen3.6-35b-a3b
+  edit_format: whole
+  use_temperature: 0.6
+  streaming: false
+  extra_params:
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+    min_p: 0
+    max_tokens: 32768

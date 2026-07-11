@@ -11,6 +11,7 @@ from .aider_polyglot import (
     PolyglotRepoNotFound,
     SubprocessExecutor,
 )
+from .swecontextbench import SWEContextBenchRunner, SolveResult, write_prediction
 
 __all__ = [
     "AiderPolyglotRunner",
@@ -19,5 +20,8 @@ __all__ = [
     "Exercise",
     "MockExecutor",
     "PolyglotRepoNotFound",
+    "SolveResult",
+    "SWEContextBenchRunner",
     "SubprocessExecutor",
+    "write_prediction",
 ]
