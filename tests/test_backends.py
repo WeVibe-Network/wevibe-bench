@@ -9,7 +9,7 @@ from wevibe_bench.config import RunConfig
 def _cfg() -> RunConfig:
     return RunConfig(
         model_ladder=("model-a",),
-        hub_url="http://offline.local",
+        mcp_recall_url="http://offline.local",
         session_token_path="/tmp/__wevibe_bench_missing_token__",
     )
 

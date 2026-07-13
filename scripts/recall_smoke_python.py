@@ -26,6 +26,7 @@ import sys
 from wevibe_bench.backends.base import NeedCard
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
 from wevibe_bench.config import RunConfig
+from wevibe_bench.preflight import preflight
 
 
 def _setup_logging(log_path: str) -> logging.Logger:
@@ -55,7 +56,13 @@ def main() -> int:
     budget = int(os.environ.get("SMOKE_BUDGET", "5"))
     hub = os.environ.get("SMOKE_HUB", "http://localhost:4450")
 
-    cfg = RunConfig(hub_url=hub, tau=floor, surface_budget=budget)
+    cfg = RunConfig(mcp_recall_url=hub, tau=floor, surface_budget=budget)
+    preflight(
+        hub_url=cfg.hub_url,
+        mcp_recall_url=cfg.mcp_recall_url,
+        session_token_path=cfg.session_token_path,
+        logger=log,
+    )
     log.info("config manifest: %s", json.dumps(cfg.to_dict()))
 
     token_path = os.path.expanduser(cfg.session_token_path)
@@ -80,7 +87,7 @@ def main() -> int:
     wire = need.to_wire(cfg, session_id)
     log.info(
         "request wire url=%s/v1/recall org_id=%s fields=%s relevance_floor=%s surface_budget=%s query_len=%d task_len=%d",
-        cfg.hub_url, wire.get("org_id"), sorted(wire.keys()),
+        cfg.mcp_recall_url, wire.get("org_id"), sorted(wire.keys()),
         wire.get("relevance_floor"), wire.get("surface_budget"),
         len(str(wire.get("query", ""))), len(str(wire.get("task", ""))),
     )

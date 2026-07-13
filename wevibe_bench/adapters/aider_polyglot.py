@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 import os
@@ -55,6 +56,13 @@ _AIDER_USAGE_RE = re.compile(
     r"(?:\s*Cost:\s*\$(?P<message>[0-9][0-9,]*(?:\.[0-9]+)?)\s*message,\s*"
     r"\$(?P<session>[0-9][0-9,]*(?:\.[0-9]+)?)\s*session\.)?",
     re.IGNORECASE,
+)
+
+_WEVIBE_MARKERS: tuple[str, ...] = (
+    "<WEVIBE_FORK",
+    "</WEVIBE_FORK>",
+    "<WEVIBE_INDEX",
+    "</WEVIBE_INDEX>",
 )
 
 
@@ -262,6 +270,9 @@ class AiderPolyglotRunner(AgentRunner):
         mock_mode: bool = False,
         test_commands: dict[str, list[str]] | None = None,
         work_root: str | Path | None = None,
+        producer_system_template: str | None = None,
+        capture_transcript_dir: str | Path | None = None,
+        max_attempts: int = 2,
     ) -> None:
         if mock_mode and executor is None:
             raise ValueError("mock_mode=True requires an injected executor (MockExecutor)")
@@ -271,6 +282,9 @@ class AiderPolyglotRunner(AgentRunner):
         self._mock_mode = mock_mode
         self._executor = executor or SubprocessExecutor()
         self._work_root = Path(work_root).expanduser() if work_root is not None else None
+        self._producer_system_template = producer_system_template or None
+        self._capture_transcript_dir = Path(capture_transcript_dir).expanduser() if capture_transcript_dir else None
+        self._max_attempts = max_attempts
 
         merged = {language: list(command) for language, command in DEFAULT_TEST_COMMANDS.items()}
         if test_commands:
@@ -360,7 +374,10 @@ class AiderPolyglotRunner(AgentRunner):
             task=exercise.instructions,
             language=exercise.language,
             stack=[exercise.language],
-            files=list(exercise.solution_files),
+            # Keep empty at need-card build time: real failing-test output only exists
+            # inside run_task() after recall has already fired for this task.
+            error_strings=[],
+            files=[*exercise.solution_files, *exercise.test_files],
             project_name=exercise.slug,
         )
 
@@ -378,15 +395,21 @@ class AiderPolyglotRunner(AgentRunner):
 
         with self._materialize_work_copy(exercise) as work_dir:
             read_path: Path | None = None
+            chat_history_path = work_dir / f"{_safe_stem(task_id)}.chat.history.md"
+            aider_streams: list[str] = []
             memory_blob = _format_memory(injected_memory)
             if memory_blob:
                 read_path = work_dir / "WEVIBE_MEMORY.md"
                 read_path.write_text(memory_blob, encoding="utf-8")
 
-            attempt_message = exercise.instructions
+            if self._producer_system_template is not None:
+                attempt_message = f"{self._producer_system_template}\n\n{exercise.instructions}"
+            else:
+                attempt_message = exercise.instructions
+            first_attempt_message = attempt_message
             env_overrides = {"WEVIBE_TASK_ID": task_id}
 
-            for attempt in (1, 2):
+            for attempt in range(1, self._max_attempts + 1):
                 turns = attempt
                 LOGGER.info(
                     "aider_attempt_start task_id=%s model=%s attempt=%d memory_context=%s",
@@ -403,10 +426,13 @@ class AiderPolyglotRunner(AgentRunner):
                     "aider",
                     "--model",
                     model,
-                    "--yes",
+                    "--yes-always",
                     "--no-stream",
                     "--no-auto-commits",
+                    "--no-detect-urls",
                     "--no-git",
+                    "--chat-history-file",
+                    str(chat_history_path),
                 ]
                 if read_path is not None:
                     aider_cmd.extend(["--read", str(read_path)])
@@ -414,9 +440,10 @@ class AiderPolyglotRunner(AgentRunner):
                 aider_cmd.extend(exercise.solution_files)
 
                 aider_result = self._executor(aider_cmd, work_dir, env_overrides)
+                aider_streams.append(_join_streams(aider_result.stdout, aider_result.stderr))
 
                 # LIVE-CONFIRM: prefer --analytics-log for exact counts.
-                usage = _parse_aider_usage(_join_streams(aider_result.stdout, aider_result.stderr))
+                usage = _parse_aider_usage(aider_streams[-1])
                 if usage is None:
                     mode_label = "mock" if self._mock_mode else "live"
                     raise RuntimeError(
@@ -449,7 +476,7 @@ class AiderPolyglotRunner(AgentRunner):
                     resolved = True
                     break
 
-                if attempt == 2:
+                if attempt == self._max_attempts:
                     break
 
                 test_output = _join_streams(test_result.stdout, test_result.stderr).strip()
@@ -462,6 +489,83 @@ class AiderPolyglotRunner(AgentRunner):
                     "The tests failed. Test output:\n"
                     f"{test_output}\n"
                     "Please fix the code."
+                )
+                if self._producer_system_template is not None:
+                    attempt_message = f"{self._producer_system_template}\n\n{attempt_message}"
+
+            if self._capture_transcript_dir is not None:
+                solution_paths = [work_dir / solution_file for solution_file in exercise.solution_files]
+                solution_marker_clean = self._scan_files_for_markers(solution_paths)
+                LOGGER.info(
+                    "[capture] aider solution marker_clean=%s task_id=%s",
+                    solution_marker_clean,
+                    task_id,
+                )
+                if not solution_marker_clean:
+                    offending = self._first_file_marker(solution_paths)
+                    if offending is not None:
+                        LOGGER.error(
+                            "[capture] aider solution marker leak task_id=%s file=%s marker=%s",
+                            task_id,
+                            offending[0],
+                            offending[1],
+                        )
+                    else:
+                        LOGGER.error(
+                            "[capture] aider solution marker leak task_id=%s file=%s marker=%s",
+                            task_id,
+                            "unknown",
+                            "unknown",
+                        )
+
+                producer_fp = "none"
+                if self._producer_system_template is not None:
+                    producer_fp = hashlib.sha256(
+                        self._producer_system_template.encode("utf-8", errors="replace")
+                    ).hexdigest()[:8]
+
+                if chat_history_path.is_file():
+                    raw_assistant_content = chat_history_path.read_text(encoding="utf-8", errors="replace")
+                else:
+                    raw_assistant_content = "\n".join(stream for stream in aider_streams if stream)
+                assistant_content = _clean_aider_transcript(raw_assistant_content)
+
+                capture_dir = self._capture_transcript_dir
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                task_stem = _safe_stem(task_id)
+                transcript_path = capture_dir / f"{task_stem}.jsonl"
+                with transcript_path.open("w", encoding="utf-8", errors="replace") as handle:
+                    meta = {
+                        "instance_id": task_id,
+                        "type": "meta",
+                        "producer_prompt_fp": producer_fp,
+                        "model": model,
+                        "marker_clean": solution_marker_clean,
+                        "solution_marker_clean": solution_marker_clean,
+                    }
+                    handle.write(json.dumps(meta, ensure_ascii=False) + "\n")
+                    user_row = {
+                        "instance_id": task_id,
+                        "role": "user",
+                        "content": first_attempt_message,
+                        "turn": 0,
+                    }
+                    handle.write(json.dumps(user_row, ensure_ascii=False) + "\n")
+                    assistant_row = {
+                        "instance_id": task_id,
+                        "role": "assistant",
+                        "content": assistant_content,
+                        "turn": 1,
+                    }
+                    handle.write(json.dumps(assistant_row, ensure_ascii=False) + "\n")
+
+                LOGGER.info(
+                    "[capture] aider transcript wrote task_id=%s stem=%s path=%s chat_history_chars=%d producer_fp=%s",
+                    task_id,
+                    task_stem,
+                    str(transcript_path),
+                    len(assistant_content),
+                    producer_fp,
                 )
 
         outcome = TaskOutcome(
@@ -496,6 +600,23 @@ class AiderPolyglotRunner(AgentRunner):
         if not command:
             raise KeyError(f"no test command configured for language={language}")
         return list(command)
+
+    @staticmethod
+    def _scan_files_for_markers(paths: list[Path]) -> bool:
+        for path in paths:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if any(marker in text for marker in _WEVIBE_MARKERS):
+                return False
+        return True
+
+    @staticmethod
+    def _first_file_marker(paths: list[Path]) -> tuple[str, str] | None:
+        for path in paths:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for marker in _WEVIBE_MARKERS:
+                if marker in text:
+                    return str(path), marker
+        return None
 
     @contextmanager
     def _materialize_work_copy(self, exercise: Exercise) -> Iterator[Path]:
@@ -541,6 +662,20 @@ def _join_streams(stdout: str, stderr: str) -> str:
     if stdout:
         return stdout
     return stderr
+
+
+def _clean_aider_transcript(raw: str) -> str:
+    cleaned_lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#### ") or stripped.startswith("> "):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
+def _safe_stem(task_id: str) -> str:
+    return task_id.replace("/", "_").replace(os.sep, "_")
 
 
 def _parse_token_count(raw: str) -> int:
@@ -618,4 +753,5 @@ __all__ = [
     "_parse_aider_usage",
     "_parse_cost",
     "_parse_token_count",
+    "_safe_stem",
 ]

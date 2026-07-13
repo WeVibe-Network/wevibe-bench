@@ -17,7 +17,7 @@ from typing import Any
 class Cell:
     model: str
     task_id: str
-    condition: str  # 'OFF' | 'ON'
+    condition: str  # 'OFF' | 'ON' | 'ON_REASONING' | 'ON_DISCOVERY' | ...
     resolved: bool  # task pass/resolve
     input_tokens: int
     output_tokens: int
@@ -72,10 +72,12 @@ class ModelDiff:
     off_n: int  # OFF cell count
     on_scored_n: int  # SCORED ON cell count
     on_not_scored_n: int  # ON cells excluded by the integrity gate
+    on_condition: str = "ON"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
+            "on_condition": self.on_condition,
             "off_pass_rate": self.off_pass_rate,
             "on_pass_rate": self.on_pass_rate,
             "capability_lift_pp": self.capability_lift_pp,
@@ -126,65 +128,79 @@ class Scorecard:
         self.cells.append(cell)
 
     def model_diffs(self) -> list[ModelDiff]:
-        # group cells by model; for each model:
-        #   OFF cells = condition=='OFF'; on_scored = condition=='ON' and scored; on_not_scored = 'ON' and not scored
-        #   off_pass_rate = mean(resolved) over OFF (0 if none); on_pass_rate = mean(resolved) over on_scored (0 if none)
+        # group cells by model; for each ON-style condition per model:
+        #   OFF cells = condition=='OFF'
+        #   ON arm cells = condition.startswith('ON') and condition == on_condition
+        #   on_scored/on_not_scored split by scored flag
+        #   off_pass_rate = mean(resolved) over OFF (0 if none)
+        #   on_pass_rate = mean(resolved) over on_scored (0 if none)
         #   token/cost sums over OFF and over on_scored ONLY (never count not_scored)
         #   deltas guarded against divide-by-zero (return 0.0)
-        # return sorted by model name for determinism
+        # return sorted by (model, on_condition) for determinism
         diffs: list[ModelDiff] = []
         models = sorted({cell.model for cell in self.cells})
 
         for model in models:
             model_cells = [cell for cell in self.cells if cell.model == model]
             off_cells = [cell for cell in model_cells if cell.condition == "OFF"]
-            on_scored = [cell for cell in model_cells if cell.condition == "ON" and cell.scored]
-            on_not_scored = [cell for cell in model_cells if cell.condition == "ON" and not cell.scored]
+            on_conditions = sorted(
+                {
+                    cell.condition
+                    for cell in model_cells
+                    if cell.condition.startswith("ON")
+                }
+            )
 
             off_n = len(off_cells)
-            on_scored_n = len(on_scored)
-
             off_pass_rate = (
                 sum(1 for cell in off_cells if cell.resolved) / off_n if off_n else 0.0
             )
-            on_pass_rate = (
-                sum(1 for cell in on_scored if cell.resolved) / on_scored_n if on_scored_n else 0.0
-            )
-
             off_total_tokens = sum(cell.total_tokens for cell in off_cells)
-            on_total_tokens = sum(cell.total_tokens for cell in on_scored)
-
             off_cost_usd = sum(cell.wall_cost_usd for cell in off_cells)
-            on_cost_usd = sum(cell.wall_cost_usd for cell in on_scored)
 
-            total_token_delta_pct = (
-                ((on_total_tokens - off_total_tokens) / off_total_tokens) * 100.0
-                if off_total_tokens
-                else 0.0
-            )
-            cost_delta_pct = (
-                ((on_cost_usd - off_cost_usd) / off_cost_usd) * 100.0
-                if off_cost_usd
-                else 0.0
-            )
+            for on_condition in on_conditions:
+                on_cells = [cell for cell in model_cells if cell.condition == on_condition]
+                on_scored = [cell for cell in on_cells if cell.scored]
+                on_not_scored = [cell for cell in on_cells if not cell.scored]
 
-            diffs.append(
-                ModelDiff(
-                    model=model,
-                    off_pass_rate=off_pass_rate,
-                    on_pass_rate=on_pass_rate,
-                    capability_lift_pp=(on_pass_rate - off_pass_rate) * 100.0,
-                    off_total_tokens=off_total_tokens,
-                    on_total_tokens=on_total_tokens,
-                    total_token_delta_pct=total_token_delta_pct,
-                    off_cost_usd=off_cost_usd,
-                    on_cost_usd=on_cost_usd,
-                    cost_delta_pct=cost_delta_pct,
-                    off_n=off_n,
-                    on_scored_n=on_scored_n,
-                    on_not_scored_n=len(on_not_scored),
+                on_scored_n = len(on_scored)
+
+                on_pass_rate = (
+                    sum(1 for cell in on_scored if cell.resolved) / on_scored_n if on_scored_n else 0.0
                 )
-            )
+
+                on_total_tokens = sum(cell.total_tokens for cell in on_scored)
+                on_cost_usd = sum(cell.wall_cost_usd for cell in on_scored)
+
+                total_token_delta_pct = (
+                    ((on_total_tokens - off_total_tokens) / off_total_tokens) * 100.0
+                    if off_total_tokens
+                    else 0.0
+                )
+                cost_delta_pct = (
+                    ((on_cost_usd - off_cost_usd) / off_cost_usd) * 100.0
+                    if off_cost_usd
+                    else 0.0
+                )
+
+                diffs.append(
+                    ModelDiff(
+                        model=model,
+                        on_condition=on_condition,
+                        off_pass_rate=off_pass_rate,
+                        on_pass_rate=on_pass_rate,
+                        capability_lift_pp=(on_pass_rate - off_pass_rate) * 100.0,
+                        off_total_tokens=off_total_tokens,
+                        on_total_tokens=on_total_tokens,
+                        total_token_delta_pct=total_token_delta_pct,
+                        off_cost_usd=off_cost_usd,
+                        on_cost_usd=on_cost_usd,
+                        cost_delta_pct=cost_delta_pct,
+                        off_n=off_n,
+                        on_scored_n=on_scored_n,
+                        on_not_scored_n=len(on_not_scored),
+                    )
+                )
 
         return diffs
 

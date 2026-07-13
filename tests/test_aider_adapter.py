@@ -28,7 +28,7 @@ def _cfg() -> RunConfig:
     return RunConfig(
         model_ladder=("model-a",),
         rng_seed=20260708,
-        hub_url="http://offline.local",
+        mcp_recall_url="http://offline.local",
         session_token_path="/tmp/__wevibe_bench_missing_token__",
     )
 
@@ -72,7 +72,7 @@ def test_build_need_card_keeps_instructions_in_task_and_language_in_keyword_chan
 
     assert card.language == "go"
     assert card.stack == ["go"]
-    assert card.files == ["hello_world.go"]
+    assert card.files == ["hello_world.go", "hello_world_test.go"]
     assert card.project_name == "hello-world"
     assert card.query == card.task
 

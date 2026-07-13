@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Resumable SWEContextBench solve driver for OFF/ON ablation.
+"""Resumable SWEContextBench solve driver for OFF/ON* ablation.
 
 This script generates solve-stage prediction + telemetry artifacts for selected
-held-out SWEContextBench instances under OFF and/or ON conditions.
+held-out SWEContextBench instances under OFF and/or ON-style conditions.
 
 Important invariants:
 - OFF always solves with empty injected memory and delivery="N/A".
-- ON uses real WeVibe recall + delivery verification.
-- ON cells with delivery != YES still solve (with injected=[]), are recorded
+- ON-style arms (on/on_reasoning/on_discovery) use real WeVibe recall +
+  delivery verification.
+- ON-style cells with delivery != YES still solve (with injected=[]), are recorded
   honestly, and are left for eval-stage delivery-gating (not scored downstream).
 """
 
@@ -25,10 +26,10 @@ import tempfile
 import traceback
 from typing import Any
 
-from wevibe_bench.adapters.swecontextbench import SWEContextBenchRunner, write_prediction
 from wevibe_bench.backends.base import DeliveryVerdict, RecalledMemory
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
 from wevibe_bench.config import RunConfig
+from wevibe_bench.preflight import preflight
 
 
 DEFAULT_MODEL = "openrouter/qwen/qwen3-coder"
@@ -38,6 +39,8 @@ DEFAULT_DATASET_DIR = Path("~/Desktop/benchmark/datasets/swecontextbench").expan
 DEFAULT_HELDOUT_PATH = DEFAULT_DATASET_DIR / "heldout_lite.json"
 DEFAULT_EDGE_MAP_PATH = DEFAULT_DATASET_DIR / "edge_map.json"
 DEFAULT_RUNS_ROOT = Path("~/Desktop/benchmark/runs/swecb").expanduser()
+
+ALLOWED_CONDITIONS = {"off", "on", "on_reasoning", "on_discovery"}
 
 
 def _utc_now_iso() -> str:
@@ -123,10 +126,16 @@ def _load_checkpoint(path: Path) -> dict[str, dict[str, bool]]:
             continue
         if not isinstance(value, dict):
             continue
-        normalized[iid] = {
-            "off": bool(value.get("off", False)),
-            "on": bool(value.get("on", False)),
-        }
+
+        per_condition: dict[str, bool] = {}
+        for condition, done in value.items():
+            if not isinstance(condition, str):
+                continue
+            cond = condition.strip().lower()
+            if not cond:
+                continue
+            per_condition[cond] = bool(done)
+        normalized[iid] = per_condition
     return normalized
 
 
@@ -179,22 +188,56 @@ def _parse_csv_list(raw: str, *, field_name: str) -> list[str]:
 
 
 def _parse_conditions(raw: str) -> list[str]:
-    allowed = {"off", "on"}
     ordered: list[str] = []
     seen: set[str] = set()
     for part in raw.split(","):
         cond = part.strip().lower()
         if not cond:
             continue
-        if cond not in allowed:
-            raise ValueError(f"invalid condition {cond!r}; expected comma-list of off,on")
+        if cond not in ALLOWED_CONDITIONS:
+            raise ValueError(
+                "invalid condition "
+                f"{cond!r}; expected comma-list of off,on,on_reasoning,on_discovery"
+            )
         if cond in seen:
             continue
         seen.add(cond)
         ordered.append(cond)
     if not ordered:
-        raise ValueError("--conditions must include at least one of off,on")
+        raise ValueError("--conditions must include at least one of off,on,on_reasoning,on_discovery")
     return ordered
+
+
+def _is_on_condition(condition: str) -> bool:
+    return condition.startswith("on")
+
+
+def _parse_arm_org_map(raw_entries: list[str] | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not raw_entries:
+        return out
+
+    for raw_entry in raw_entries:
+        token = raw_entry.strip()
+        if not token:
+            continue
+
+        arm_raw, sep, org_raw = token.partition("=")
+        if sep != "=":
+            raise ValueError(f"invalid --arm-org entry {raw_entry!r}; expected arm=org")
+
+        arm = arm_raw.strip().lower()
+        org = org_raw.strip()
+        if not arm or not org:
+            raise ValueError(f"invalid --arm-org entry {raw_entry!r}; expected arm=org")
+        if arm not in ALLOWED_CONDITIONS or not _is_on_condition(arm):
+            raise ValueError(
+                f"invalid --arm-org arm {arm!r}; expected one of on,on_reasoning,on_discovery"
+            )
+
+        out[arm] = org
+
+    return out
 
 
 def _resolve_instance_selection(
@@ -253,6 +296,18 @@ def _telemetry_path(telemetry_dir: Path, condition: str, iid: str) -> Path:
 
 def _prediction_path(preds_dir: Path, iid: str) -> Path:
     return preds_dir / f"{iid}_preds.json"
+
+
+def _preds_dir_for_condition(out_root: Path, condition: str) -> Path:
+    if condition == "off":
+        return out_root / "preds_off"
+    if condition == "on":
+        return out_root / "preds_on"
+    return out_root / f"preds_{condition}"
+
+
+def _model_label_for_condition(condition: str, model_slug: str) -> str:
+    return f"wevibe-{condition}-{model_slug}"
 
 
 def _build_eval_commands(*, run_label: str, out_root: Path, model: str) -> tuple[str, str, str]:
@@ -342,6 +397,12 @@ def _build_resume_hint(args: argparse.Namespace, out_root: Path) -> str:
         shlex.quote(str(out_root)),
         "--resume",
     ]
+    if args.producer_prompt is not None:
+        parts.extend(["--producer-prompt", shlex.quote(args.producer_prompt)])
+    if args.capture_transcript_dir is not None:
+        parts.extend(["--capture-transcript-dir", shlex.quote(args.capture_transcript_dir)])
+    for arm_org in args.arm_org:
+        parts.extend(["--arm-org", shlex.quote(arm_org)])
     if args.instances is not None:
         parts.extend(["--instances", shlex.quote(args.instances)])
     elif args.all:
@@ -358,8 +419,6 @@ def _dry_run_plan(
     conditions: list[str],
     checkpoint: dict[str, dict[str, bool]],
     edge_keys: set[str],
-    preds_off_dir: Path,
-    preds_on_dir: Path,
     telemetry_dir: Path,
     args: argparse.Namespace,
     out_root: Path,
@@ -381,7 +440,13 @@ def _dry_run_plan(
     logger.log(
         "[dry-run] outputs "
         f"out_root={out_root} checkpoint={out_root / 'solve_checkpoint.json'} "
-        f"preds_off={preds_off_dir} preds_on={preds_on_dir} telemetry={telemetry_dir}"
+        f"preds_off={_preds_dir_for_condition(out_root, 'off')} "
+        f"preds_on={_preds_dir_for_condition(out_root, 'on')} "
+        f"telemetry={telemetry_dir}"
+    )
+    logger.log(
+        "[dry-run] preds_by_condition "
+        + ",".join(f"{condition}={_preds_dir_for_condition(out_root, condition)}" for condition in conditions)
     )
 
     total = len(instances)
@@ -397,7 +462,7 @@ def _dry_run_plan(
                 run_cells += 1
                 state = "run"
 
-            pred_path = _prediction_path(preds_off_dir if condition == "off" else preds_on_dir, iid)
+            pred_path = _prediction_path(_preds_dir_for_condition(out_root, condition), iid)
             telem_path = _telemetry_path(telemetry_dir, condition, iid)
             logger.log(
                 f"[dry-run {condition}] {iid} state={state} edge_seeded={edge_seeded} "
@@ -438,14 +503,14 @@ def _summarize_completed(
                 payload = _load_json(telemetry_path)
                 if isinstance(payload, dict):
                     total_cost += _to_float(payload.get("wall_cost_usd"), default=0.0)
-                    if condition == "on":
+                    if _is_on_condition(condition):
                         if str(payload.get("delivery")) == "YES":
                             on_yes += 1
                         else:
                             on_not_yes += 1
                     continue
 
-            if condition == "on":
+            if _is_on_condition(condition):
                 on_not_yes += 1
 
     return done_per_condition, on_yes, on_not_yes, total_cost
@@ -459,13 +524,29 @@ def run(args: argparse.Namespace) -> int:
         )
 
     conditions = _parse_conditions(args.conditions)
+
+    if args.producer_prompt and any(_is_on_condition(condition) for condition in conditions):
+        raise SystemExit(
+            "producer-prompt is seeding-only; measured ON arms must be marker-free — "
+            "run seeding with --conditions off"
+        )
+
+    arm_org_map = _parse_arm_org_map(args.arm_org)
+
+    producer_system_template: str | None = None
+    if args.producer_prompt:
+        producer_prompt_path = _safe_path(args.producer_prompt)
+        producer_system_template = producer_prompt_path.read_text(encoding="utf-8")
+
+    capture_transcript_dir: Path | None = None
+    if args.capture_transcript_dir:
+        capture_transcript_dir = _safe_path(args.capture_transcript_dir)
+
     heldout_iids = _load_heldout_iids(DEFAULT_HELDOUT_PATH)
     edge_keys = _load_edge_keys(DEFAULT_EDGE_MAP_PATH)
     instances = _resolve_instance_selection(args=args, heldout_iids=heldout_iids, edge_keys=edge_keys)
 
     out_root = _safe_path(args.out_root) if args.out_root else _safe_path(DEFAULT_RUNS_ROOT / args.run_label)
-    preds_off_dir = out_root / "preds_off"
-    preds_on_dir = out_root / "preds_on"
     telemetry_dir = out_root / "telemetry"
     checkpoint_path = out_root / "solve_checkpoint.json"
     log_path = out_root / "logs" / f"{_timestamp_for_filename()}-solve.log"
@@ -479,9 +560,13 @@ def run(args: argparse.Namespace) -> int:
         f"model={args.model} step_limit={args.step_limit} cost_limit={args.cost_limit} "
         f"docker_solve={bool(args.docker_solve)} "
         f"recall_url={args.recall_url} org_id={args.org_id} out_root={out_root} "
-        f"checkpoint={checkpoint_path} dry_run={bool(args.dry_run)} resume={bool(args.resume)}"
+        f"checkpoint={checkpoint_path} dry_run={bool(args.dry_run)} resume={bool(args.resume)} "
+        f"producer_prompt={'set' if args.producer_prompt else 'none'} "
+        f"capture_transcript_dir={capture_transcript_dir if capture_transcript_dir else 'none'}"
     )
     logger.log(f"[solve driver] logfile={log_path}")
+    if arm_org_map:
+        logger.log("[solve driver] arm_org_map " + ",".join(f"{arm}={org}" for arm, org in arm_org_map.items()))
 
     try:
         if args.dry_run:
@@ -491,17 +576,28 @@ def run(args: argparse.Namespace) -> int:
                 conditions=conditions,
                 checkpoint=checkpoint,
                 edge_keys=edge_keys,
-                preds_off_dir=preds_off_dir,
-                preds_on_dir=preds_on_dir,
                 telemetry_dir=telemetry_dir,
                 args=args,
                 out_root=out_root,
             )
 
-        cfg = RunConfig(hub_url=args.recall_url, org_id=args.org_id)
+        from wevibe_bench.adapters.swecontextbench import SWEContextBenchRunner, write_prediction
+
+        cfg = RunConfig(
+            mcp_recall_url=args.recall_url,
+            org_id=args.org_id,
+            arm_org_map=arm_org_map,
+            run_label=args.run_label,
+        )
+
+        if not args.dry_run:
+            preflight(
+                hub_url=cfg.hub_url,
+                mcp_recall_url=cfg.mcp_recall_url,
+                session_token_path=cfg.session_token_path,
+            )
+
         model_slug = _model_slug(args.model)
-        off_model_label = f"wevibe-off-{model_slug}"
-        on_model_label = f"wevibe-on-{model_slug}"
 
         runner = SWEContextBenchRunner(
             dataset_dir=DEFAULT_DATASET_DIR,
@@ -511,9 +607,11 @@ def run(args: argparse.Namespace) -> int:
             cost_limit_usd=args.cost_limit,
             repo_cache_dir=out_root / "repo-cache",
             docker_solve=args.docker_solve,
+            producer_system_template=producer_system_template,
+            capture_transcript_dir=capture_transcript_dir,
         )
 
-        on_backend = WeVibeBackend(cfg) if "on" in conditions else None
+        on_backend = WeVibeBackend(cfg) if any(_is_on_condition(condition) for condition in conditions) else None
 
         failures: list[str] = []
         total = len(instances)
@@ -527,50 +625,28 @@ def run(args: argparse.Namespace) -> int:
                 logger.log(f"[solve] {iid} start edge_seeded={edge_seeded} ({index}/{total})")
                 need = runner.build_need_card(iid)
 
-                if "off" in conditions:
-                    if args.resume and _condition_done(checkpoint, iid, "off"):
-                        logger.log(f"[solve off] {iid} skip resume=already_done")
-                    else:
-                        result_off = runner.solve_instance(iid, [])
-                        off_pred_path = _prediction_path(preds_off_dir, iid)
-                        off_telemetry_path = _telemetry_path(telemetry_dir, "off", iid)
+                for condition in conditions:
+                    if args.resume and _condition_done(checkpoint, iid, condition):
+                        logger.log(f"[solve {condition}] {iid} skip resume=already_done")
+                        continue
 
-                        write_prediction(iid, off_model_label, result_off.patch, off_pred_path)
-                        off_telemetry = {
-                            "iid": iid,
-                            "condition": "off",
-                            "input_tokens": result_off.input_tokens,
-                            "output_tokens": result_off.output_tokens,
-                            "turns": result_off.turns,
-                            "wall_cost_usd": result_off.wall_cost_usd,
-                            "wall_seconds": result_off.wall_seconds,
-                            "delivery": "N/A",
-                            "model": result_off.model,
-                            "memory_cids": [],
-                            "agent_status": result_off.agent_status,
-                        }
-                        _write_json_atomic(off_telemetry_path, off_telemetry)
+                    delivery = "N/A"
+                    memory_cids: list[str] = []
+                    injected: list[RecalledMemory] = []
+                    session_id: str | None = None
+                    arm_org: str | None = None
 
-                        checkpoint.setdefault(iid, {})["off"] = True
-                        _write_json_atomic(checkpoint_path, checkpoint)
-
-                        logger.log(
-                            f"[solve off] {iid} patch_len={_patch_len_bytes(result_off.patch)} "
-                            f"in={result_off.input_tokens} out={result_off.output_tokens} "
-                            f"turns={result_off.turns} cost={result_off.wall_cost_usd:.6f} "
-                            f"agent_status={result_off.agent_status}"
-                        )
-
-                if "on" in conditions:
-                    if args.resume and _condition_done(checkpoint, iid, "on"):
-                        logger.log(f"[solve on] {iid} skip resume=already_done")
-                    else:
+                    if _is_on_condition(condition):
                         if on_backend is None:
                             raise RuntimeError("ON backend not initialized")
 
-                        on_backend.prime_session(f"swecb-{iid}")
-                        recall_result = on_backend.recall(need, cfg)
+                        session_id = f"swecb-{cfg.run_label or args.run_label}-{condition}-{iid}"
+                        arm_org = cfg.arm_org_map.get(condition) or cfg.org_id
+
+                        on_backend.prime_session(session_id)
+                        recall_result = on_backend.recall(need, cfg, org_id=arm_org)
                         verdict = on_backend.verify_delivery(recall_result)
+                        delivery = verdict.value
 
                         top_memory = recall_result.memories[0] if recall_result.memories else None
                         top_cid = str(top_memory.cid) if (top_memory and top_memory.cid is not None) else "none"
@@ -578,46 +654,58 @@ def run(args: argparse.Namespace) -> int:
                         reason = recall_result.reason_code or "none"
 
                         logger.log(
-                            f"[recall on] {iid} edge_seeded={edge_seeded} delivery={verdict.value} "
+                            f"[recall {condition}] {iid} edge_seeded={edge_seeded} delivery={verdict.value} "
                             f"n_mem={len(recall_result.memories)} reason={reason} "
-                            f"top_cid={top_cid} top_fp={top_fp}"
+                            f"top_cid={top_cid} top_fp={top_fp} arm_org={arm_org} session_id={session_id}"
                         )
 
-                        injected: list[RecalledMemory]
                         if verdict == DeliveryVerdict.YES:
                             injected = recall_result.memories
-                        else:
-                            injected = []
-
-                        result_on = runner.solve_instance(iid, injected)
-                        on_pred_path = _prediction_path(preds_on_dir, iid)
-                        on_telemetry_path = _telemetry_path(telemetry_dir, "on", iid)
                         memory_cids = [memory.cid for memory in recall_result.memories if memory.has_content()]
 
-                        write_prediction(iid, on_model_label, result_on.patch, on_pred_path)
-                        on_telemetry = {
-                            "iid": iid,
-                            "condition": "on",
-                            "input_tokens": result_on.input_tokens,
-                            "output_tokens": result_on.output_tokens,
-                            "turns": result_on.turns,
-                            "wall_cost_usd": result_on.wall_cost_usd,
-                            "wall_seconds": result_on.wall_seconds,
-                            "delivery": verdict.value,
-                            "model": result_on.model,
-                            "memory_cids": memory_cids,
-                            "agent_status": result_on.agent_status,
-                        }
-                        _write_json_atomic(on_telemetry_path, on_telemetry)
+                    result = runner.solve_instance(iid, injected)
+                    pred_dir = _preds_dir_for_condition(out_root, condition)
+                    pred_path = _prediction_path(pred_dir, iid)
+                    telemetry_path = _telemetry_path(telemetry_dir, condition, iid)
+                    model_label = _model_label_for_condition(condition, model_slug)
 
-                        checkpoint.setdefault(iid, {})["on"] = True
-                        _write_json_atomic(checkpoint_path, checkpoint)
+                    write_prediction(iid, model_label, result.patch, pred_path)
 
+                    telemetry: dict[str, Any] = {
+                        "iid": iid,
+                        "condition": condition,
+                        "input_tokens": result.input_tokens,
+                        "output_tokens": result.output_tokens,
+                        "turns": result.turns,
+                        "wall_cost_usd": result.wall_cost_usd,
+                        "wall_seconds": result.wall_seconds,
+                        "delivery": delivery,
+                        "model": result.model,
+                        "memory_cids": memory_cids,
+                        "agent_status": result.agent_status,
+                    }
+                    if _is_on_condition(condition):
+                        telemetry["arm_org"] = arm_org
+                        telemetry["session_id"] = session_id
+                    _write_json_atomic(telemetry_path, telemetry)
+
+                    checkpoint.setdefault(iid, {})[condition] = True
+                    _write_json_atomic(checkpoint_path, checkpoint)
+
+                    if condition == "off":
                         logger.log(
-                            f"[solve on] {iid} delivery={verdict.value} patch_len={_patch_len_bytes(result_on.patch)} "
-                            f"in={result_on.input_tokens} out={result_on.output_tokens} "
-                            f"turns={result_on.turns} cost={result_on.wall_cost_usd:.6f} "
-                            f"injected_mem={len(injected)} agent_status={result_on.agent_status}"
+                            f"[solve off] {iid} patch_len={_patch_len_bytes(result.patch)} "
+                            f"in={result.input_tokens} out={result.output_tokens} "
+                            f"turns={result.turns} cost={result.wall_cost_usd:.6f} "
+                            f"agent_status={result.agent_status}"
+                        )
+                    else:
+                        logger.log(
+                            f"[solve {condition}] {iid} delivery={delivery} "
+                            f"patch_len={_patch_len_bytes(result.patch)} "
+                            f"in={result.input_tokens} out={result.output_tokens} "
+                            f"turns={result.turns} cost={result.wall_cost_usd:.6f} "
+                            f"injected_mem={len(injected)} agent_status={result.agent_status}"
                         )
 
                 logger.log(f"[solve] {iid} done ({index}/{total})")
@@ -645,7 +733,7 @@ def run(args: argparse.Namespace) -> int:
             logger.log(
                 f"[summary] {condition} cells_done={done_per_condition.get(condition, 0)}/{len(instances)}"
             )
-        if "on" in conditions:
+        if any(_is_on_condition(condition) for condition in conditions):
             logger.log(f"[summary] on_delivery YES={on_yes} not_yes={on_not_yes}")
         logger.log(f"[summary] total_cost_usd={total_cost:.6f}")
 
@@ -669,7 +757,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Resumable SWEContextBench OFF/ON solve driver")
+    parser = argparse.ArgumentParser(description="Resumable SWEContextBench OFF/ON* solve driver")
 
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--instances", type=str, help="Comma-separated list of instance IDs")
@@ -698,6 +786,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run solve agent against host checkout instead of Docker testbed image",
     )
     parser.add_argument("--conditions", type=str, default="off,on")
+    parser.add_argument(
+        "--producer-prompt",
+        type=str,
+        help=(
+            "Path to producer system prompt template (SEEDING ONLY). "
+            "Rejected for measured ON* arms."
+        ),
+    )
+    parser.add_argument(
+        "--capture-transcript-dir",
+        type=str,
+        help="Directory where solve transcripts are captured as <iid>.jsonl",
+    )
+    parser.add_argument(
+        "--arm-org",
+        action="append",
+        default=[],
+        help="Per-arm org override in arm=org form (repeatable)",
+    )
     parser.add_argument("--recall-url", type=str, default=DEFAULT_RECALL_URL)
     parser.add_argument("--org-id", type=str, default=DEFAULT_ORG_ID)
     parser.add_argument(

@@ -291,6 +291,62 @@ def build_compact_transcript(path: Path, max_chars: int) -> dict[str, Any]:
     }
 
 
+def build_compact_transcript_mini(path: Path, max_chars: int) -> dict[str, Any]:
+    if max_chars <= 0:
+        raise RuntimeError("--max-transcript-chars must be > 0")
+
+    entries = _load_transcript_entries(path)
+    summary: str | None = None
+    first_user: str | None = None
+
+    sections: list[str] = []
+    assistant_sections: list[str] = []
+    for entry in entries:
+        if entry.get("type") == "meta":
+            continue
+
+        role_raw = entry.get("role")
+        if not isinstance(role_raw, str) or not role_raw.strip():
+            raise RuntimeError(f"mini transcript entry missing role in {path}")
+        role = role_raw.strip().lower()
+
+        turn = entry.get("turn")
+        turn_label = str(turn) if isinstance(turn, int) else "?"
+
+        content_raw = entry.get("content")
+        content = content_raw if isinstance(content_raw, str) else _content_text(content_raw)
+
+        section = f"\n=== {role.upper()} (turn {turn_label}) ===\n{content}"
+        sections.append(section)
+        if role == "assistant":
+            assistant_sections.append(section)
+        if role == "user" and first_user is None:
+            first_user = content.strip()
+
+    if not sections:
+        raise RuntimeError(f"mini transcript has no message entries: {path}")
+
+    full_compact = "".join(sections).lstrip("\n")
+    if len(full_compact) <= max_chars:
+        compact = full_compact
+    else:
+        assistant_compact = "".join(assistant_sections).lstrip("\n")
+        if assistant_compact:
+            compact = assistant_compact if len(assistant_compact) <= max_chars else _truncate(assistant_compact, max_chars)
+        else:
+            compact = _truncate(full_compact, max_chars)
+
+    first_user_text = first_user or ""
+    repo = _extract_repo_slug(first_user_text) if first_user_text else None
+    return {
+        "transcript": compact,
+        "summary": summary,
+        "first_user": first_user_text,
+        "repo": repo,
+        "chars": len(compact),
+    }
+
+
 def _load_experience_ids(path: Path) -> list[str]:
     if not path.is_file():
         raise RuntimeError(f"--experiences file not found: {path}")
@@ -362,6 +418,25 @@ def _index_transcript_files(transcript_dir: Path) -> dict[str, list[Path]]:
     return index
 
 
+def _index_transcript_files_mini(transcript_dir: Path) -> dict[str, Path]:
+    if not transcript_dir.is_dir():
+        raise RuntimeError(f"--transcript-dir not found: {transcript_dir}")
+
+    index: dict[str, Path] = {}
+    for path in sorted(transcript_dir.rglob("*.jsonl")):
+        instance_id = path.stem.strip()
+        if not instance_id:
+            continue
+        existing = index.get(instance_id)
+        if existing is not None:
+            raise RuntimeError(
+                f"multiple mini transcript files found for id={instance_id!r}: {existing}, {path}"
+            )
+        index[instance_id] = path
+
+    return index
+
+
 def _find_transcript_file(index: dict[str, list[Path]], experience_id: str) -> Path:
     matches = index.get(experience_id, [])
     if len(matches) == 1:
@@ -370,6 +445,13 @@ def _find_transcript_file(index: dict[str, list[Path]], experience_id: str) -> P
         raise RuntimeError(f"no transcript file found for id={experience_id!r}")
     joined = ", ".join(str(path) for path in matches)
     raise RuntimeError(f"multiple transcript files found for id={experience_id!r}: {joined}")
+
+
+def _find_transcript_file_mini(index: dict[str, Path], experience_id: str) -> Path:
+    match = index.get(experience_id)
+    if match is not None:
+        return match
+    raise RuntimeError(f"no transcript file found for id={experience_id!r}")
 
 
 def _load_openrouter_key(path: Path) -> str:
@@ -666,6 +748,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Directory containing SWEContextBench past-experience JSONL transcripts.",
     )
     parser.add_argument(
+        "--transcript-format",
+        choices=("claude", "mini"),
+        default="claude",
+        help="Transcript JSONL schema: 'claude' (legacy Claude-Code) or 'mini' (WeVibe seed-producer).",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default=DEFAULT_MODEL,
@@ -754,7 +842,12 @@ def main() -> int:
         ),
     )
 
-    transcript_index = _index_transcript_files(transcript_dir)
+    transcript_index: dict[str, list[Path]] | None = None
+    transcript_index_mini: dict[str, Path] | None = None
+    if args.transcript_format == "mini":
+        transcript_index_mini = _index_transcript_files_mini(transcript_dir)
+    else:
+        transcript_index = _index_transcript_files(transcript_dir)
     memories_by_id = _load_resume_memories(
         resume=args.resume,
         topic=args.topic,
@@ -809,8 +902,16 @@ def main() -> int:
                 continue
 
             try:
-                transcript_file = _find_transcript_file(transcript_index, experience_id)
-                compact = build_compact_transcript(transcript_file, args.max_transcript_chars)
+                if args.transcript_format == "mini":
+                    if transcript_index_mini is None:
+                        raise RuntimeError("internal error: mini transcript index not initialized")
+                    transcript_file = _find_transcript_file_mini(transcript_index_mini, experience_id)
+                    compact = build_compact_transcript_mini(transcript_file, args.max_transcript_chars)
+                else:
+                    if transcript_index is None:
+                        raise RuntimeError("internal error: transcript index not initialized")
+                    transcript_file = _find_transcript_file(transcript_index, experience_id)
+                    compact = build_compact_transcript(transcript_file, args.max_transcript_chars)
                 compact_text = str(compact["transcript"])
                 transcript_chars = len(compact_text)
                 repo = compact.get("repo") if isinstance(compact.get("repo"), str) else None

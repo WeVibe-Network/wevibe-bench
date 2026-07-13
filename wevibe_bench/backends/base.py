@@ -85,23 +85,30 @@ class NeedCard:
             return "unknown"
         return ". ".join(dense_segments)
 
-    def to_wire(self, cfg: RunConfig, session_id: str) -> dict:
+    def to_wire(self, cfg: RunConfig, session_id: str, org_id: str | None = None) -> dict:
         """Build the probe wire body with MC-1 envelope while keeping INV-6 digest client-only.
 
         NOTE (INV-6): `prompt_digest` is intentionally not a wire field. The server derives its
         dense query from intent+task; this method sends flat harvest fields + envelope only.
         """
 
+        resolved_org_id = org_id or cfg.org_id
+        recall_limit = (
+            max(cfg.surface_budget, cfg.deterministic_recall_limit)
+            if cfg.deterministic_topn
+            else cfg.surface_budget
+        )
+
         wire: dict[str, Any] = {
             "query": self.query,
             "intent": self.intent,
             "task": self.task,
-            "org_id": cfg.org_id,
+            "org_id": resolved_org_id,
             "mc_version": cfg.mc_version,
             "session_id": session_id,
             "relevance_floor": cfg.relevance_floor(),
             "surface_budget": cfg.surface_budget,
-            "limit": cfg.surface_budget,
+            "limit": recall_limit,
         }
 
         if self.language:
@@ -142,7 +149,7 @@ class MemoryBackend(abc.ABC):
     def prime_session(self, session_id: str) -> None: ...
 
     @abc.abstractmethod
-    def recall(self, need: NeedCard, cfg: RunConfig) -> RecallResult: ...
+    def recall(self, need: NeedCard, cfg: RunConfig, org_id: str | None = None) -> RecallResult: ...
 
     @abc.abstractmethod
     def verify_delivery(self, result: RecallResult) -> DeliveryVerdict: ...

@@ -14,6 +14,7 @@ containerized SWEContextBench evaluation stage.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,56 @@ _DOCKER_SOLVE_ENV = {
     "TQDM_DISABLE": "1",
     "BASH_ENV": "/root/.bashrc",
 }
+_PATCH_MARKERS = ("<WEVIBE_FORK", "</WEVIBE_FORK>", "<WEVIBE_INDEX", "</WEVIBE_INDEX>")
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+
+
+def _normalize_fail_to_pass(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, str):
+        if not raw.strip():
+            return []
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(decoded, list):
+            values = decoded
+        elif decoded in (None, ""):
+            return []
+        else:
+            values = [decoded]
+    else:
+        return []
+
+    normalized: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _paths_from_patch(patch: str) -> list[str]:
+    if not patch:
+        return []
+
+    seen: set[str] = set()
+    paths: list[str] = []
+    for line in patch.splitlines():
+        match = _DIFF_GIT_HEADER_RE.match(line)
+        if match is None:
+            continue
+
+        path = match.group(2).strip()
+        if not path or path in seen:
+            continue
+
+        seen.add(path)
+        paths.append(path)
+
+    return paths
 
 
 @dataclass(frozen=True)
@@ -70,6 +121,8 @@ class SWEContextBenchRunner(AgentRunner):
         cost_limit_usd: float = 1.0,
         repo_cache_dir: Path | None = None,
         docker_solve: bool = True,
+        producer_system_template: str | None = None,
+        capture_transcript_dir: str | Path | None = None,
     ) -> None:
         self.dataset_dir = Path(dataset_dir).expanduser()
         self.work_root = Path(work_root).expanduser() if work_root is not None else None
@@ -89,15 +142,23 @@ class SWEContextBenchRunner(AgentRunner):
         self._instance_template = str(agent_cfg.get("instance_template", "Please solve this issue: {{task}}"))
         self._env_vars = dict(env_cfg.get("env", {})) if isinstance(env_cfg, dict) else {}
         self._model_config = dict(model_cfg) if isinstance(model_cfg, dict) else {}
+        if isinstance(producer_system_template, str) and producer_system_template:
+            self._system_template = producer_system_template
+        self._capture_transcript_dir = Path(capture_transcript_dir).expanduser() if capture_transcript_dir else None
 
     def build_need_card(self, instance_id: str) -> NeedCard:
         instance = self._instance(instance_id)
         repo_short = self._repo_short_name(str(instance["repo"]))
+        fail_to_pass = _normalize_fail_to_pass(instance.get("FAIL_TO_PASS"))
+        test_patch_raw = instance.get("test_patch")
+        test_patch = test_patch_raw if isinstance(test_patch_raw, str) else ""
         return NeedCard(
             intent="fix",
             task=str(instance["problem_statement"]),
             language="python",
             stack=[repo_short, "python"],
+            error_strings=fail_to_pass,
+            files=_paths_from_patch(test_patch),
             project_name=repo_short,
         )
 
@@ -185,6 +246,18 @@ class SWEContextBenchRunner(AgentRunner):
                     f"[swecb] agent_error instance={instance_id} type={type(run_error).__name__} msg={run_error}",
                     flush=True,
                 )
+
+            if self._capture_transcript_dir is not None:
+                marker_clean = self._scan_patch_for_markers(patch)
+                print(f"[capture] patch marker_clean={marker_clean} iid={instance_id}", flush=True)
+                if not marker_clean:
+                    offending_marker = self._first_patch_marker(patch)
+                    print(
+                        "[swecb][error] [capture] patch marker_clean=False "
+                        f"iid={instance_id} marker={offending_marker or 'unknown'}",
+                        flush=True,
+                    )
+                self._capture_transcript(instance_id=instance_id, model_name=selected_model, messages=agent.messages)
 
             print(
                 "[swecb] diff_ready "
@@ -499,6 +572,89 @@ class SWEContextBenchRunner(AgentRunner):
         # count, which `git apply` rejects as "corrupt patch" (rc=128).
         patch = normalized[start:].rstrip("\n")
         return f"{patch}\n" if patch else ""
+
+    @staticmethod
+    def _scan_patch_for_markers(patch: str) -> bool:
+        return not any(marker in patch for marker in _PATCH_MARKERS)
+
+    @staticmethod
+    def _first_patch_marker(patch: str) -> str:
+        for marker in _PATCH_MARKERS:
+            if marker in patch:
+                return marker
+        return ""
+
+    def _capture_transcript(self, *, instance_id: str, model_name: str, messages: list[dict[str, Any]]) -> None:
+        if self._capture_transcript_dir is None:
+            return
+
+        capture_dir = self._capture_transcript_dir
+        capture_dir.mkdir(parents=True, exist_ok=True)
+
+        producer_fp = hashlib.sha256(self._system_template.encode("utf-8", errors="replace")).hexdigest()[:8]
+        transcript_path = capture_dir / f"{instance_id}.jsonl"
+        with transcript_path.open("w", encoding="utf-8", errors="replace") as handle:
+            meta = {
+                "instance_id": instance_id,
+                "type": "meta",
+                "producer_prompt_fp": producer_fp,
+                "model": model_name,
+            }
+            handle.write(json.dumps(meta, ensure_ascii=False) + "\n")
+            for turn, message in enumerate(messages):
+                role, content = self._message_role_and_content(message)
+                row = {
+                    "instance_id": instance_id,
+                    "role": role,
+                    "content": content,
+                    "turn": turn,
+                }
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        print(
+            f"[capture] wrote transcript iid={instance_id} turns={len(messages)} "
+            f"path={transcript_path} producer_fp={producer_fp}",
+            flush=True,
+        )
+
+    @staticmethod
+    def _message_role_and_content(message: dict[str, Any]) -> tuple[str, str]:
+        if not isinstance(message, dict):
+            return "unknown", str(message)
+
+        role = message.get("role")
+        role_text = role if isinstance(role, str) else str(role) if role is not None else "unknown"
+        return role_text, SWEContextBenchRunner._message_content_as_text(message.get("content"))
+
+    @staticmethod
+    def _message_content_as_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+            nested = content.get("content")
+            if isinstance(nested, str):
+                return nested
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                    continue
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                        continue
+                    nested = block.get("content")
+                    if isinstance(nested, str):
+                        parts.append(nested)
+            return "".join(parts)
+        if content is None:
+            return ""
+        return str(content)
 
     @staticmethod
     def _sum_token_usage(messages: list[dict[str, Any]]) -> tuple[int, int]:

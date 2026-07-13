@@ -20,6 +20,7 @@ import sys
 from wevibe_bench.backends.base import NeedCard
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
 from wevibe_bench.config import RunConfig
+from wevibe_bench.preflight import preflight
 
 
 def _setup_logging(log_path: str) -> logging.Logger:
@@ -48,8 +49,21 @@ def main() -> int:
     log.info("=== LIVE recall smoke START ts=%s log=%s", ts, log_path)
 
     # Point explicitly at localhost:4450 (task); other defaults already correct.
-    cfg = RunConfig(hub_url="http://localhost:4450")
+    cfg = RunConfig(mcp_recall_url="http://localhost:4450")
     log.info("config manifest: %s", json.dumps(cfg.to_dict()))
+
+    # MANDATORY two-tier preflight: fail loud if the hub or mcp recall tier is down,
+    # so we never mistake "mcp/clone down" for "hub down" (never build our own infra).
+    log.info(
+        ">>> preflight: verifying hub (:4440 /health) + mcp recall (%s /v1/health) ...",
+        cfg.mcp_recall_url,
+    )
+    preflight(
+        hub_url=cfg.hub_url,
+        mcp_recall_url=cfg.mcp_recall_url,
+        session_token_path=cfg.session_token_path,
+        logger=log,
+    )
 
     token_path = os.path.expanduser(cfg.session_token_path)
     token_present = os.path.isfile(token_path) and bool(open(token_path).read().strip())
@@ -74,7 +88,7 @@ def main() -> int:
     wire = need.to_wire(cfg, session_id)
     log.info(
         "request wire url=%s/v1/recall org_id=%s fields=%s relevance_floor=%s surface_budget=%s query_len=%d task_len=%d",
-        cfg.hub_url,
+        cfg.mcp_recall_url,
         wire.get("org_id"),
         sorted(wire.keys()),
         wire.get("relevance_floor"),

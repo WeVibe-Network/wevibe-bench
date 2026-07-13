@@ -10,7 +10,7 @@ def _cfg(*, seed: int = 1234) -> RunConfig:
     return RunConfig(
         model_ladder=("model-x",),
         rng_seed=seed,
-        hub_url="http://offline.local",
+        mcp_recall_url="http://offline.local",
         session_token_path="/tmp/__wevibe_bench_missing_token__",
     )
 

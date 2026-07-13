@@ -201,12 +201,13 @@ class WeVibeBackend(MemoryBackend):
             text_lengths,
         )
 
-    def recall(self, need: NeedCard, cfg: RunConfig) -> RecallResult:
+    def recall(self, need: NeedCard, cfg: RunConfig, org_id: str | None = None) -> RecallResult:
         """Call live `/v1/recall` and normalize transport/result into RecallResult."""
 
         trace_suffix = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}"
         trace_id = f"bench-{trace_suffix}"
         session_id = self._session_id or f"bench-{trace_suffix}"
+        resolved_org_id = org_id or cfg.org_id
 
         token = self._read_token(cfg)
         headers = {
@@ -214,8 +215,8 @@ class WeVibeBackend(MemoryBackend):
             "Content-Type": "application/json",
             "X-WeVibe-Trace-Id": trace_id,
         }
-        body = need.to_wire(cfg, session_id)
-        url = f"{cfg.hub_url}/v1/recall"
+        body = need.to_wire(cfg, session_id, org_id=resolved_org_id)
+        url = f"{cfg.mcp_recall_url}/v1/recall"
 
         try:
             http_status, response_json, reachable = self._transport(url, headers, body)
@@ -259,8 +260,31 @@ class WeVibeBackend(MemoryBackend):
         status = status_value if isinstance(status_value, str) and status_value else "ok"
         reason_code = _to_str(response.get("reason_code"))
 
+        memories = self._build_memories(response)
+        if cfg.deterministic_topn:
+            ranked_memories: list[tuple[RecalledMemory, float | None]] = []
+            for memory in memories:
+                # `combined_score` is the preferred ranking score; when absent, use top-level `score`.
+                rank_score = memory.combined_score if memory.combined_score is not None else memory.score
+                ranked_memories.append((memory, rank_score))
+
+            ranked_memories.sort(
+                key=lambda item: (
+                    -(item[1] if item[1] is not None else float("-inf")),
+                    item[0].cid or "",
+                )
+            )
+            ranked_memories = ranked_memories[: cfg.surface_budget]
+            memories = [memory for memory, _ in ranked_memories]
+            LOGGER.info(
+                "[recall] deterministic top-N selected n=%d cids=%s scores=%s",
+                len(memories),
+                ",".join((memory.cid or "") for memory in memories),
+                ",".join("None" if score is None else str(score) for _, score in ranked_memories),
+            )
+
         result = RecallResult(
-            memories=self._build_memories(response),
+            memories=memories,
             status=status,
             reason_code=reason_code,
             reachable=True,

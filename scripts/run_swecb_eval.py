@@ -8,7 +8,7 @@ This script has two modes:
    checkpointed independently and resume-safe.
 
 2) Assembly mode (--assemble):
-   Joins OFF/ON evaluation checkpoints with per-instance telemetry into a
+   Joins per-arm evaluation checkpoints with per-instance telemetry into a
    `wevibe_bench.scorecard.Scorecard` JSON artifact.
 """
 
@@ -472,6 +472,26 @@ def _load_telemetry(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _parse_arm_checkpoint_specs(specs: list[str]) -> dict[str, Path]:
+    arm_checkpoints: dict[str, Path] = {}
+    for raw_spec in specs:
+        arm_raw, separator, path_raw = raw_spec.partition("=")
+        arm = arm_raw.strip().lower()
+        path_str = path_raw.strip()
+
+        if not separator or not arm or not path_str:
+            raise ValueError(
+                "invalid --arm-checkpoint entry (expected arm=path): "
+                f"{raw_spec!r}"
+            )
+        if arm in arm_checkpoints:
+            raise ValueError(f"duplicate --arm-checkpoint arm: {arm}")
+
+        arm_checkpoints[arm] = _safe_path(path_str)
+
+    return arm_checkpoints
+
+
 def _cell_from_records(
     *,
     model: str,
@@ -485,6 +505,8 @@ def _cell_from_records(
     if telemetry is None:
         return None
 
+    condition_label = condition.strip().upper()
+
     resolved = bool(verdict_entry["resolved"])
     input_tokens = _to_int(telemetry.get("input_tokens"), default=0)
     output_tokens = _to_int(telemetry.get("output_tokens"), default=0)
@@ -492,20 +514,22 @@ def _cell_from_records(
     wall_cost_usd = _to_float(telemetry.get("wall_cost_usd"), default=0.0)
     wall_seconds = _to_float(telemetry.get("wall_seconds"), default=0.0)
 
-    if condition == "OFF":
+    if condition_label == "OFF":
         delivery = "N/A"
         scored = True
         not_scored_reason = None
-    else:
+    elif condition_label.startswith("ON"):
         delivery_raw = telemetry.get("delivery")
         delivery = str(delivery_raw) if delivery_raw is not None else "UNKNOWN"
         scored = delivery == "YES"
         not_scored_reason = None if scored else f"delivery={delivery}"
+    else:
+        raise ValueError(f"unsupported condition for scorecard assembly: {condition!r}")
 
     return Cell(
         model=model,
         task_id=instance_id,
-        condition=condition,
+        condition=condition_label,
         resolved=resolved,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -520,55 +544,50 @@ def _cell_from_records(
 
 def assemble_scorecard(
     *,
-    off_checkpoint: Path,
-    on_checkpoint: Path,
+    arm_checkpoints: dict[str, Path],
     telemetry_dir: Path,
     model: str,
     output_path: Path,
 ) -> Scorecard:
-    off_data = _load_checkpoint(off_checkpoint)
-    on_data = _load_checkpoint(on_checkpoint)
+    if not arm_checkpoints:
+        raise ValueError("at least one arm checkpoint is required")
+
+    checkpoints_by_arm: dict[str, dict[str, dict[str, Any]]] = {
+        arm: _load_checkpoint(path)
+        for arm, path in sorted(arm_checkpoints.items(), key=lambda item: item[0])
+    }
 
     cfg = RunConfig()
     scorecard = Scorecard(cfg)
 
-    all_iids = sorted(set(off_data.keys()) | set(on_data.keys()))
+    all_iids = sorted(
+        {
+            iid
+            for arm_data in checkpoints_by_arm.values()
+            for iid in arm_data.keys()
+        }
+    )
 
     for iid in all_iids:
-        off_telemetry_path = telemetry_dir / f"off_{iid}.json"
-        on_telemetry_path = telemetry_dir / f"on_{iid}.json"
+        for arm, checkpoint_data in checkpoints_by_arm.items():
+            arm_label = arm.upper()
+            telemetry_path = telemetry_dir / f"{arm}_{iid}.json"
+            telemetry = _load_telemetry(telemetry_path)
 
-        off_telemetry = _load_telemetry(off_telemetry_path)
-        on_telemetry = _load_telemetry(on_telemetry_path)
+            if telemetry is None:
+                print(f"[assemble] missing telemetry: {telemetry_path}", flush=True)
 
-        if off_telemetry is None:
-            print(f"[assemble] missing telemetry: {off_telemetry_path}", flush=True)
-        if on_telemetry is None:
-            print(f"[assemble] missing telemetry: {on_telemetry_path}", flush=True)
-
-        off_cell = _cell_from_records(
-            model=model,
-            instance_id=iid,
-            condition="OFF",
-            verdict_entry=off_data.get(iid),
-            telemetry=off_telemetry,
-        )
-        if off_cell is None:
-            print(f"[assemble] skipped OFF cell for {iid}", flush=True)
-        else:
-            scorecard.add_cell(off_cell)
-
-        on_cell = _cell_from_records(
-            model=model,
-            instance_id=iid,
-            condition="ON",
-            verdict_entry=on_data.get(iid),
-            telemetry=on_telemetry,
-        )
-        if on_cell is None:
-            print(f"[assemble] skipped ON cell for {iid}", flush=True)
-        else:
-            scorecard.add_cell(on_cell)
+            cell = _cell_from_records(
+                model=model,
+                instance_id=iid,
+                condition=arm,
+                verdict_entry=checkpoint_data.get(iid),
+                telemetry=telemetry,
+            )
+            if cell is None:
+                print(f"[assemble] skipped {arm_label} cell for {iid}", flush=True)
+            else:
+                scorecard.add_cell(cell)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(scorecard.to_json(), encoding="utf-8")
@@ -579,46 +598,69 @@ def assemble_scorecard(
 def run_assemble_mode(args: argparse.Namespace) -> int:
     run_root = DEFAULT_SWECB_RUNS_ROOT / args.run_label
 
-    off_checkpoint = _safe_path(args.off_checkpoint) if args.off_checkpoint else run_root / "eval_checkpoint_off.json"
-    on_checkpoint = _safe_path(args.on_checkpoint) if args.on_checkpoint else run_root / "eval_checkpoint_on.json"
+    if args.arm_checkpoint:
+        if args.off_checkpoint or args.on_checkpoint:
+            print(
+                "[assemble] --arm-checkpoint provided; ignoring --off-checkpoint/--on-checkpoint",
+                flush=True,
+            )
+        arm_checkpoints = _parse_arm_checkpoint_specs(args.arm_checkpoint)
+    else:
+        off_checkpoint = _safe_path(args.off_checkpoint) if args.off_checkpoint else run_root / "eval_checkpoint_off.json"
+        on_checkpoint = _safe_path(args.on_checkpoint) if args.on_checkpoint else run_root / "eval_checkpoint_on.json"
+        arm_checkpoints = {
+            "off": off_checkpoint,
+            "on": on_checkpoint,
+        }
+
     telemetry_dir = _safe_path(args.telemetry_dir) if args.telemetry_dir else run_root / "telemetry"
     output_path = _safe_path(args.scorecard_out) if args.scorecard_out else run_root / "scorecard.json"
 
     scorecard = assemble_scorecard(
-        off_checkpoint=off_checkpoint,
-        on_checkpoint=on_checkpoint,
+        arm_checkpoints=arm_checkpoints,
         telemetry_dir=telemetry_dir,
         model=args.model,
         output_path=output_path,
     )
 
-    model_diffs = scorecard.model_diffs()
-    diff = next((d for d in model_diffs if d.model == args.model), None)
-    if diff is None and model_diffs:
-        diff = model_diffs[0]
+    model_diffs = [diff for diff in scorecard.model_diffs() if diff.model == args.model]
 
     off_cells = [c for c in scorecard.cells if c.condition == "OFF" and c.model == args.model]
-    on_cells = [c for c in scorecard.cells if c.condition == "ON" and c.model == args.model]
-    on_scored = [c for c in on_cells if c.scored]
 
     off_resolved = sum(1 for c in off_cells if c.resolved)
-    on_resolved_scored = sum(1 for c in on_scored if c.resolved)
-    on_delivery_yes = sum(1 for c in on_cells if c.delivery == "YES")
 
     print("[assemble] scorecard written: " + str(output_path), flush=True)
     print(f"[assemble] OFF resolved {off_resolved}/{len(off_cells)}", flush=True)
-    print(f"[assemble] ON resolved {on_resolved_scored}/{len(on_scored)} (scored)", flush=True)
 
-    if diff is not None:
-        print(f"[assemble] capability_lift_pp {diff.capability_lift_pp:.2f}", flush=True)
+    if not model_diffs:
+        print("[assemble] no model_diff available (no complete cell set)", flush=True)
+        return 0
+
+    for diff in model_diffs:
+        on_cells = [
+            c for c in scorecard.cells if c.condition == diff.on_condition and c.model == args.model
+        ]
+        on_scored = [c for c in on_cells if c.scored]
+        on_resolved_scored = sum(1 for c in on_scored if c.resolved)
+        on_delivery_yes = sum(1 for c in on_cells if c.delivery == "YES")
+
         print(
-            f"[assemble] tokens OFF vs ON {diff.off_total_tokens} vs {diff.on_total_tokens}",
+            f"[assemble] {diff.on_condition} resolved {on_resolved_scored}/{len(on_scored)} (scored)",
             flush=True,
         )
-    else:
-        print("[assemble] no model_diff available (no complete cell set)", flush=True)
+        print(
+            f"[assemble] capability_lift_pp ({diff.on_condition} vs OFF) {diff.capability_lift_pp:.2f}",
+            flush=True,
+        )
+        print(
+            f"[assemble] tokens OFF vs {diff.on_condition} {diff.off_total_tokens} vs {diff.on_total_tokens}",
+            flush=True,
+        )
+        print(
+            f"[assemble] {diff.on_condition} delivery=YES count {on_delivery_yes}",
+            flush=True,
+        )
 
-    print(f"[assemble] ON delivery=YES count {on_delivery_yes}", flush=True)
     return 0
 
 
@@ -629,7 +671,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Evaluation mode args.
     parser.add_argument("--predictions-dir", type=str, help="Directory containing <iid>_preds.json files")
-    parser.add_argument("--condition", choices=("off", "on"), help="Ablation condition")
+    parser.add_argument(
+        "--condition",
+        choices=("off", "on", "on_reasoning", "on_discovery"),
+        help="Ablation condition",
+    )
     parser.add_argument("--run-label", type=str, required=True, help="Run label used for output roots")
     parser.add_argument(
         "--swecb-dir",
@@ -655,6 +701,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Assembly mode args.
+    parser.add_argument(
+        "--arm-checkpoint",
+        action="append",
+        help=(
+            "Repeatable arm checkpoint spec (arm=path). "
+            "Supersedes --off-checkpoint/--on-checkpoint when provided."
+        ),
+    )
     parser.add_argument("--off-checkpoint", type=str, help="OFF checkpoint JSON path")
     parser.add_argument("--on-checkpoint", type=str, help="ON checkpoint JSON path")
     parser.add_argument("--telemetry-dir", type=str, help="Telemetry directory path")

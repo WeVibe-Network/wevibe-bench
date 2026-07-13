@@ -18,6 +18,7 @@ import sys
 from wevibe_bench.adapters.aider_polyglot import AiderPolyglotRunner
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
 from wevibe_bench.config import RunConfig
+from wevibe_bench.preflight import preflight
 from wevibe_bench.runner import run_ablation
 from wevibe_bench.scorecard import Cell, ModelDiff, Scorecard
 
@@ -241,7 +242,13 @@ def main() -> int:
         model_ladder=(model_slug,),
         tau=0.68,
         surface_budget=3,
-        hub_url="http://localhost:4450",
+        mcp_recall_url="http://localhost:4450",
+    )
+
+    preflight(
+        hub_url=cfg.hub_url,
+        mcp_recall_url=cfg.mcp_recall_url,
+        session_token_path=cfg.session_token_path,
     )
 
     logger.info("phase_boundary start setup")

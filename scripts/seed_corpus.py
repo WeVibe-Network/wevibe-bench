@@ -19,6 +19,7 @@ from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.lifecycle.qdrant_probe import find_org_collection, snapshot_counts
+from wevibe_bench.preflight import preflight
 
 
 def _required_env(name: str) -> str:
@@ -461,6 +462,9 @@ def main() -> int:
         leader_mcp_url="http://127.0.0.1:4550",
         contributor_mcp_url="http://127.0.0.1:4551",
     )
+    # HUB-ONLY preflight: the hub must be up before we bring up MCPs + seed.
+    # (mcp_recall_url=None: seed_corpus starts its own leader/contributor MCPs.)
+    preflight(hub_url=cfg.hub_url, mcp_recall_url=None)
     logger = run_logger("seed-corpus", cfg.runs_dir)
     logfile = getattr(logger, "logfile_path", "")
 
@@ -531,8 +535,30 @@ def main() -> int:
     qdrant_after_count = 0
 
     deliveries: list[dict[str, Any]] = []
+    fund_script = Path(__file__).resolve().parent / "fund_leader.sh"
 
     try:
+        logger.info(
+            "op=seed.corpus.prefund.start script=%s leader_seed_fp=%s leader_signer_dir=%s",
+            fund_script,
+            leader.seed_fp(),
+            cfg.leader_signer_dir,
+        )
+        subprocess.run(
+            ["bash", str(fund_script)],
+            env={
+                **os.environ,
+                "WEVIBE_BENCH_LEADER_SEED_HEX": leader.seed_hex,
+                "LEADER_SIGNER_DIR": cfg.leader_signer_dir,
+            },
+            check=True,
+        )
+        logger.info(
+            "op=seed.corpus.prefund.ok script=%s leader_seed_fp=%s",
+            fund_script,
+            leader.seed_fp(),
+        )
+
         loaded_checkpoint = _load_checkpoint(checkpoint_path)
         if loaded_checkpoint is not None:
             _validate_checkpoint(

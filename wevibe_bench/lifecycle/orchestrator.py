@@ -171,6 +171,68 @@ class LifecycleOrchestrator:
             env["WEVIBE_HTTP_HOST"] = "127.0.0.1"
         return env
 
+    def _resolve_owned_org(self) -> str | None:
+        trace = new_trace_id()
+        cfg_org_id = getattr(self._cfg, "org_id", None)
+        if not isinstance(cfg_org_id, str) or not cfg_org_id:
+            cfg_org_id = None
+
+        try:
+            payload = self._hub_client.member_orgs(self._leader)
+            org_ids = self._extract_org_ids(payload)
+        except Exception as exc:
+            self._log(
+                "info",
+                "lifecycle.orchestrator.create_org",
+                trace,
+                "ok",
+                0,
+                phase="resolve_owned_org_failed",
+                error=str(exc),
+            )
+            self._log(
+                "info",
+                "lifecycle.orchestrator.create_org",
+                trace,
+                "ok",
+                0,
+                phase="owned_org_resolved",
+                org_id="none",
+            )
+            return None
+
+        resolved: str | None
+        if not org_ids:
+            resolved = None
+        elif cfg_org_id and cfg_org_id in org_ids:
+            resolved = cfg_org_id
+        elif len(org_ids) == 1:
+            resolved = next(iter(org_ids))
+        else:
+            sorted_org_ids = sorted(org_ids)
+            resolved = sorted_org_ids[0]
+            self._log(
+                "info",
+                "lifecycle.orchestrator.create_org",
+                trace,
+                "ok",
+                0,
+                phase="owned_org_multiple",
+                selected_org_id=resolved,
+                org_ids=sorted_org_ids,
+            )
+
+        self._log(
+            "info",
+            "lifecycle.orchestrator.create_org",
+            trace,
+            "ok",
+            0,
+            phase="owned_org_resolved",
+            org_id=resolved or "none",
+        )
+        return resolved
+
     def _step(
         self,
         steps: list[dict[str, Any]],
@@ -252,6 +314,7 @@ class LifecycleOrchestrator:
         trace = new_trace_id()
         t0 = time.perf_counter_ns()
         self._log("info", "lifecycle.orchestrator.create_org", trace, "ok", 0, phase="start")
+        owned = self._resolve_owned_org()
 
         signer_dir = os.path.expanduser(self._cfg.leader_signer_dir)
         signer_cli = os.path.join(signer_dir, "dist", "cli.js")
@@ -264,6 +327,17 @@ class LifecycleOrchestrator:
             "--domain",
             self._cfg.domain,
         ]
+        if owned:
+            self._log(
+                "info",
+                "lifecycle.orchestrator.create_org",
+                trace,
+                "ok",
+                0,
+                phase="reuse",
+                org_id=owned,
+            )
+            cmd.extend(["--org-id", owned])
         env = dict(os.environ)
         env.update(
             {
@@ -352,6 +426,26 @@ class LifecycleOrchestrator:
             phase="start",
             org_id=org_id,
         )
+        cfg_org_id = getattr(self._cfg, "org_id", None)
+        if isinstance(cfg_org_id, str) and cfg_org_id:
+            try:
+                already = org_id in self._extract_org_ids(self._hub_client.member_orgs(self._contributor))
+            except Exception:
+                already = False
+        else:
+            already = False
+
+        if already:
+            self._log(
+                "info",
+                "lifecycle.orchestrator.add_member_onchain",
+                trace,
+                "ok",
+                0,
+                phase="already_member",
+                org_id=org_id,
+            )
+            return "already-member"
 
         signer_dir = os.path.expanduser(self._cfg.leader_signer_dir)
         signer_cli = os.path.join(signer_dir, "dist", "cli.js")
@@ -493,8 +587,25 @@ class LifecycleOrchestrator:
         steps: list[dict[str, Any]] = []
         org_id = self._step(steps, "create_org", self.create_org)
         contributor_pk = self._step(steps, "contributor_pubkeys", self.contributor_pubkeys)
-        self._step(steps, "invite", lambda: self.invite_contributor(org_id, contributor_pk))
-        self._step(steps, "add_member_onchain", lambda: self.add_member_onchain(org_id, contributor_pk))
+        try:
+            already_member = org_id in self._extract_org_ids(
+                self._hub_client.member_orgs(self._contributor)
+            )
+        except Exception:
+            already_member = False
+        if already_member:
+            self._log(
+                "info",
+                "lifecycle.orchestrator.m1",
+                new_trace_id(),
+                "ok",
+                0,
+                phase="skip_membership_create",
+                org_id=org_id,
+            )
+        else:
+            self._step(steps, "invite", lambda: self.invite_contributor(org_id, contributor_pk))
+            self._step(steps, "add_member_onchain", lambda: self.add_member_onchain(org_id, contributor_pk))
         self._step(
             steps,
             "enable_recall",
