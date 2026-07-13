@@ -177,7 +177,7 @@ class McpRest:
             raise RuntimeError(f"extract status expected object, got: {payload}")
         return payload
 
-    def wait_extract(self, job_id: str, timeout_s: float = 300, interval_s: float = 0.5) -> dict[str, Any]:
+    def wait_extract(self, job_id: str, timeout_s: float = 900, interval_s: float = 0.5) -> dict[str, Any]:
         deadline = time.time() + timeout_s
         terminal = {"done", "completed", "error", "awaiting_decision"}
         while time.time() < deadline:

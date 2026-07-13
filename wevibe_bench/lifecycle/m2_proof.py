@@ -323,6 +323,7 @@ class M2Proof:
         org_id: str,
         provider: str = "openrouter",
         base_url: str | None = None,
+        extract_timeout_s: float = 900,
     ) -> dict[str, Any]:
         if isinstance(self._direct_memory, dict):
             raw_text = self._direct_memory.get("text")
@@ -364,7 +365,8 @@ class M2Proof:
             api_key=hosted_api_key,
             base_url=base_url,
         )
-        status = client.wait_extract(job_id)
+        self._log("info", "lifecycle.m2.extract_wait", new_trace_id(), "ok", 0, job_id=job_id, timeout_s=extract_timeout_s)
+        status = client.wait_extract(job_id, timeout_s=extract_timeout_s)
         if not isinstance(status, dict):
             raise RuntimeError(f"extract status expected object, got: {status}")
 

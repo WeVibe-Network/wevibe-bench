@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from build_distilled_corpus import DEFAULT_MODEL as DISTILLED_DEFAULT_MODEL
 from build_distilled_corpus import DEFAULT_OPENCODE_AUTH, _load_openrouter_key
 from seed_corpus import _bring_up_for_resume, _load_identity, _required_env
 from wevibe_bench.benv import load_bench_env
@@ -30,6 +29,7 @@ DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_RUNS_DIR = "runs/backgammon"
 DEFAULT_TRANSCRIPT_CHAR_CAP = 120_000
 DEFAULT_SOURCE_CHAR_CAP = 35_000
+DEFAULT_EXTRACT_TIMEOUT_S = 900
 TASK_HEADER = "Build a Node+TypeScript backgammon game passing the CONTRACT gates"
 _KEYWORD_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 
@@ -55,6 +55,18 @@ def _truncate(text: str, limit: int) -> str:
 
 def _one_line(value: str) -> str:
     return " ".join(value.split())
+
+
+def _default_extract_timeout_s() -> int:
+    raw = os.environ.get("WEVIBE_BENCH_EXTRACT_TIMEOUT_S", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_EXTRACT_TIMEOUT_S
+        if value > 0:
+            return value
+    return DEFAULT_EXTRACT_TIMEOUT_S
 
 
 class _PromptInjectingRest:
@@ -110,9 +122,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Target org id for submit/approve/prove (default: wevibe-org-0).",
     )
     parser.add_argument(
+        "--session-model",
+        required=True,
+        help=(
+            "The model slug that PRODUCED the OFF session being distilled — "
+            "the default self-extraction model E."
+        ),
+    )
+    parser.add_argument(
         "--extract-model",
-        default=DISTILLED_DEFAULT_MODEL,
-        help=f"Hosted extraction model slug (default: {DISTILLED_DEFAULT_MODEL}).",
+        default=None,
+        help="Optional override of the extraction model; defaults to --session-model (self-extraction).",
+    )
+    parser.add_argument(
+        "--extract-timeout",
+        type=int,
+        default=_default_extract_timeout_s(),
+        help="Client wait budget in seconds for the async extract job (default 900).",
     )
     parser.add_argument(
         "--runs-dir",
@@ -238,33 +264,6 @@ def _build_transcript(
     return transcript, len(chunks), events_files
 
 
-def _default_direct_memory(transcript: str) -> dict[str, Any]:
-    text = (
-        "For Node+TypeScript backgammon contract gates, keep one-path separation: pure rules/state in game.ts, "
-        "cube and move-choice heuristics in ai.ts, and HTTP state transitions in server.ts. Verify with gate-driven "
-        "checks and fix concrete symptoms: type-only imports for TS ESM runtime errors, bar re-entry auto-selection "
-        "for hint visibility, win modal copy containing 'Win', checker transition including transform, and doubling "
-        "logic using sigmoid winProbability clamped to 0.02-0.98 with difficulty windows (hard 0.68-0.90, "
-        "medium 0.72-0.90, easy no-double)."
-    )
-    if "does not provide an export named 'Board'" in transcript:
-        text += " Guard against TS runtime import errors by splitting `import type` from runtime imports."
-
-    return {
-        "text": text,
-        "keywords": [
-            "backgammon",
-            "typescript",
-            "game_engine",
-            "doubling_cube",
-            "bear_off",
-            "gate_driven",
-            "state_machine",
-        ],
-        "stack_hint": ["typescript", "node", "http", "vitest", "playwright"],
-    }
-
-
 def _normalize_keywords(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -366,6 +365,7 @@ def _commit_status_label(verify_payload: Any, submission_hash: str) -> str:
 def main() -> int:
     load_bench_env()
     args = _build_arg_parser().parse_args()
+    extract_model = args.extract_model or args.session_model
 
     runs_dir = Path(args.runs_dir).expanduser().resolve()
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -506,7 +506,6 @@ def main() -> int:
             contributor=contributor,
             logger=logger,
             mcp_rest_factory=_rest_factory,
-            direct_memory=None,
         )
 
         project_context = {
@@ -519,49 +518,35 @@ def main() -> int:
             "api_key_source": api_key_source,
         }
 
+        extract_provider = "openrouter"
+        if not extract_provider.strip():
+            raise RuntimeError("extract provider must be non-empty")
+        if extract_model.startswith("openrouter/"):
+            raise RuntimeError(
+                "extract model slug must be the RAW provider id (e.g. "
+                "'anthropic/claude-opus-4.8'), NOT openrouter/-prefixed; "
+                f"provider is passed separately: got {extract_model!r}"
+            )
+
         stage = "extract"
         extract_start = time.perf_counter()
         progress(
             "extract start "
-            f"model={args.extract_model} transcript_chars={len(transcript)} prompt=E-assembled provider=openrouter"
+            f"session_model={args.session_model} extract_model={extract_model} "
+            f"extract_timeout_s={args.extract_timeout} transcript_chars={len(transcript)} "
+            f"prompt=E-assembled provider={extract_provider}"
         )
 
-        try:
-            memory_raw = proof.produce_memory(
-                transcript=transcript,
-                model=args.extract_model,
-                api_key=api_key,
-                project_context=project_context,
-                org_id=org_id,
-                provider="openrouter",
-            )
-            extract_path = "extract"
-        except Exception as extract_exc:
-            progress(f"extract failed err={extract_exc} -> fallback direct_memory")
-            direct_memory = _default_direct_memory(transcript)
-            proof_direct = M2Proof(
-                cfg=cfg,
-                orchestrator=orchestrator,
-                leader=leader,
-                contributor=contributor,
-                logger=logger,
-                mcp_rest_factory=_rest_factory,
-                direct_memory=direct_memory,
-            )
-            try:
-                memory_raw = proof_direct.produce_memory(
-                    transcript=transcript,
-                    model=args.extract_model,
-                    api_key=api_key,
-                    project_context=project_context,
-                    org_id=org_id,
-                    provider="openrouter",
-                )
-            except Exception as direct_exc:
-                raise RuntimeError(
-                    f"extract failed ({extract_exc}); direct_memory fallback failed ({direct_exc})"
-                ) from direct_exc
-            extract_path = "direct"
+        memory_raw = proof.produce_memory(
+            transcript=transcript,
+            model=extract_model,
+            api_key=api_key,
+            project_context=project_context,
+            org_id=org_id,
+            provider=extract_provider,
+            extract_timeout_s=args.extract_timeout,
+        )
+        extract_path = "extract"
 
         memory = _normalize_memory(
             memory_raw,
