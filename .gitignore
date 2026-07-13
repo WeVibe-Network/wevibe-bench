@@ -43,3 +43,4 @@ node_modules/
 tasks/**/test-results/
 tasks/**/playwright-report/
 tasks/**/.last-run.json
+.wevibe/
