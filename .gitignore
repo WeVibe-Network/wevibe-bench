@@ -27,3 +27,13 @@ htmlcov/
 runs/
 scorecards/
 *.scorecard.json
+
+# --- bench consolidation: scaffold hygiene (Walter-approved) ---
+scaffold/wevibe-mcp-clone/
+scaffold/wevibe-sdk
+scaffold/**/node_modules
+.wevibe/org.json
+# corpus data — throwaway dev corpora, never committed
+datasets/
+# vendored external benchmark repo (has its own embedded .git)
+polyglot-benchmark/

@@ -2,7 +2,7 @@
 
 Drives ONE real /v1/recall through WeVibeBackend against the running :4450 stack,
 using the live org (wevibe-org-0) and a backgammon NeedCard. Logs everything to a
-timestamped logfile under ~/Desktop/benchmark/runs/ (R-31 observability). NEVER logs
+timestamped logfile under <repo>/runs/ (or $WEVIBE_BENCH_RUNS_DIR) (R-31 observability). NEVER logs
 secrets (token is loaded inside the backend from the seam path; only sizes/fields here).
 
 Run:  .venv/bin/python scripts/recall_smoke.py
@@ -15,6 +15,7 @@ import datetime as _dt
 import json
 import logging
 import os
+import pathlib
 import sys
 
 from wevibe_bench.backends.base import NeedCard
@@ -41,7 +42,7 @@ def _setup_logging(log_path: str) -> logging.Logger:
 
 def main() -> int:
     ts = _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
-    log_dir = os.path.expanduser("~/Desktop/benchmark/runs")
+    log_dir = os.environ.get("WEVIBE_BENCH_RUNS_DIR") or str(pathlib.Path(__file__).resolve().parents[1] / "runs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, f"{ts}-recall-smoke.log")
 

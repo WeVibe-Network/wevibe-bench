@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import pathlib
+from dataclasses import dataclass, field
+
+
+_REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -16,8 +20,13 @@ class LifecycleConfig:
     org_name: str = "wevibe-bench-lifecycle"
     domain: str = "bench.wevibe.local"
     session_token_path: str = "~/.wevibe/mcp-session-token"
-    leader_signer_dir: str = "/Users/jerrysmith/Desktop/benchmark/scaffold/leader-signer"
-    runs_dir: str = "~/Desktop/benchmark/runs"
+    leader_signer_dir: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_SIGNER_DIR")
+        or str(_REPO / "scaffold" / "leader-signer")
+    )
+    runs_dir: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_RUNS_DIR") or str(_REPO / "runs")
+    )
     mc_version: int = 1
     epoch_id: int = 0
 

@@ -21,8 +21,10 @@ import datetime as _dt
 import json
 import logging
 import os
+import pathlib
 import sys
 
+from wevibe_bench.benv import load_bench_env
 from wevibe_bench.backends.base import NeedCard
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
 from wevibe_bench.config import RunConfig
@@ -44,8 +46,9 @@ def _setup_logging(log_path: str) -> logging.Logger:
 
 
 def main() -> int:
+    load_bench_env()
     ts = _dt.datetime.now().strftime("%Y%m%dT%H%M%S")
-    log_dir = os.path.expanduser("~/Desktop/benchmark/runs")
+    log_dir = os.environ.get("WEVIBE_BENCH_RUNS_DIR") or str(pathlib.Path(__file__).resolve().parents[1] / "runs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, f"{ts}-recall-smoke-python.log")
 

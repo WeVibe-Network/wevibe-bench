@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+
+# Load durable bench env (throwaway local-dev seeds) for standalone runs.
+# When invoked by seed_corpus.py the vars are already in the inherited env.
+if [ -f "$REPO_ROOT/config/bench.env" ]; then
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/config/bench.env"
+fi
+
 : "${WEVIBE_BENCH_LEADER_SEED_HEX:?missing required env WEVIBE_BENCH_LEADER_SEED_HEX}"
 
-LEADER_SIGNER_DIR="${LEADER_SIGNER_DIR:-/Users/jerrysmith/Desktop/benchmark/scaffold/leader-signer}"
+LEADER_SIGNER_DIR="${LEADER_SIGNER_DIR:-${WEVIBE_BENCH_LEADER_SIGNER_DIR:-$REPO_ROOT/scaffold/leader-signer}}"
 FUND_TARGET_UVIBE="${FUND_TARGET_UVIBE:-100000000}"
 FUND_GRANT_UVIBE="${FUND_GRANT_UVIBE:-1000000000}"
 CHAIN_CONTAINER="${CHAIN_CONTAINER:-wevibe-chain}"
@@ -14,7 +23,7 @@ KEYRING_BACKEND="${KEYRING_BACKEND:-test}"
 
 CHAIN_REST="${CHAIN_REST%/}"
 
-RUNS_DIR="/Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench/runs/fund-leader"
+RUNS_DIR="${WEVIBE_BENCH_RUNS_DIR:-$REPO_ROOT/runs}/fund-leader"
 RUN_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 LOG_FILE="${RUNS_DIR}/${RUN_TS}.log"
 mkdir -p "$RUNS_DIR"

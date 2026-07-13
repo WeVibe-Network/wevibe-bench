@@ -21,18 +21,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import socket
 import urllib.error
 import urllib.request
 
 LOGGER = logging.getLogger("wevibe_bench.preflight")
+_REPO = pathlib.Path(__file__).resolve().parents[1]
 
 # The exact command to start the Option-C bench clone on :4550 (mirrors how
 # wevibe_bench.lifecycle.orchestrator launches it: bench endpoints + env seed
 # backend + leader identity seed + hub url + port). The identity seed MUST be the
 # same bench leader seed the corpus was seeded with, or recall cannot decrypt.
 CLONE_START_CMD = (
-    "cd /Users/jerrysmith/Desktop/benchmark/scaffold/wevibe-mcp-clone && "
+    f"cd {_REPO / 'scaffold' / 'wevibe-mcp-clone'} && "
     "WEVIBE_MCP_HTTP_PORT=4550 WEVIBE_HTTP_HOST=127.0.0.1 "
     "WEVIBE_BENCH_ENDPOINTS=1 WEVIBE_SEED_BACKEND=env "
     'WEVIBE_IDENTITY_SEED_HEX="$WEVIBE_BENCH_LEADER_SEED_HEX" '

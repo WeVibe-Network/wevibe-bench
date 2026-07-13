@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import re
 import signal
 import socket
@@ -54,7 +55,11 @@ class McpProcessManager:
         transport: Transport | None = None,
         mcp_root: str | None = None,
     ) -> None:
-        self._wevibe_root = wevibe_root or "/Users/jerrysmith/Desktop/wevibe-workspace"
+        self._wevibe_root = (
+            wevibe_root
+            or os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT")
+            or str(pathlib.Path(__file__).resolve().parents[3])
+        )
         self._mcp_root = resolve_mcp_root(self._wevibe_root, mcp_root)
         self._cfg = cfg
         self._logger = logger

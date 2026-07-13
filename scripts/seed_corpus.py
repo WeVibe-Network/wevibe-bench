@@ -12,6 +12,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
+from wevibe_bench.benv import load_bench_env
 from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.logging_util import run_logger
@@ -129,7 +130,7 @@ def _org_count(snapshot: dict[str, int], collection: str | None) -> int:
     return int(snapshot.get(collection, 0))
 
 
-_DEFAULT_SEED_CHECKPOINT = "~/Desktop/benchmark/runs/swecb-seed-checkpoint.json"
+_DEFAULT_SEED_CHECKPOINT = str(Path(os.environ.get("WEVIBE_BENCH_RUNS_DIR", str(Path(__file__).resolve().parents[1] / "runs"))).expanduser() / "swecb-seed-checkpoint.json")
 _RESUME_ENV_EXPORTS = (
     "WEVIBE_BENCH_LEADER_SEED_HEX",
     "WEVIBE_BENCH_CONTRIB_SEED_HEX",
@@ -445,6 +446,7 @@ def _bring_up_for_resume(
 
 
 def main() -> int:
+    load_bench_env()
     leader = _load_identity("WEVIBE_BENCH_LEADER_SEED_HEX")
     contributor = _load_identity("WEVIBE_BENCH_CONTRIB_SEED_HEX")
 

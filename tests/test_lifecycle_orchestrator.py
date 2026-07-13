@@ -625,14 +625,17 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     observed_hops = [name for name in calls if name in set(expected_hops)]
     assert observed_hops == expected_hops
 
+    expected_signer_dir = os.path.expanduser(cfg.leader_signer_dir)
+    expected_signer_cli = os.path.join(expected_signer_dir, "dist", "cli.js")
+
     assert commit_batch_call["cmd"] == [
         "node",
-        "/Users/jerrysmith/Desktop/benchmark/scaffold/leader-signer/dist/cli.js",
+        expected_signer_cli,
         "commit-batch",
         "--org-id",
         "org-77",
     ]
-    assert commit_batch_call["cwd"] == "/Users/jerrysmith/Desktop/benchmark/scaffold/leader-signer"
+    assert commit_batch_call["cwd"] == expected_signer_dir
     env = commit_batch_call["env"]
     assert isinstance(env, dict)
     assert env["WEVIBE_IDENTITY_SEED_HEX"] == leader.seed_hex

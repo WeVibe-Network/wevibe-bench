@@ -40,12 +40,13 @@ NOTE (cross-ref the PERMANENT block in SESSIONCONTINUANCE): the `backend-restart
 `make redeploy` prints is EXPECTED and HARMLESS — the redeploy still succeeds.
 
 ### Option-C recall clone (`:4550`)
-The clone lives at `/Users/jerrysmith/Desktop/benchmark/scaffold/wevibe-mcp-clone`. Its `dist/` is
-prebuilt (rebuild with `npx tsc` only if stale). Start it with the SAME env the bench lifecycle
+The clone lives at `/Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench/scaffold/wevibe-mcp-clone`. Its `dist/` is
+prebuilt (rebuild with `npx tsc` only if stale). Bench lifecycle points it via
+`WEVIBE_BENCH_MCP_ROOT=<repo>/scaffold/wevibe-mcp-clone` because canonical `wevibe-mcp` lacks bench `/v1/submit` + `/v1/identity/pubkeys` endpoints. Start it with the SAME env the bench lifecycle
 orchestrator uses — the identity seed MUST be the bench leader seed (`$WEVIBE_BENCH_LEADER_SEED_HEX`)
 or recall cannot decrypt the seeded corpus:
 ```
-cd /Users/jerrysmith/Desktop/benchmark/scaffold/wevibe-mcp-clone && \
+cd /Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench/scaffold/wevibe-mcp-clone && \
   WEVIBE_MCP_HTTP_PORT=4550 WEVIBE_HTTP_HOST=127.0.0.1 \
   WEVIBE_BENCH_ENDPOINTS=1 WEVIBE_SEED_BACKEND=env \
   WEVIBE_IDENTITY_SEED_HEX="$WEVIBE_BENCH_LEADER_SEED_HEX" \
