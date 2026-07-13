@@ -1,0 +1,10 @@
+{
+  "name": "benchmark-backgammon",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Full backgammon vs AI, Node + TypeScript, zero external dependencies.",
+  "scripts": {
+    "start": "node src/server.ts"
+  }
+}

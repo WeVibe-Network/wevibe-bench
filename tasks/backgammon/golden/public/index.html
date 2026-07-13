@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Backgammon</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">
+        <span class="logo">⛃</span>
+        <h1>Backgammon</h1>
+      </div>
+      <div class="topcenter">
+        <div class="score" title="Match score">
+          <span class="pill you">You <b id="scoreWhite" data-testid="scoreWhite">0</b></span>
+          <span class="pill ai">AI <b id="scoreBlack" data-testid="scoreBlack">0</b></span>
+        </div>
+      </div>
+      <div class="controls">
+        <label class="difwrap">AI
+          <select id="difficulty" data-testid="difficulty">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </label>
+        <button id="newGameBtn" class="btn" data-testid="newGameBtn">New Game</button>
+      </div>
+    </header>
+
+    <main id="tablewrap">
+      <div id="board" aria-label="Backgammon board" data-testid="board">
+        <div class="frame">
+          <div class="playfield" id="playfield" data-testid="playfield"></div>
+          <div id="checkerLayer" data-testid="checkerLayer"></div>
+          <div id="pointHints" data-testid="pointHints"></div>
+        </div>
+      </div>
+
+      <aside id="sidepanel">
+        <div class="panelcard turnbox">
+          <div class="turnrow">
+            <span class="turnlabel">Turn</span>
+            <span id="turnIndicator" class="turnchip you" data-testid="turnIndicator">You</span>
+          </div>
+          <div class="pipbox">
+            <div class="pip you"><span>Your pip</span><b id="pipWhite" data-testid="pipWhite">167</b></div>
+            <div class="pip ai"><span>AI pip</span><b id="pipBlack" data-testid="pipBlack">167</b></div>
+          </div>
+        </div>
+
+        <div class="panelcard dicebox">
+          <div class="cube" id="cube" title="Doubling cube" data-testid="cube">
+            <div class="cubeval" id="cubeVal" data-testid="cubeVal">1</div>
+            <div class="cubeowner" id="cubeOwner" data-testid="cubeOwner">center</div>
+          </div>
+          <div class="dice" id="dice" data-testid="dice"></div>
+        </div>
+
+        <div class="panelcard actionbox" id="actionbox">
+          <button id="rollBtn" class="btn primary" data-testid="rollBtn">Roll Dice</button>
+          <button id="doubleBtn" class="btn" data-testid="doubleBtn">Double</button>
+          <button id="undoBtn" class="btn" disabled data-testid="undoBtn">Undo</button>
+          <button id="endTurnBtn" class="btn" disabled data-testid="endTurnBtn">End Turn</button>
+        </div>
+
+        <div class="panelcard msgbox">
+          <div id="message" data-testid="message">Loading…</div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Double-offer / decision modal -->
+  <div id="modalOverlay" class="overlay hidden" data-testid="modalOverlay">
+    <div class="modal" id="modal">
+      <h2 id="modalTitle" data-testid="modalTitle">Doubling Cube</h2>
+      <p id="modalBody" data-testid="modalBody"></p>
+      <div class="modalbtns" id="modalBtns" data-testid="modalBtns"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

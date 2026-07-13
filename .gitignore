@@ -37,3 +37,9 @@ scaffold/**/node_modules
 datasets/
 # vendored external benchmark repo (has its own embedded .git)
 polyglot-benchmark/
+
+# --- backgammon task (Phase 2a): never commit installed deps or test artifacts ---
+node_modules/
+tasks/**/test-results/
+tasks/**/playwright-report/
+tasks/**/.last-run.json

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Backgammon</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="scoreWhite" data-testid="scoreWhite">0</div>
+  <div id="scoreBlack" data-testid="scoreBlack">0</div>
+  <select id="difficulty" data-testid="difficulty">
+    <option value="easy">easy</option>
+    <option value="medium" selected>medium</option>
+    <option value="hard">hard</option>
+  </select>
+  <button id="newGameBtn" data-testid="newGameBtn" type="button">New Game</button>
+
+  <div id="board" data-testid="board">
+    <div id="playfield" data-testid="playfield"></div>
+    <div id="checkerLayer" data-testid="checkerLayer"></div>
+    <div id="pointHints" data-testid="pointHints"></div>
+  </div>
+
+  <div id="turnIndicator" data-testid="turnIndicator"></div>
+  <div id="pipWhite" data-testid="pipWhite"></div>
+  <div id="pipBlack" data-testid="pipBlack"></div>
+  <div id="cube" data-testid="cube">
+    <div id="cubeVal" data-testid="cubeVal"></div>
+    <div id="cubeOwner" data-testid="cubeOwner"></div>
+  </div>
+
+  <div id="dice" data-testid="dice"></div>
+  <button id="rollBtn" data-testid="rollBtn" type="button">Roll</button>
+  <button id="doubleBtn" data-testid="doubleBtn" type="button">Double</button>
+  <button id="undoBtn" data-testid="undoBtn" type="button">Undo</button>
+  <button id="endTurnBtn" data-testid="endTurnBtn" type="button">End Turn</button>
+
+  <div id="message" data-testid="message"></div>
+
+  <div id="modalOverlay" data-testid="modalOverlay" class="hidden">
+    <div id="modalTitle" data-testid="modalTitle"></div>
+    <div id="modalBody" data-testid="modalBody"></div>
+    <div id="modalBtns" data-testid="modalBtns"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

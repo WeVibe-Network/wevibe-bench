@@ -1,0 +1,13 @@
+{
+  "name": "backgammon-gates",
+  "type": "module",
+  "scripts": {
+    "test:backend": "vitest run backend",
+    "test:frontend": "playwright test",
+    "test": "npm run test:backend"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0",
+    "@playwright/test": "^1.48.0"
+  }
+}
