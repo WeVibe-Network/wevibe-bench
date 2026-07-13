@@ -407,6 +407,25 @@ class BackgammonRunner(AgentRunner):
             f"{contract_text}"
         )
 
+        s_prompt_path = self._repo_root / "scaffold" / "sxe-candidate" / "S-fork-reasoning.md"
+        if not s_prompt_path.is_file():
+            raise RuntimeError(
+                f"producer capture/compliance protocol missing: {s_prompt_path}"
+            )
+        s_prompt_text = s_prompt_path.read_text(encoding="utf-8")
+        if not s_prompt_text.strip():
+            raise RuntimeError(
+                f"producer capture/compliance protocol empty: {s_prompt_path}"
+            )
+        self._progress(
+            f"PROGRESS step=producer-s-load path={s_prompt_path} chars={len(s_prompt_text)}"
+        )
+        base_prompt = (
+            f"{base_prompt}\n\n"
+            "=== CAPTURE & COMPLIANCE PROTOCOL ===\n"
+            f"{s_prompt_text}"
+        )
+
         if self.memory_mode == "on":
             return base_prompt
 
