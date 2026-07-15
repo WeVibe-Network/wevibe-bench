@@ -338,6 +338,15 @@ def _memory_fragment(text: str, limit: int = 84) -> str:
     return compact[:limit]
 
 
+def _memory_fingerprint_fields(text: str) -> dict[str, Any]:
+    """R-37-safe fingerprint of a memory's plaintext for logs/results.
+
+    Emits ONLY a sha256 first-8 hex fingerprint + byte size — NEVER the plaintext
+    itself (no fragment, no prefix). Used wherever delivery-proof outcome is logged.
+    """
+    return {"memory_fp": _sha256_first8(text), "text_size": len(text)}
+
+
 def _commit_status_label(verify_payload: Any, submission_hash: str) -> str:
     if not isinstance(verify_payload, dict):
         return "unknown"
@@ -384,7 +393,8 @@ def main() -> int:
         "submission_hash": "",
         "approve_status": "",
         "delivery": "NO",
-        "memory_fragment": "",
+        "memory_fp": "",
+        "text_size": 0,
         "extract_path": "",
         "logfile": logfile,
     }
@@ -579,9 +589,11 @@ def main() -> int:
         delivery = str(delivery_payload.get("delivery") or "NO")
         n_memories = int(delivery_payload.get("n_memories") or 0)
         matched = bool(delivery_payload.get("matched"))
+        fp_fields = _memory_fingerprint_fields(str(memory["text"]))
         progress(
             "delivery proof "
-            f"delivery={delivery} n_memories={n_memories} matched={matched} fragment={memory_fragment!r}"
+            f"delivery={delivery} n_memories={n_memories} matched={matched} "
+            f"memory_fp={fp_fields['memory_fp']} text_size={fp_fields['text_size']}"
         )
 
         status = "ok" if delivery == "YES" else "delivery_no"
@@ -591,7 +603,7 @@ def main() -> int:
             "submission_hash": submission_hash,
             "approve_status": approve_status,
             "delivery": delivery,
-            "memory_fragment": memory_fragment,
+            **fp_fields,
             "extract_path": extract_path,
             "logfile": logfile,
         }
