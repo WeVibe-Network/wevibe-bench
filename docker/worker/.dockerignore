@@ -1,0 +1,16 @@
+# keep worker image build context minimal
+*
+!Dockerfile
+!.dockerignore
+
+# optional vendored plugin payload
+!vendor/
+!vendor/wevibe-opencode-plugin/
+!vendor/wevibe-opencode-plugin/**
+
+# strip heavy VCS/local artifacts from vendored plugin if present
+vendor/wevibe-opencode-plugin/.git/
+vendor/wevibe-opencode-plugin/.github/
+vendor/wevibe-opencode-plugin/node_modules/
+vendor/wevibe-opencode-plugin/.DS_Store
+vendor/wevibe-opencode-plugin/**/.DS_Store

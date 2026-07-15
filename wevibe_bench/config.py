@@ -25,7 +25,7 @@ class RunConfig:
     tau: float = 0.68  # relevance floor on COMBINED score (ratified). Sent as relevance_floor on the wire.
     rng_seed: int = 20260709  # FIXED — the live D-9.4 sampler seeds from wall-clock; pin it or Recall@k>1 wobbles.
     surface_budget: int = 3  # prod surface budget / max-k
-    max_attempts: int = 2  # max solve attempts per task
+    max_attempts: int = 3  # max solve attempts per task
     deterministic_topn: bool = True  # client-side reproducible top-N by combined_score
     deterministic_recall_limit: int = 64  # wire limit when deterministic_topn (hub returns full candidate set)
     arm_org_map: dict[str, str] = field(default_factory=dict)  # arm/condition -> org_id override (two-corpora)

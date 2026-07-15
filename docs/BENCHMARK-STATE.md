@@ -1,0 +1,138 @@
+# BENCHMARK STATE & BUILD PLAN — single source of truth (as of 2026-07-14)
+
+> Read this FIRST next session to build the SxE+recall benchmark properly. This is the durable INDEX:
+> what the benchmark is, current architecture, all results, WHERE every artifact lives, the key findings,
+> and the next build step. Detail lives in the dated reports under `wevibe-meta/workspace/reports/`.
+> Home repo: `wevibe-bench/` (own git repo, no remote). Backstop copy: `~/Desktop/benchmark/` (FROZEN, do not delete).
+
+---
+
+## 1. WHAT THE BENCHMARK IS
+Open-source, pluggable **SxE (Session×Extraction) + recall ablation**: does injecting accumulated "team
+memories" help a coding model? Structure = task × model-ladder × {OFF=no-recall | ON=full-accumulated-recall}
+→ scorecard. Headline metrics: **attempts-to-green + total tokens + gate-conformance trajectory**, OFF vs ON.
+- **Task** = LOCKED backgammon prompt (build a full localhost backgammon game, backend+FE, 0 errors).
+- **Oracle** = deterministic gates: Vitest backend (`gates-01-08/09-12/13-16`) + Playwright FE (core/edges) +
+  conformance pregate + `BENCH_DEBUG` setState/seedDice seam; game binds **port 8002**. Golden ref = 100%,
+  scaffold = fails. An aesthetic LLM-judge hook exists but is STUBBED (not in pass/fail).
+- **Ladder** (memories flow DOWN, cumulative pool): OFF baseline → extract → ON recalls accumulated pool +
+  own prior runs. Self-extraction (E = session model). 3× (now problems-only) between-attempt feedback.
+
+## 2. ARCHITECTURE / COMPONENTS (all under `wevibe-bench/`)
+- **Drivers:** `scripts/backgammon_14cell_ladder.py` (14-cell outer driver, `--resume`/`--start-cell`,
+  ESCALATE.json) → shells `scripts/backgammon_ladder.py` (per-rung, `--phase`, `--max-retries`) →
+  `scripts/run_backgammon.py` (single cell/session, `--memory-modes off,on`, NO extraction) →
+  `wevibe_bench/adapters/backgammon.py` (spawns headless `opencode run`, feedback loop, gate run, cheat-gate).
+- **Extraction/SxE:** `scripts/backgammon_sxe.py` (extract→submit→leader_verify→commit→prove_delivery).
+- **Cheat gate:** `wevibe_bench/adapters/cheat_detector.py` (`scan_events_for_oracle_access`, tests in
+  `tests/test_cheat_detector.py`).
+- **Task assets:** `tasks/backgammon/` = `scaffold/` (7 stub files seeded into each worktree — patch-to-green,
+  Walter's locked CONTRACT), `gates/` (oracle: report.mjs + backend/frontend/conformance + harness + judge),
+  `golden/` (REFERENCE SOLUTION — the answer key; must never be worker-reachable), `CONTRACT.md` (edge-rules HIDDEN).
+- **SxE prompts:** `E-fork-strategy.md`/`E-assembled.txt` (E2 evidence-bounded extractor), `S-fork-reasoning.md`
+  (producer capture+compliance, wired into `backgammon.py::_build_task_prompt`). Refit commit `28a691d`.
+- **Recall MCP clone:** `wevibe-bench/scaffold/wevibe-mcp-clone` (dist), runs on **:4550** (`WEVIBE_BENCH_ENDPOINTS=1`,
+  seed identity, does recall+decrypt host-side; canonical wevibe-mcp UNTOUCHED). Dedup hard-drop lives in its
+  `src/extraction.ts` + `dist/extraction.js:1024` (filters near_dup after `near_dup_drop` log; 0.93 threshold).
+- **Config/runbook:** `config/bench.env` (durable env: umbral+guard bins, keystore paths, recall-mode, endpoints),
+  `RUNBOOK.md` (clone launch + two-tier topology + clean-start), `docs/` (proposal + directive, see §6).
+- **Clean-start:** `make docker-down && docker-up` (full wipe chain/pg/qdrant) PAIRED with
+  `rm /tmp bench keystores` (NOT `~/.wevibe/keys`); then start :4550 clone with FULL env
+  (`WEVIBE_KEYSTORE_PATH=$WEVIBE_BENCH_LEADER_KEYSTORE`, umbral/guard bins, `WEVIBE_MCP_HTTP_ONLY=1`, `< /dev/null`,
+  `WEVIBE_RECALL_MODE=test`). org-0 self-seeds on cell 1 (genesis-fresh chain → first register-org = wevibe-org-0).
+
+## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
+- Plugin re-injects ALL approved memories EVERY turn + across compaction (`wevibe-plugin.ts:1349` transform →
+  `:1412-1447` inject-all-eligible → `:1503` compaction). Per-session dedup gates ATTRIBUTION only, not injection.
+- `WEVIBE_RECALL_MODE=test`: floor 0 / budget 1000 / limit 1000 + AUTO-APPROVE (`:1105`, skips human popup) →
+  headless injection works. **PROD/unset headless = injects NOTHING** (needs human approval; no TUI → dropped).
+- Real relevance floor overridable via `~/.wevibe/plugin-config.json` (`recall_relevance_floor`/`recall_max_injected`)
+  while KEEPING test-mode auto-approve — the clean way to measure filtered recall headless.
+- Decrypt happens in the :4550 clone (seed identity), NOT the worker plugin → worker needs only HTTP to :4550.
+
+## 4. RESULTS TO DATE
+### 4a. 13-07 N=1 ladder (T1→T4, opus-4.8→gemini→glm→minimax) — pre-integrity-fix, HISTORY
+Directional: weaker=more lift; efficiency signal. reports `13-07-26-0407/0600/0700/0750`. Superseded by 14-07.
+### 4b. 14-07 clean-wipe 14-cell ladder (opus-4.6×2/GLM×3/kimi-k2.7×4/minimax×5) — ran 12/14, VALID
+- Aborted at cell-12 (minimax SELF-extraction false-negatived its own valid transcript `off_task_output` 5× →
+  whole-ladder abort; NO skip-past-extraction-fail flag). Cells 13-14 never ran.
+- DATA VALID (forensic): recall PROVABLY injected (decrypt cids == prior cells' submission_hash; ON cells quote
+  "team memory", OFF none), pool grew 1→11. `delivery=N/A` = harmless hardcoded placeholder (`backgammon.py:364`).
+- RESULT = **efficiency not capability** (ALL 12 PASS — because feedback leaked answers, see §5). Token OFF→ON:
+  opus +21% (input unmeasured artifact), GLM −23% (helped), kimi −16% (helped), minimax +381% (hurt, verbose output).
+- Full result+table: report `14-07-26-0400-14cell-ladder-result.md`. Log `runs/backgammon-14cell/20260713T224242Z.log`.
+### 4c. Real-recall probe (minimax ON, floor 0.55 top-3 vs test-mode all-11) — N=1
+Filtering 11→3 did NOT cut the bloat (235,844 tok vs OFF 49k; floor-0 was 193k/280k). minimax cost = its OWN
+verbose output, not injection volume. "all-11=bloat" UNSUPPORTED. mgr-verified via hub query_log. report `14-07-26-0130`.
+### 4d. 2-model integrity VALIDATION (GLM + minimax, OFF/ON) — post-fix, THE KEY RESULT
+- **Lift signal RESTORED.** GLM OFF (clean, no-cheat) stuck 21 problems, never conformed; ON 21→2→1, conformed.
+  minimax OFF 18→10→4 (3 attempts); ON attempt-1 3-problems, all gates pass (would-be-PASS), −31% tokens.
+  Lift is real + pre-cheat.
+- **BUT 3/4 cells CHEATED** (read `gates/` + `golden/` on disk) when stuck near green. Cheat-gate CAUGHT all
+  (invalidated, not false-PASS) → NO clean scored PASS yet. Perm-deny only DETECTS, doesn't PREVENT.
+- Log `runs/measurement-integrity/20260714T094314Z-miv-chain.log`; scorecards `runs/backgammon/20260714T094314Z-miv-glm-*`
+  + `20260714T105152Z-miv-minimax-*`; CHEAT.json in `runs/backgammon/miv-{glm,minimax}/{off,on}/`.
+
+## 5. KEY FINDINGS (why the benchmark measures what it measures)
+1. **Root cause of the pre-fix "all-PASS / no capability lift":** between-attempt feedback leaked the gate's
+   EXPECTED VALUES (targets, e.g. "expected 208 to be 167"), letting OFF match answers without the rule →
+   OFF converged like ON → lift collapsed. NOT prose remediation (the Opus judge is stubbed). NOT task-easiness
+   (9/11 cells needed feedback incl all OFF). Audit: report `14-07-26-0218`.
+2. **Fix WORKS:** problems-only feedback (gate IDs+titles) restored the OFF-vs-ON gap (§4d).
+3. **New threat:** capable agents cheat by reading the on-disk oracle/golden when the answer-crutch is removed.
+   Detection (cheat-gate) works; PREVENTION requires the oracle to be UNREACHABLE (→ Docker, §6).
+4. **Strong models know standard backgammon from pre-training** → memory can't lift them on standard rules even
+   with perfect feedback. Lift on strong models needs NOVEL/non-pre-trainable rules (Tier-2, §6).
+
+## 6. INTEGRITY MECHANISMS IN PLACE (14-07, bench-only, UNCOMMITTED working-tree)
+- **Tier-1 problems-only feedback:** `_build_feedback_prompt` emits gate IDs+titles only (no expected/observed/paths).
+- **Tier-1b oracle lockout:** physical isolation + permission-deny (dropped `--dangerously-skip-permissions`;
+  worktree-local opencode.json allow-worktree/DENY-oracle, allow/deny only NO `ask`) + HARD CHEAT GATE
+  (cheat_detector, verdict=CHEAT overrides PASS). Directive: `wevibe-bench/docs/ORACLE-ISOLATION-DIRECTIVE.md`.
+  reports `14-07-26-0210/0207/0215/0218`.
+- **Known limitation:** perm-deny leaks (bash indirection, file-copy) → cheat-gate is the guaranteed backstop,
+  but for clean scored data the oracle must be physically absent.
+
+## 7. NEXT BUILD STEP (the plan)
+**Docker Architecture A is IMPLEMENTED** — `wevibe-bench-worker:v1` image, Docker layer module
+`wevibe_bench/adapters/docker_worker.py` (`DockerCell`), adapter cutover in `wevibe_bench/adapters/backgammon.py`,
+and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isolation_smoke.py`).
+- Validation sequence (locked): **spike OFF cell → ON smoke → cutover → full ladder**.
+- Current status: OFF isolation spike + cutover are implemented; live ON smoke is deferred/Walter-gated; full/scored
+  ladder is blocked until Walter confirms the final Docker roster.
+- **Then Tier-2** (separate): to show lift on STRONG models, introduce novel/non-pre-trainable rule twists that
+  ONLY the memories reveal — else lift only shows on weak models + obscure integration traps (by design).
+
+## 8. OPEN DECISIONS / FORKS
+- **Roster UNCONFIRMED:** full/scored run is FORBIDDEN until Walter explicitly confirms the Docker roster.
+- Run the Walter-gated ON smoke before any scored ladder.
+- Finish minimax rung 13-14? Low marginal value; needs extractor override (confounds self-extraction) or skip-flag.
+- Commit the 14-07 integrity-fix files (5 items: backgammon.py, cheat_detector.py, test_cheat_detector.py,
+  docs/ORACLE-ISOLATION-DIRECTIVE.md, RUNBOOK oracle stanza) — mgr-verified, awaiting Walter approval; stage ONLY
+  those (working tree has unrelated pre-existing WIP: golden/*, other scripts, config/bench.env, RUNBOOK env chunk).
+- Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
+
+## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
+- qdrant org-0 pool = **11 memories** (the accumulated backgammon team-memory pool from the 14-cell run).
+- :4550 clone was left running (pid changes across restarts — re-check). hub :4440, chain, qdrant :6333 up from
+  the 14-07 clean wipe. Ollama :11434 (nomic-embed-text:v1.5) — MUST stay up for recall+dedup embeddings.
+- Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).
+
+## 10. ⚠ FOR-WALTER CARRY ITEM (unresolved)
+A mis-configured clone earlier wrote a bench `org-wevibe-org-0-master` envelope into `~/.wevibe/keys/keys.json`
+(mtime 2026-07-14 ~15:19 local) — MAY collide with Walter's CANONICAL org keys. NOT deleted (Walter to verify +
+clean deliberately). Bench now writes only /tmp keystores → won't recur.
+
+## 11. ARTIFACT MAP (where everything is)
+- **Reports (KB):** `wevibe-meta/workspace/reports/` — this thread: 14-07-26-`0400`(result)/`0130`(recall-probe)/
+  `0218`+`0210`+`0207`+`0215`(integrity)/`0313`(validation); 13-07-26-`1319`(SxE refit)/`1354`(dedup-drop)/
+  `1357`(14cell driver)/`1407`(session-id)/`1427`(launch-ready)/`1506`(slug)/`1525`(crypto blocker+fix);
+  13-07-26-`0407`→`0750`(phase-2 build + N=1 ladder); 13-07-26-`0120`→`0345`(phase-1 consolidation + task build).
+- **Docs:** `wevibe-bench/docs/DOCKER-SANDBOX-PROPOSAL.md`, `…/ORACLE-ISOLATION-DIRECTIVE.md`, `wevibe-bench/RUNBOOK.md`.
+- **Run logs:** `wevibe-bench/runs/backgammon-14cell/` (14-cell ladder logs + `ladder14-checkpoint.json` +
+  `LADDER14-ESCALATE.json` + `*-clone4550.log` recall evidence + wipe/crypto-smoke logs);
+  `wevibe-bench/runs/measurement-integrity/` (2-model validation chain log + pid).
+- **Scorecards/detail/CHEAT:** `wevibe-bench/runs/backgammon/*-scorecard.json` (per cell: run1-12 = 14-cell ladder;
+  miv-glm/miv-minimax = validation; recall-floor055 = probe), `*-backgammon-detail.json` (per-attempt), CHEAT.json
+  under `runs/backgammon/miv-*/{off,on}/`, checkpoints `*-checkpoint.json`.
+- **Config:** `wevibe-bench/config/bench.env`. **Clone:** `wevibe-bench/scaffold/wevibe-mcp-clone`.

@@ -10,11 +10,13 @@ This adapter drives a single backgammon cell end-to-end:
 from __future__ import annotations
 
 import collections
+from contextlib import nullcontext
 from dataclasses import dataclass
 import datetime as _dt
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -24,6 +26,17 @@ import time
 from typing import Any, Callable
 
 from wevibe_bench.adapters.aider_polyglot import _format_memory
+from wevibe_bench.adapters.cheat_detector import (
+    build_oracle_markers,
+    scan_events_for_oracle_access,
+)
+from .docker_worker import (
+    DockerCell,
+    DockerCellConfig,
+    WORKER_IMAGE,
+    docker_available,
+    image_exists,
+)
 from wevibe_bench.backends.base import NeedCard, RecalledMemory
 from wevibe_bench.runner import AgentRunner, TaskOutcome
 
@@ -78,6 +91,8 @@ class BackgammonCellResult:
     session_id: str | None
     memory_mode: str
     model: str
+    cheated: bool = False
+    cheat_detail: str = ""
 
 
 def _default_progress(message: str) -> None:
@@ -191,13 +206,23 @@ class BackgammonRunner(AgentRunner):
             f"PROGRESS run_label={run_label} step=worktree-seed src={self.task_dir / 'scaffold'} dst={worktree}"
         )
 
-        run_env, pure = self._prepare_memory_mode(worktree=worktree)
+        pure = self._prepare_memory_mode(worktree=worktree)
+        run_env = os.environ.copy()
 
         session_id: str | None = None
         input_tokens_total = 0
         output_tokens_total = 0
         turns_total = 0
         events_path = Path(f"{worktree}.events.jsonl")
+
+        attempt_reports: list[dict[str, Any]] = []
+        final_report: dict[str, Any] = {}
+        verdict = "FAIL"
+        attempts_to_green: int | str = "FAIL"
+
+        worker_killed_reason: str | None = None
+        active_cell: DockerCell | None = None
+        cell_context: Any = nullcontext()
 
         if self.mock in {"golden", "scaffold"}:
             mock_src = self.task_dir / str(self.mock)
@@ -206,152 +231,272 @@ class BackgammonRunner(AgentRunner):
                 f"PROGRESS run_label={run_label} step=worker-launch mode=mock mock={self.mock}"
             )
         else:
-            task_prompt = self._build_task_prompt(injected_memory=injected_memory)
-            self._progress(
-                f"PROGRESS run_label={run_label} step=worker-launch-start mode=real model={self.model} "
-                f"pure={pure} prompt_chars={len(task_prompt)}"
-            )
-            initial_cmd = [
-                "opencode",
-                "run",
-                task_prompt,
-                "--model",
-                self.model,
-                "--agent",
-                self.agent,
-                "--dir",
-                str(worktree),
-                "--dangerously-skip-permissions",
-                "--format",
-                "json",
-            ]
-            if pure:
-                initial_cmd.append("--pure")
-
-            first_run = self._run_opencode(
-                cmd=initial_cmd,
-                worktree=worktree,
-                events_path=events_path,
-                env=run_env,
-                run_label=run_label,
-                phase="initial",
-                fallback_session_id=None,
-            )
-            session_id = first_run.session_id
-            input_tokens_total += first_run.input_tokens
-            output_tokens_total += first_run.output_tokens + first_run.reasoning_tokens
-            turns_total += first_run.turns
-            self._progress(
-                f"PROGRESS run_label={run_label} step=worker-launch-end mode=real "
-                f"exit={first_run.exit_code} killed={first_run.killed_reason or 'none'} "
-                f"turns={first_run.turns} input={first_run.input_tokens} "
-                f"output={first_run.output_tokens} reasoning={first_run.reasoning_tokens} "
-                f"session_id={session_id or 'none'}"
-            )
-
-        attempt_reports: list[dict[str, Any]] = []
-        final_report: dict[str, Any] = {}
-        verdict = "FAIL"
-        attempts_to_green: int | str = "FAIL"
-
-        for attempt in range(1, self.max_attempts + 1):
-            report_json = run_dir / f"attempt-{attempt}-report.json"
-            gate_log = run_dir / f"attempt-{attempt}-gate.log"
-            self._progress(
-                f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
-            )
-            report = self._run_gate_report(
-                worktree=worktree,
-                report_path=report_json,
-                log_path=gate_log,
-            )
-            final_report = report
-
-            attempt_verdict = str(report.get("verdict", "FAIL"))
-            conformed = bool(report.get("conformed", False))
-            problems = report.get("problems") if isinstance(report.get("problems"), list) else []
-            failed_gates_raw = report.get("failed_gates")
-            failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
-
-            attempt_reports.append(
-                {
-                    "attempt": attempt,
-                    "verdict": attempt_verdict,
-                    "conformed": conformed,
-                    "n_problems": len(problems),
-                    "failed_gates": failed_gates,
-                }
-            )
-            self._progress(
-                f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
-                f"conformed={conformed} problems={len(problems)}"
-            )
-
-            if attempt_verdict == "PASS":
-                verdict = "PASS"
-                attempts_to_green = attempt - 1
-                break
-
-            if attempt < self.max_attempts:
-                if self.mock is not None:
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
-                    )
-                    continue
-
-                if not session_id:
-                    raise RuntimeError("feedback loop requires a session_id, but none was captured")
-
-                feedback = self._build_feedback_prompt(problems=problems)
-                self._progress(
-                    f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
-                    f"problem_count={len(problems)} session_id={session_id}"
+            docker_ok, docker_detail = docker_available()
+            if not docker_ok:
+                raise RuntimeError(
+                    "Docker required for isolated worker; "
+                    f"docker preflight failed: {docker_detail}"
                 )
-                feedback_cmd = [
+            if not image_exists():
+                raise RuntimeError(
+                    "Docker worker image missing. "
+                    "Build it with: docker build -t wevibe-bench-worker:v1 docker/worker"
+                )
+
+            sanitized_label = re.sub(r"[^a-zA-Z0-9_.-]", "-", run_label)
+            container_name = f"wevibe-bench-cell-{sanitized_label}"
+            stale_rm = subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            stale_detail = (stale_rm.stderr or stale_rm.stdout or "").strip()
+            if stale_rm.returncode == 0:
+                self._progress(
+                    "PROGRESS run_label="
+                    f"{run_label} step=docker-stale-remove name={container_name} detail={stale_detail or 'removed'}"
+                )
+            elif "no such container" in stale_detail.lower():
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=docker-stale-remove name={container_name} detail=already-absent"
+                )
+            else:
+                raise RuntimeError(
+                    f"failed to remove stale docker container name={container_name}: "
+                    f"{stale_detail or f'exit={stale_rm.returncode}'}"
+                )
+
+            self._progress(
+                f"PROGRESS run_label={run_label} step=worker-isolation isolation=docker "
+                f"image={WORKER_IMAGE} memory_mode={self.memory_mode} container={container_name}"
+            )
+            cell_context = DockerCell(
+                DockerCellConfig(
+                    worktree=worktree,
+                    memory_mode=self.memory_mode,
+                    container_name=container_name,
+                ),
+                progress=self._progress,
+            )
+
+        with cell_context as managed_cell:
+            if self.mock is None:
+                if not isinstance(managed_cell, DockerCell):
+                    raise RuntimeError("docker worker context did not yield a DockerCell")
+                active_cell = managed_cell
+
+                task_prompt = self._build_task_prompt(injected_memory=injected_memory)
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=worker-launch-start mode=real model={self.model} "
+                    f"pure={pure} prompt_chars={len(task_prompt)}"
+                )
+                self._write_worker_permission_config(worktree=worktree)
+                initial_inner = [
                     "opencode",
                     "run",
-                    feedback,
-                    "--session",
-                    session_id,
+                    task_prompt,
+                    "--model",
+                    self.model,
+                    "--agent",
+                    self.agent,
                     "--dir",
-                    str(worktree),
+                    "/work",
                     "--format",
                     "json",
-                    "--dangerously-skip-permissions",
                 ]
                 if pure:
-                    feedback_cmd.append("--pure")
+                    initial_inner.append("--pure")
 
-                feedback_run = self._run_opencode(
-                    cmd=feedback_cmd,
+                first_run = self._run_opencode(
+                    cmd=active_cell.exec_argv(initial_inner),
                     worktree=worktree,
                     events_path=events_path,
                     env=run_env,
                     run_label=run_label,
-                    phase=f"feedback-{attempt}",
-                    fallback_session_id=session_id,
+                    phase="initial",
+                    fallback_session_id=None,
+                    kill_hook=active_cell.force_kill,
                 )
-                if feedback_run.session_id:
-                    session_id = feedback_run.session_id
-
-                input_tokens_total += feedback_run.input_tokens
-                output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
-                turns_total += feedback_run.turns
+                session_id = first_run.session_id
+                input_tokens_total += first_run.input_tokens
+                output_tokens_total += first_run.output_tokens + first_run.reasoning_tokens
+                turns_total += first_run.turns
+                worker_killed_reason = first_run.killed_reason
                 self._progress(
-                    f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
-                    f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
-                    f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
-                    f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens}"
+                    f"PROGRESS run_label={run_label} step=worker-launch-end mode=real "
+                    f"exit={first_run.exit_code} killed={first_run.killed_reason or 'none'} "
+                    f"turns={first_run.turns} input={first_run.input_tokens} "
+                    f"output={first_run.output_tokens} reasoning={first_run.reasoning_tokens} "
+                    f"session_id={session_id or 'none'}"
                 )
-                continue
 
-            verdict = "FAIL"
-            attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-            break
+            for attempt in range(1, self.max_attempts + 1):
+                report_json = run_dir / f"attempt-{attempt}-report.json"
+                gate_log = run_dir / f"attempt-{attempt}-gate.log"
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
+                )
+                report = self._run_gate_report(
+                    worktree=worktree,
+                    report_path=report_json,
+                    log_path=gate_log,
+                )
+                final_report = report
+
+                attempt_verdict = str(report.get("verdict", "FAIL"))
+                conformed = bool(report.get("conformed", False))
+                problems = report.get("problems") if isinstance(report.get("problems"), list) else []
+                failed_gates_raw = report.get("failed_gates")
+                failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
+
+                attempt_reports.append(
+                    {
+                        "attempt": attempt,
+                        "verdict": attempt_verdict,
+                        "conformed": conformed,
+                        "n_problems": len(problems),
+                        "failed_gates": failed_gates,
+                    }
+                )
+                self._progress(
+                    f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
+                    f"conformed={conformed} problems={len(problems)}"
+                )
+
+                if attempt_verdict == "PASS":
+                    verdict = "PASS"
+                    attempts_to_green = attempt - 1
+                    break
+
+                if worker_killed_reason is not None:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
+                        f"reason=container-dead killed={worker_killed_reason}"
+                    )
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    break
+
+                if attempt < self.max_attempts:
+                    if self.mock is not None:
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
+                        )
+                        continue
+
+                    if active_cell is None:
+                        raise RuntimeError("feedback loop requires an active docker cell")
+
+                    if not session_id:
+                        raise RuntimeError("feedback loop requires a session_id, but none was captured")
+
+                    feedback_checks = [
+                        str(p.get("check", "")).strip()
+                        for p in problems
+                        if isinstance(p, dict) and str(p.get("check", "")).strip()
+                    ]
+                    feedback = self._build_feedback_prompt(checks=feedback_checks)
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
+                        f"checks={len(feedback_checks)}"
+                    )
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
+                        f"problem_count={len(problems)} session_id={session_id}"
+                    )
+                    self._write_worker_permission_config(worktree=worktree)
+                    feedback_inner = [
+                        "opencode",
+                        "run",
+                        feedback,
+                        "--session",
+                        session_id,
+                        "--dir",
+                        "/work",
+                        "--format",
+                        "json",
+                    ]
+                    if pure:
+                        feedback_inner.append("--pure")
+
+                    feedback_run = self._run_opencode(
+                        cmd=active_cell.exec_argv(feedback_inner),
+                        worktree=worktree,
+                        events_path=events_path,
+                        env=run_env,
+                        run_label=run_label,
+                        phase=f"feedback-{attempt}",
+                        fallback_session_id=session_id,
+                        kill_hook=active_cell.force_kill,
+                    )
+                    if feedback_run.session_id:
+                        session_id = feedback_run.session_id
+
+                    input_tokens_total += feedback_run.input_tokens
+                    output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
+                    turns_total += feedback_run.turns
+                    if feedback_run.killed_reason:
+                        worker_killed_reason = feedback_run.killed_reason
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
+                        f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
+                        f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
+                        f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens}"
+                    )
+                    continue
+
+                verdict = "FAIL"
+                attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                break
 
         wall_seconds = time.monotonic() - started
         problems_final = self._normalize_problems(final_report.get("problems"))
         failed_gates_final = self._normalize_string_list(final_report.get("failed_gates"))
+        oracle_markers = build_oracle_markers(
+            gates_dir=(self.task_dir / "gates").resolve(),
+            golden_dir=(self.task_dir / "golden").resolve(),
+        )
+        cheat_finding = scan_events_for_oracle_access(events_path=events_path, markers=oracle_markers)
+        cheated = cheat_finding.cheated
+        cheat_detail = cheat_finding.summary()
+        if cheated:
+            verdict = "CHEAT"
+            cheat_marker = run_dir / "CHEAT.json"
+            cheat_marker.write_text(
+                json.dumps(
+                    {
+                        "run_label": run_label,
+                        "verdict": "CHEAT",
+                        "summary": cheat_detail,
+                        "hits": [
+                            {
+                                "tool": hit.tool,
+                                "marker": hit.marker,
+                                "call_id": hit.call_id,
+                                "excerpt": hit.excerpt,
+                            }
+                            for hit in cheat_finding.hits
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            if self.logger is not None:
+                error = getattr(self.logger, "error", None)
+                if callable(error):
+                    error(
+                        "CHEAT DETECTED run_label=%s verdict=CHEAT summary=%s hits=%s",
+                        run_label,
+                        cheat_detail,
+                        len(cheat_finding.hits),
+                    )
+            self._progress(
+                f"PROGRESS run_label={run_label} step=cheat-detected verdict=CHEAT "
+                f"hits={len(cheat_finding.hits)} summary={cheat_detail} marker={cheat_marker}"
+            )
 
         return BackgammonCellResult(
             verdict=verdict,
@@ -369,10 +514,37 @@ class BackgammonRunner(AgentRunner):
             session_id=session_id,
             memory_mode=self.memory_mode,
             model=self.model,
+            cheated=cheated,
+            cheat_detail=cheat_detail,
         )
 
-    def _prepare_memory_mode(self, *, worktree: Path) -> tuple[dict[str, str], bool]:
-        env = os.environ.copy()
+    def _write_worker_permission_config(self, *, worktree: Path) -> None:
+        gates_dir = str((self.task_dir / "gates").resolve())
+        golden_dir = str((self.task_dir / "golden").resolve())
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "permission": {
+                "*": "allow",
+                "external_directory": {"*": "deny"},
+                "bash": {
+                    "*": "allow",
+                    f"*{gates_dir}*": "deny",
+                    f"*{golden_dir}*": "deny",
+                    "*report.mjs*": "deny",
+                    "*run.mjs*": "deny",
+                },
+                "edit": {"*": "allow", "*opencode.json": "deny"},
+                "doom_loop": "deny",
+                "question": "deny",
+            },
+        }
+        (worktree / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        self._progress(
+            "PROGRESS step=worker-permission-config external_directory=deny "
+            "oracle_bash_deny=active skip_permissions_removed=true"
+        )
+
+    def _prepare_memory_mode(self, *, worktree: Path) -> bool:
 
         if self.memory_mode == "on":
             source_org = self._repo_root / ".wevibe" / "org.json"
@@ -382,18 +554,15 @@ class BackgammonRunner(AgentRunner):
             marker_dir = worktree / ".wevibe"
             marker_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_org, marker_dir / "org.json")
-            env["WEVIBE_MCP_HTTP_URL"] = "http://127.0.0.1:4550"
-            env["WEVIBE_RECALL_MODE"] = "test"
-            env["WEVIBE_HUB_URL"] = "http://localhost:4440"
             self._progress(
                 f"PROGRESS step=memory-mode mode=on marker={marker_dir / 'org.json'} "
-                "WEVIBE_MCP_HTTP_URL=http://127.0.0.1:4550"
+                "recall_env_injection=container"
             )
-            return env, False
+            return False
 
         shutil.rmtree(worktree / ".wevibe", ignore_errors=True)
         self._progress("PROGRESS step=memory-mode mode=off pure=true")
-        return env, True
+        return True
 
     def _build_task_prompt(self, *, injected_memory: list[RecalledMemory]) -> str:
         contract_path = self.task_dir / "CONTRACT.md"
@@ -435,32 +604,30 @@ class BackgammonRunner(AgentRunner):
         return f"{memory_blob}\n{base_prompt}"
 
     @staticmethod
-    def _build_feedback_prompt(*, problems: list[Any]) -> str:
+    def _build_feedback_prompt(*, checks: list[str]) -> str:
         header = (
             "The following gate checks are failing. Fix the implementation so they pass. "
             "Do not explain, just edit the code."
         )
-        if not problems:
-            return (
-                f"{header}\n\n"
-                "- CHECK: gate:unknown\n"
-                "  EXPECTED: all gate checks pass\n"
-                "  OBSERVED: gate runner returned FAIL with no detailed problems"
-            )
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in checks:
+            first_line = str(item).split("\n", 1)[0]
+            sanitized = " ".join(first_line.split())
+            if len(sanitized) > 120:
+                sanitized = sanitized[:120]
+            if not sanitized or sanitized in seen:
+                continue
+            seen.add(sanitized)
+            deduped.append(sanitized)
 
         lines: list[str] = [header, ""]
-        for item in problems:
-            if isinstance(item, dict):
-                check = str(item.get("check", "unknown"))
-                expected = str(item.get("expected", ""))
-                observed = str(item.get("observed", ""))
-            else:
-                check = "unknown"
-                expected = ""
-                observed = str(item)
-            lines.append(f"- CHECK: {check}")
-            lines.append(f"  EXPECTED: {expected}")
-            lines.append(f"  OBSERVED: {observed}")
+        if not deduped:
+            lines.append("- (gate runner reported FAIL with no itemised checks): FAILING")
+            return "\n".join(lines)
+
+        for label in deduped:
+            lines.append(f"- {label}: FAILING")
         return "\n".join(lines)
 
     def _run_gate_report(self, *, worktree: Path, report_path: Path, log_path: Path) -> dict[str, Any]:
@@ -520,6 +687,7 @@ class BackgammonRunner(AgentRunner):
         run_label: str,
         phase: str,
         fallback_session_id: str | None,
+        kill_hook: Callable[[], None] | None = None,
     ) -> _OpencodeRunStats:
         state_lock = threading.Lock()
         state: dict[str, Any] = {
@@ -611,6 +779,24 @@ class BackgammonRunner(AgentRunner):
             stderr_thread.start()
 
             killed_reason: str | None = None
+            kill_hook_ran = False
+
+            def run_kill_hook(*, reason: str) -> None:
+                nonlocal kill_hook_ran
+                if kill_hook is None or kill_hook_ran:
+                    return
+                kill_hook_ran = True
+                try:
+                    kill_hook()
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=worker-kill-hook phase={phase} "
+                        f"reason={reason} status=ok"
+                    )
+                except Exception as exc:  # noqa: BLE001 - surface and continue teardown.
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=worker-kill-hook phase={phase} "
+                        f"reason={reason} status=error detail={exc}"
+                    )
 
             while True:
                 rc = proc.poll()
@@ -627,6 +813,7 @@ class BackgammonRunner(AgentRunner):
                         f"reason=run_timeout elapsed={elapsed:.2f}s limit={self.run_timeout_s}s"
                     )
                     self._kill_process_group(proc)
+                    run_kill_hook(reason="run_timeout")
                     break
                 if est_tokens > self.token_cap:
                     killed_reason = "token_cap"
@@ -635,6 +822,7 @@ class BackgammonRunner(AgentRunner):
                         f"reason=token_cap est_tokens={est_tokens} cap={self.token_cap}"
                     )
                     self._kill_process_group(proc)
+                    run_kill_hook(reason="token_cap")
                     break
                 time.sleep(2.0)
 

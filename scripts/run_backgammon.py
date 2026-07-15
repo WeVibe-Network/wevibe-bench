@@ -200,6 +200,7 @@ def main() -> int:
         run_label=args.run_label,
         tau=0.68,
         surface_budget=3,
+        max_attempts=args.max_attempts,
         mcp_recall_url="http://127.0.0.1:4550",
     )
 
@@ -253,7 +254,7 @@ def main() -> int:
             model=args.model,
             memory_mode=mode,
             mock=mock_mode,
-            max_attempts=args.max_attempts,
+            max_attempts=cfg.max_attempts,
             token_cap=args.token_cap,
             run_timeout_s=args.run_timeout,
             agent=args.agent,
