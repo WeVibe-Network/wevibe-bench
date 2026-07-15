@@ -10,6 +10,7 @@ import {
   emptyPoints,
   makeState,
 } from "../lib/harness.ts";
+import { withinParityBand } from "../lib/acceptance.ts";
 
 const { game, ai } = await loadEngine();
 
@@ -37,8 +38,8 @@ const refWp = (myPip: number, oppPip: number): number => {
   return Math.max(0.02, Math.min(0.98, raw));
 };
 
-describe("[G09] bear-off blocked while a checker is outside home / on bar", () => {
-  it("[G09] blocks bear-off when any white checker is outside home", () => {
+describe("[G09] REQ-BEAROFF-GATE — bear-off blocked while a checker is outside home / on bar", () => {
+  it("[G09] REQ-BEAROFF-GATE — blocks bear-off when any white checker is outside home", () => {
     const points = emptyPoints();
     points[3] = 1;
     points[8] = 1; // outside white home
@@ -50,7 +51,7 @@ describe("[G09] bear-off blocked while a checker is outside home / on bar", () =
     expect(moves.every((m: { to: number }) => m.to !== 25)).toBe(true);
   });
 
-  it("[G09] blocks bear-off when white has any checker on the bar", () => {
+  it("[G09] REQ-BEAROFF-GATE — blocks bear-off when white has any checker on the bar", () => {
     const points = emptyPoints();
     points[2] = 1;
     const board = bd(points, { white: 1, black: 0 });
@@ -62,8 +63,8 @@ describe("[G09] bear-off blocked while a checker is outside home / on bar", () =
   });
 });
 
-describe("[G10] win / gammon / backgammon classification", () => {
-  it("[G10] classifies single when loser has already borne off at least one", () => {
+describe("[G10] REQ-WINCLASS — win / gammon / backgammon classification", () => {
+  it("[G10] REQ-WINCLASS — classifies single when loser has already borne off at least one", () => {
     const points = emptyPoints();
     points[13] = -1;
     const board = bd(points, { white: 0, black: 0 }, { white: 15, black: 2 });
@@ -71,7 +72,7 @@ describe("[G10] win / gammon / backgammon classification", () => {
     expect(game.checkWin(board, "white")).toEqual({ won: true, type: "single" });
   });
 
-  it("[G10] classifies gammon when loser has no off, no bar, and none in winner home", () => {
+  it("[G10] REQ-WINCLASS — classifies gammon when loser has no off, no bar, and none in winner home", () => {
     const points = emptyPoints();
     points[13] = -3;
     const board = bd(points, { white: 0, black: 0 }, { white: 15, black: 0 });
@@ -79,7 +80,7 @@ describe("[G10] win / gammon / backgammon classification", () => {
     expect(game.checkWin(board, "white")).toEqual({ won: true, type: "gammon" });
   });
 
-  it("[G10] classifies backgammon when loser checker is in winner home board", () => {
+  it("[G10] REQ-WINCLASS — classifies backgammon when loser checker is in winner home board", () => {
     const points = emptyPoints();
     points[3] = -1;
     const board = bd(points, { white: 0, black: 0 }, { white: 15, black: 0 });
@@ -87,7 +88,7 @@ describe("[G10] win / gammon / backgammon classification", () => {
     expect(game.checkWin(board, "white")).toEqual({ won: true, type: "backgammon" });
   });
 
-  it("[G10] classifies backgammon when loser still has a checker on the bar", () => {
+  it("[G10] REQ-WINCLASS — classifies backgammon when loser still has a checker on the bar", () => {
     const points = emptyPoints();
     points[13] = -1;
     const board = bd(points, { white: 0, black: 1 }, { white: 15, black: 0 });
@@ -95,7 +96,7 @@ describe("[G10] win / gammon / backgammon classification", () => {
     expect(game.checkWin(board, "white")).toEqual({ won: true, type: "backgammon" });
   });
 
-  it("[G10] reports not-won when off count is below 15", () => {
+  it("[G10] REQ-WINCLASS — reports not-won when off count is below 15", () => {
     const points = emptyPoints();
     points[1] = 1;
     const board = bd(points, { white: 0, black: 0 }, { white: 14, black: 0 });
@@ -104,7 +105,7 @@ describe("[G10] win / gammon / backgammon classification", () => {
   });
 });
 
-describe("[G11] doubling-cube STATE machine (via server)", () => {
+describe("[G11] REQ-CUBE-STATE — doubling-cube STATE machine (via server)", () => {
   let serverHandle: Awaited<ReturnType<typeof startServer>> | null = null;
 
   beforeAll(async () => {
@@ -117,7 +118,7 @@ describe("[G11] doubling-cube STATE machine (via server)", () => {
     }
   });
 
-  it("[G11] new game starts with centered cube and canDouble=true", async () => {
+  it("[G11] REQ-CUBE-STATE — new game starts with centered cube and canDouble=true", async () => {
     await api("/api/new", { difficulty: "medium" });
     const state = await getState();
 
@@ -125,7 +126,7 @@ describe("[G11] doubling-cube STATE machine (via server)", () => {
     expect(state.cube).toEqual({ value: 1, owner: null });
   });
 
-  it("[G11] accepted human double doubles cube and transfers ownership to the taker", async () => {
+  it("[G11] REQ-CUBE-STATE — accepted human double doubles cube and transfers ownership to the taker", async () => {
     // Standard backgammon: when the doubled player TAKES, the taker (here the AI,
     // black) owns the cube — not the doubler. From the opening position the AI's
     // win prob is 0.5 >= its take point, so it accepts.
@@ -137,7 +138,7 @@ describe("[G11] doubling-cube STATE machine (via server)", () => {
     expect(state.cube).toEqual({ value: 2, owner: "black" });
   });
 
-  it("[G11] illegal double in move phase must not mutate cube", async () => {
+  it("[G11] REQ-CUBE-STATE — illegal double in move phase must not mutate cube", async () => {
     await api("/api/new", {});
     await debugRoll([3, 1]);
     await api("/api/roll");
@@ -153,8 +154,8 @@ describe("[G11] doubling-cube STATE machine (via server)", () => {
   });
 });
 
-describe("[G12] cube AI accept/decline and offer window thresholds", () => {
-  it("[G12] accepts near-even cube offers across all difficulties", () => {
+describe("[G12] REQ-CUBE-AI — cube AI accept/decline and offer window thresholds", () => {
+  it("[G12] REQ-CUBE-AI — accepts near-even cube offers across all difficulties", () => {
     const points = emptyPoints();
     points[6] = 5; // white pip 30
     points[19] = -5; // black pip 30
@@ -166,7 +167,7 @@ describe("[G12] cube AI accept/decline and offer window thresholds", () => {
 
     expect({ myPip, oppPip }).toEqual({ myPip: 30, oppPip: 30 });
     expect(wp).toBe(0.5);
-    expect(ai.winProbability(board, "black")).toBe(0.5);
+    expect(withinParityBand(ai.winProbability(board, "black"))).toBe(true);
     expect(wp).toBeGreaterThanOrEqual(TAKE_POINT.easy);
     expect(wp).toBeGreaterThanOrEqual(TAKE_POINT.medium);
     expect(wp).toBeGreaterThanOrEqual(TAKE_POINT.hard);
@@ -175,7 +176,7 @@ describe("[G12] cube AI accept/decline and offer window thresholds", () => {
     expect(ai.shouldAiAccept(board, "black", "hard").action).toBe("double");
   });
 
-  it("[G12] declines when black win chance is below hard take point", () => {
+  it("[G12] REQ-CUBE-AI — declines when black win chance is below hard take point", () => {
     const points = emptyPoints();
     points[2] = 1; // white pip 2
     const board = bd(points, { white: 0, black: 14 }); // black pip 350 from bar
@@ -186,12 +187,12 @@ describe("[G12] cube AI accept/decline and offer window thresholds", () => {
 
     expect({ myPip, oppPip }).toEqual({ myPip: 350, oppPip: 2 });
     expect(wp).toBe(0.02);
-    expect(ai.winProbability(board, "black")).toBe(0.02);
+    expect(ai.winProbability(board, "black")).toBeLessThan(TAKE_POINT.hard);
     expect(wp).toBeLessThan(TAKE_POINT.hard);
     expect(ai.shouldAiAccept(board, "black", "hard").action).toBe("no-double");
   });
 
-  it("[G12] offers only inside hard window, never when blocked/easy/too-good", () => {
+  it("[G12] REQ-CUBE-AI — offers only inside hard window, never when blocked/easy/too-good", () => {
     const anyPoints = emptyPoints();
     anyPoints[6] = 1;
     anyPoints[19] = -1;
@@ -235,7 +236,7 @@ describe("[G12] cube AI accept/decline and offer window thresholds", () => {
 
     expect({ tooGoodMyPip, tooGoodOppPip }).toEqual({ tooGoodMyPip: 1, tooGoodOppPip: 350 });
     expect(tooGoodWp).toBeGreaterThan(DOUBLE_WINDOW.upper);
-    expect(ai.winProbability(tooGoodBoard, "black")).toBe(0.98);
+    expect(ai.winProbability(tooGoodBoard, "black")).toBeGreaterThan(DOUBLE_WINDOW.upper);
     expect(
       ai.shouldAiDouble(tooGoodBoard, "black", { value: 1, owner: null }, "hard")
         .action,

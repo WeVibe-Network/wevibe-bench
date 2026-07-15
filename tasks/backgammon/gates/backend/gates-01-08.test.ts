@@ -44,7 +44,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(ai).toBeTruthy();
   });
 
-  it("[G01] initial position", () => {
+  it("[G01] REQ-INIT — initial position", () => {
     const points = game.startingPoints();
 
     expect(points).toEqual(STARTING_POINTS_EXPECTED);
@@ -64,7 +64,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(game.opponent("black")).toBe("white");
   });
 
-  it("[G02] pip count", () => {
+  it("[G02] REQ-PIP — pip count", () => {
     const start = bd([...game.startingPoints()], { white: 0, black: 0 }, { white: 0, black: 0 });
     expect(game.pipCount(start, "white")).toBe(167);
     expect(game.pipCount(start, "black")).toBe(167);
@@ -93,7 +93,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(game.pipCount(oneLeftBoard, "white")).toBe(2);
   });
 
-  it("[G03] dice → moves", () => {
+  it("[G03] REQ-DICE — dice → moves", () => {
     const start = bd([...game.startingPoints()], { white: 0, black: 0 }, { white: 0, black: 0 });
 
     expect(game.maxPlies(start, "white", [3, 3, 3, 3])).toBe(4);
@@ -101,7 +101,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(game.maxPlies(start, "black", [6, 6, 6, 6])).toBe(4);
   });
 
-  it("[G04] legal-move generation (blocked points + hits)", () => {
+  it("[G04] REQ-MOVES — legal-move generation (blocked points + hits)", () => {
     const pts = emptyPoints();
     pts[8] = 1;
     pts[5] = -2;
@@ -122,7 +122,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(dieSixMoves.every((m) => m.to >= 1 && m.to <= 24)).toBe(true);
   });
 
-  it("[G05] use higher die", () => {
+  it("[G05] REQ-HIGHER-DIE — use higher die", () => {
     const pts = emptyPoints();
     pts[13] = 1;
     pts[6] = -2;
@@ -135,7 +135,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(norm(legal)).not.toContain("13-10-3");
   });
 
-  it("[G06] bar re-entry + blocked pass", () => {
+  it("[G06] REQ-BAR — bar re-entry + blocked pass", () => {
     const entryPts = emptyPoints();
     entryPts[10] = -1;
     entryPts[8] = 1;
@@ -153,7 +153,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(game.legalMovesNow(blockedBoard, "white", [2, 4])).toEqual([]);
   });
 
-  it("[G07] hitting → bar", () => {
+  it("[G07] REQ-HIT — hitting → bar", () => {
     const pts = emptyPoints();
     pts[8] = 1;
     pts[5] = -1;
@@ -166,7 +166,7 @@ describe("Backgammon backend gates 01-08", () => {
     expect(board.points[8]).toBe(0);
   });
 
-  it("[G08] bear-off incl overshoot", () => {
+  it("[G08] REQ-BEAROFF — bear-off incl overshoot", () => {
     const overshootAllowedPts = emptyPoints();
     overshootAllowedPts[3] = 2;
     const overshootAllowedBoard = bd(overshootAllowedPts, { white: 0, black: 0 }, { white: 13, black: 0 });

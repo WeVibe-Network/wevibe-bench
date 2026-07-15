@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { checkerAnimates, hintAnimates } from "../lib/acceptance.ts";
 
 function emptyPts() {
   return new Array(26).fill(0);
@@ -58,7 +59,7 @@ async function fetchState(page: Page) {
   return response.json();
 }
 
-test("[F09] hit -> bar visual", async ({ page }) => {
+test("[F09] REQ-HIT — hit -> bar visual", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[data-testid="board"]')).toBeVisible();
 
@@ -89,7 +90,7 @@ test("[F09] hit -> bar visual", async ({ page }) => {
   ).toHaveCount(1);
 });
 
-test("[F10] bar re-entry visual", async ({ page }) => {
+test("[F10] REQ-BAR — bar re-entry visual", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[data-testid="board"]')).toBeVisible();
 
@@ -140,7 +141,7 @@ test("[F10] bar re-entry visual", async ({ page }) => {
     .toBeGreaterThan(0);
 });
 
-test("[F11] bear-off visual", async ({ page }) => {
+test("[F11] REQ-BEAROFF — bear-off visual", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[data-testid="board"]')).toBeVisible();
 
@@ -168,7 +169,7 @@ test("[F11] bear-off visual", async ({ page }) => {
   ).toHaveCount(3);
 });
 
-test("[F12] win state + new game without reload", async ({ page }) => {
+test("[F12] REQ-NEWGAME — win state + new game without reload", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[data-testid="board"]')).toBeVisible();
 
@@ -236,7 +237,7 @@ test("[F12] win state + new game without reload", async ({ page }) => {
     .toBe(1);
 });
 
-test("[F13] compact / no horizontal overflow", async ({ page }) => {
+test("[F13] REQ-COMPACT — compact / no horizontal overflow", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[data-testid="board"]')).toBeVisible();
 
@@ -266,18 +267,26 @@ test("[F13] compact / no horizontal overflow", async ({ page }) => {
   }
 });
 
-test("[F14] animation present", async ({ page }) => {
+test("[F14] REQ-ANIM — animation present", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator('[data-testid="board"]')).toBeVisible();
 
-  const checkerTransition = await page
+  const checkerMotion = await page
     .locator('[data-testid="checker"]')
     .first()
     .evaluate((el) => {
       const css = getComputedStyle(el);
-      return `${css.transitionProperty}|${css.transition}`;
+      return {
+        transitionProperty: css.transitionProperty,
+        transitionDuration: css.transitionDuration,
+        animationName: css.animationName,
+        animationDuration: css.animationDuration,
+      };
     });
-  expect(checkerTransition).toContain("transform");
+  // REQ-ANIM: checker motion animated via a CSS transition on transform/all with non-zero
+  // duration, OR a CSS keyframe animation with non-zero duration. (transition-property defaults
+  // to "all" with 0s duration when unset, so the duration check is what makes this meaningful.)
+  expect(checkerAnimates(checkerMotion)).toBe(true);
 
   const points = emptyPts();
   points[6] = 14;
@@ -305,10 +314,9 @@ test("[F14] animation present", async ({ page }) => {
   const hintAnimation = await hint.evaluate((el) => {
     const css = getComputedStyle(el);
     return {
-      name: css.animationName,
-      duration: css.animationDuration,
+      animationName: css.animationName,
+      animationDuration: css.animationDuration,
     };
   });
-  expect(hintAnimation.name).not.toBe("none");
-  expect(hintAnimation.duration).not.toBe("0s");
+  expect(hintAnimates(hintAnimation)).toBe(true);
 });

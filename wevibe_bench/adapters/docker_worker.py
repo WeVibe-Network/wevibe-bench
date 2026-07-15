@@ -145,6 +145,7 @@ class DockerCellConfig:
     recall_mode: str = "test"
     provider_key_env: str = "OPENROUTER_API_KEY"
     home_dir: str = "/home/worker"
+    output_token_max: int | None = None
 
 
 class DockerCell:
@@ -365,6 +366,20 @@ def _build_run_argv(
         "-v",
         mount,
     ]
+
+    if config.output_token_max is not None:
+        # Enforced output-cap lever for opencode workers: this EXPERIMENTAL env flag
+        # maps to AI-SDK `maxOutputTokens`, which then serializes to request-body
+        # `max_tokens`. It only constrains completions when the configured value is
+        # <= the selected model's own output-token limit. For the worker image's
+        # exact pinned opencode version, honoring is still a live assertion pending
+        # request-body capture.
+        run_cmd.extend(
+            [
+                "-e",
+                f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX={config.output_token_max}",
+            ]
+        )
 
     if memory_mode == "on":
         run_cmd.extend(

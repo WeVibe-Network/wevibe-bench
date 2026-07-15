@@ -156,7 +156,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mock", choices=("none", "golden", "scaffold"), default="none")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--token-cap", type=int, default=200000)
+    parser.add_argument("--cost-limit", type=float, default=None)
+    parser.add_argument("--cost-target", type=float, default=None)
+    parser.add_argument("--max-output-tokens", type=int, default=None)
+    parser.add_argument("--max-steps-per-attempt", type=int, default=None)
+    parser.add_argument("--output-price-per-1m", type=float, default=None)
     parser.add_argument("--run-timeout", type=int, default=1800)
+    parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--agent", default="build")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--runs-dir", default=str(_default_runs_dir()))
@@ -170,6 +176,19 @@ def main() -> int:
     memory_modes = _parse_memory_modes(args.memory_modes)
     mock_mode = None if args.mock == "none" else args.mock
     run_ts = _utc_compact()
+
+    if args.cost_limit is not None and args.cost_limit <= 0:
+        raise ValueError("--cost-limit must be > 0")
+    if args.cost_target is not None and args.cost_target <= 0:
+        raise ValueError("--cost-target must be > 0")
+    if args.max_output_tokens is not None and args.max_output_tokens <= 0:
+        raise ValueError("--max-output-tokens must be > 0")
+    if args.max_steps_per_attempt is not None and args.max_steps_per_attempt <= 0:
+        raise ValueError("--max-steps-per-attempt must be > 0")
+    if args.output_price_per_1m is not None and args.output_price_per_1m <= 0:
+        raise ValueError("--output-price-per-1m must be > 0")
+    if args.cost_limit is not None and args.cost_target is not None and args.cost_target >= args.cost_limit:
+        raise ValueError("--cost-target must be < --cost-limit")
 
     runs_dir = Path(args.runs_dir).expanduser().resolve()
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -190,10 +209,23 @@ def main() -> int:
         print(line, flush=True)
         logger.info(line)
 
-    progress(
+    start_line = (
         f"start run_label={args.run_label} model={args.model} "
         f"memory_modes={','.join(memory_modes)} mock={args.mock}"
     )
+    if args.cost_limit is not None:
+        start_line += f" cost_limit_usd={args.cost_limit:.4f}"
+    if args.cost_target is not None:
+        start_line += f" cost_target_usd={args.cost_target:.4f}"
+    if args.max_output_tokens is not None:
+        start_line += f" max_output_tokens={args.max_output_tokens}"
+    if args.max_steps_per_attempt is not None:
+        start_line += f" max_steps_per_attempt={args.max_steps_per_attempt}"
+    if args.output_price_per_1m is not None:
+        start_line += f" output_price_per_1m={args.output_price_per_1m:.4f}"
+    if args.reasoning_effort is not None:
+        start_line += f" reasoning_effort={args.reasoning_effort}"
+    progress(start_line)
 
     cfg = RunConfig(
         model_ladder=(args.model,),
@@ -202,6 +234,12 @@ def main() -> int:
         surface_budget=3,
         max_attempts=args.max_attempts,
         mcp_recall_url="http://127.0.0.1:4550",
+        cost_limit_usd=args.cost_limit,
+        cost_target_usd=args.cost_target,
+        max_output_tokens=args.max_output_tokens,
+        max_steps_per_attempt=args.max_steps_per_attempt,
+        output_price_per_1m=args.output_price_per_1m,
+        reasoning_effort=args.reasoning_effort,
     )
 
     try:
@@ -257,6 +295,12 @@ def main() -> int:
             max_attempts=cfg.max_attempts,
             token_cap=args.token_cap,
             run_timeout_s=args.run_timeout,
+            cost_limit_usd=cfg.cost_limit_usd,
+            cost_target_usd=cfg.cost_target_usd,
+            max_output_tokens=cfg.max_output_tokens,
+            max_steps_per_attempt=cfg.max_steps_per_attempt,
+            output_price_per_1m=cfg.output_price_per_1m,
+            reasoning_effort=cfg.reasoning_effort,
             agent=args.agent,
             logger=logger,
             progress=progress,
@@ -278,6 +322,7 @@ def main() -> int:
             "input_tokens": int(result.input_tokens),
             "output_tokens": int(result.output_tokens),
             "turns": int(result.turns),
+            "wall_cost_usd": float(result.wall_cost_usd),
             "wall_seconds": float(result.wall_seconds),
             "conformed": bool(result.conformed),
             "failed_gates": _as_str_list(result.failed_gates),
@@ -303,9 +348,12 @@ def main() -> int:
         turns = _as_int(cell_data.get("turns"))
         wall_seconds = _as_float(cell_data.get("wall_seconds"))
         failed_gates = _as_str_list(cell_data.get("failed_gates"))
+        wall_cost_usd = _as_float(cell_data.get("wall_cost_usd"))
 
         run_result = executed.get(mode)
         delivery = run_result.delivery if run_result is not None else "N/A"
+        if run_result is not None:
+            wall_cost_usd = run_result.wall_cost_usd
 
         scorecard.add_cell(
             Cell(
@@ -316,7 +364,7 @@ def main() -> int:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 turns=turns,
-                wall_cost_usd=0.0,
+                wall_cost_usd=wall_cost_usd,
                 wall_seconds=wall_seconds,
                 delivery=delivery,
                 scored=True,

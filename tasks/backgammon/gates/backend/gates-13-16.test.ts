@@ -86,7 +86,7 @@ function waitForExitWithTimeout(
 }
 
 describe("Backgammon backend gates 13-16", () => {
-  describe("[G13] turn-flow integrity (via server)", () => {
+  describe("[G13] REQ-TURN — turn-flow integrity (via server)", () => {
     let server: Awaited<ReturnType<typeof startServer>>;
 
     beforeAll(async () => {
@@ -98,7 +98,7 @@ describe("Backgammon backend gates 13-16", () => {
       await stopServer(server);
     });
 
-    it("[G13] no die reuse after consumption", async () => {
+    it("[G13] REQ-TURN — no die reuse after consumption", async () => {
       await api("/api/new", { difficulty: "easy" });
       await debugRoll([3, 1]);
 
@@ -125,7 +125,7 @@ describe("Backgammon backend gates 13-16", () => {
       expect(sortedDice(secondAttempt.remainingDice)).toEqual([1]);
     });
 
-    it("[G13] alternate turns white -> black -> white", async () => {
+    it("[G13] REQ-TURN — alternate turns white -> black -> white", async () => {
       await api("/api/new", { difficulty: "easy" });
       await debugRoll([4, 2]);
 
@@ -162,7 +162,7 @@ describe("Backgammon backend gates 13-16", () => {
       expect(state.turn).toBe("white");
     });
 
-    it("[G13] auto-pass when stuck on bar", async () => {
+    it("[G13] REQ-TURN — auto-pass when stuck on bar", async () => {
       const points = emptyPoints();
       points[23] = -2;
       points[21] = -2;
@@ -191,7 +191,7 @@ describe("Backgammon backend gates 13-16", () => {
     });
   });
 
-  describe("[G14] AI legality + hard beats easy (seeded self-play)", () => {
+  describe("[G14] REQ-AILEGAL — AI legality + hard beats easy (seeded self-play)", () => {
     let game: any;
     let ai: any;
     const originalRandom = Math.random;
@@ -264,7 +264,7 @@ describe("Backgammon backend gates 13-16", () => {
       Math.random = originalRandom;
     });
 
-    it("[G14] chooseMoves always returns legal move sequences", () => {
+    it("[G14] REQ-AILEGAL — chooseMoves always returns legal move sequences", () => {
       const seed = 0x13a4b6c8;
       Math.random = mulberry32(seed);
 
@@ -286,7 +286,7 @@ describe("Backgammon backend gates 13-16", () => {
       }
     });
 
-    it("[G14] hard(black) wins more than easy(white) in seeded self-play", () => {
+    it("[G14] REQ-AISTRENGTH — hard(black) wins more than easy(white) in seeded self-play", () => {
       const seed = 0x5eed1337;
       Math.random = mulberry32(seed);
 
@@ -332,7 +332,7 @@ describe("Backgammon backend gates 13-16", () => {
     });
   });
 
-  describe("[G15] scripted full game reaches winner with zero exceptions (via server)", () => {
+  describe("[G15] REQ-COMPLETE — scripted full game reaches winner with zero exceptions (via server)", () => {
     let server: Awaited<ReturnType<typeof startServer>>;
 
     beforeAll(async () => {
@@ -343,7 +343,7 @@ describe("Backgammon backend gates 13-16", () => {
       await stopServer(server);
     });
 
-    it("[G15] complete game to winner with fixed debug dice script", async () => {
+    it("[G15] REQ-COMPLETE — complete game to winner with fixed debug dice script", async () => {
       const scriptedRolls = [[6, 5], [6, 6, 6, 6], [5, 4], [3, 1], [2, 1]];
       let rollIndex = 0;
       const nextRoll = () => {
@@ -420,8 +420,8 @@ describe("Backgammon backend gates 13-16", () => {
     });
   });
 
-  describe("[G16] port 8002 bind + clear failure when taken", () => {
-    it("[G16] second server exits non-zero with clear 8002 in-use message", async () => {
+  describe("[G16] REQ-BIND — port 8002 bind + clear failure when taken", () => {
+    it("[G16] REQ-BIND — second server exits non-zero with clear 8002 in-use message", async () => {
       await freePort(PORT);
       const h = await startServer({ debug: true });
 

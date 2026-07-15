@@ -1,4 +1,4 @@
-# BENCHMARK STATE & BUILD PLAN — single source of truth (as of 2026-07-14)
+# BENCHMARK STATE & BUILD PLAN — single source of truth (as of 2026-07-15)
 
 > Read this FIRST next session to build the SxE+recall benchmark properly. This is the durable INDEX:
 > what the benchmark is, current architecture, all results, WHERE every artifact lives, the key findings,
@@ -93,19 +93,45 @@ verbose output, not injection volume. "all-11=bloat" UNSUPPORTED. mgr-verified v
 - **Known limitation:** perm-deny leaks (bash indirection, file-copy) → cheat-gate is the guaranteed backstop,
   but for clean scored data the oracle must be physically absent.
 
+## 6A. Option A — requirements-instrument repair (15-07-26)
+- **LOCKED (Walter):** the benchmark is repaired into a defensible requirements-to-implementation instrument.
+  Every pass-required behavior must be derivable from `tasks/backgammon/CONTRACT.md`; hidden gates may verify
+  public requirements but may not require oracle-only constants/formulas/exact strings/counts/mechanisms absent
+  from the contract; if a precise constant is required it is published; if multiple implementations satisfy a
+  requirement the oracle accepts them; feedback stays problems-only and names failed public requirements/checks by
+  REQ-ID + gate ID only.
+- **Name disambiguation:** this Option A is the benchmark-instrument repair, distinct from the unrelated
+  root `BENCHMARK-DIRECTIVES.md` "Benchmark Option A" memory-value-model lock.
+- **Repair executed this session:** `CONTRACT.md` rewritten with public constants + REQ-IDs; latent oracle-only
+  gates repaired (including 2×G12 cube-AI, F10 bar-entry, F14 animation + other hidden-constant gates); G12
+  `winProbability` assertions relaxed to behavior-level constraints; F14 broadened to accept CSS
+  transition-on-transform OR CSS animation; all gate labels now carry public REQ-IDs.
+- **Traceability matrix:** `wevibe-bench/docs/CONTRACT-TRACEABILITY.md` (authored separately).
+- **Golden reconciliation:** divergent uncommitted golden rewrite was discarded (preserved as
+  `runs/optionA-repair/dirty-golden-rewrite-15-07-26.patch`); committed reference golden `4b4ec74` restored and
+  proven to pass all conformance+backend+frontend gates from a clean export.
+- **Exact passability gate (LOCKED):**
+  > "Before the conditional GLM-5.2/MiMo-V2.5-Pro roster unlocks, Opus-4.8 at HIGH reasoning must pass ONE clean recall-OFF Docker smoke of the repaired benchmark under a genuinely hard cumulative paid ceiling of $12 (operational target lower). PASS = conformed + all host-oracle gates green + cheat-clean, from a clean checkout, before another paid smoke."
+
 ## 7. NEXT BUILD STEP (the plan)
 **Docker Architecture A is IMPLEMENTED** — `wevibe-bench-worker:v1` image, Docker layer module
 `wevibe_bench/adapters/docker_worker.py` (`DockerCell`), adapter cutover in `wevibe_bench/adapters/backgammon.py`,
 and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isolation_smoke.py`).
 - Validation sequence (locked): **spike OFF cell → ON smoke → cutover → full ladder**.
-- Current status: OFF isolation spike + cutover are implemented; live ON smoke is deferred/Walter-gated; full/scored
-  ladder is blocked until Walter confirms the final Docker roster.
+- Current status: the Opus-4.8 HIGH passability smoke already ran on 15-07 and FAILED at $11.8035 on four
+  now-repaired gates under problems-only feedback (report `15-07-26-1019-opus48-high-passability-smoke.md`), which
+  motivated Option A (§6A).
+- Next unlock requirement: the repaired instrument now needs a fresh clean Opus-4.8 HIGH recall-OFF Docker
+  passability smoke PASS (exact gate in §6A) before any scored roster work can proceed.
 - **Then Tier-2** (separate): to show lift on STRONG models, introduce novel/non-pre-trainable rule twists that
   ONLY the memories reveal — else lift only shows on weak models + obscure integration traps (by design).
 
 ## 8. OPEN DECISIONS / FORKS
-- **Roster UNCONFIRMED:** full/scored run is FORBIDDEN until Walter explicitly confirms the Docker roster.
-- Run the Walter-gated ON smoke before any scored ladder.
+- **Roster remains BLOCKED-BY-PASSABILITY:** before any scored roster/full ladder, the repaired benchmark must first
+  clear a fresh clean Opus-4.8 HIGH recall-OFF Docker passability smoke PASS under the hard $12 ceiling (§6A);
+  Walter roster confirmation is still required after that.
+- The prior Opus-4.8 HIGH passability smoke already ran (15-07) and failed on four now-repaired gates, motivating
+  Option A (`15-07-26-1019-opus48-high-passability-smoke.md`).
 - Finish minimax rung 13-14? Low marginal value; needs extractor override (confounds self-extraction) or skip-flag.
 - Commit the 14-07 integrity-fix files (5 items: backgammon.py, cheat_detector.py, test_cheat_detector.py,
   docs/ORACLE-ISOLATION-DIRECTIVE.md, RUNBOOK oracle stanza) — mgr-verified, awaiting Walter approval; stage ONLY
@@ -113,7 +139,7 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
-- qdrant org-0 pool = **11 memories** (the accumulated backgammon team-memory pool from the 14-cell run).
+- qdrant org-0 pool = **0 memories** (`org-0` wiped 15-07; corpus must remain 0 until an authorized run).
 - :4550 clone was left running (pid changes across restarts — re-check). hub :4440, chain, qdrant :6333 up from
   the 14-07 clean wipe. Ollama :11434 (nomic-embed-text:v1.5) — MUST stay up for recall+dedup embeddings.
 - Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).

@@ -62,6 +62,20 @@ BACKGAMMON_REQUIREMENTS: tuple[str, ...] = (
     "Run on PORT 8002 and fail with a clear message if the port is taken.",
 )
 
+# Source: OpenRouter pricing cards (USD per 1M tokens), e.g.
+# https://openrouter.ai/anthropic/claude-opus-4.8 (snapshot used in bench guard reports).
+_MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
+    "anthropic/claude-opus-4.8": {
+        "input": 5.0,
+        "output": 25.0,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+    }
+}
+
+_RESERVATION_SAFETY_FACTOR = 1.10
+_BUDGET_STOP_REASONS = {"cost_limit", "cost_reservation_refused", "max_steps_per_attempt"}
+
 
 @dataclass(frozen=True)
 class _OpencodeRunStats:
@@ -72,6 +86,7 @@ class _OpencodeRunStats:
     session_id: str | None
     killed_reason: str | None
     exit_code: int | None
+    cost_usd: float
 
 
 @dataclass
@@ -91,6 +106,7 @@ class BackgammonCellResult:
     session_id: str | None
     memory_mode: str
     model: str
+    wall_cost_usd: float = 0.0
     cheated: bool = False
     cheat_detail: str = ""
 
@@ -112,6 +128,12 @@ class BackgammonRunner(AgentRunner):
         max_attempts: int = 3,
         token_cap: int = 200000,
         run_timeout_s: int = 1200,
+        cost_limit_usd: float | None = None,
+        cost_target_usd: float | None = None,
+        max_output_tokens: int | None = None,
+        max_steps_per_attempt: int | None = None,
+        output_price_per_1m: float | None = None,
+        reasoning_effort: str | None = None,
         agent: str = "build",
         logger: Any = None,
         progress: Callable[[str], None] | None = None,
@@ -126,7 +148,18 @@ class BackgammonRunner(AgentRunner):
         self.max_attempts = int(max_attempts)
         self.token_cap = int(token_cap)
         self.run_timeout_s = int(run_timeout_s)
+        self.cost_limit_usd = None if cost_limit_usd is None else float(cost_limit_usd)
+        self.cost_target_usd = None if cost_target_usd is None else float(cost_target_usd)
+        self.max_output_tokens = None if max_output_tokens is None else int(max_output_tokens)
+        self.max_steps_per_attempt = None if max_steps_per_attempt is None else int(max_steps_per_attempt)
+        self.output_price_per_1m = None if output_price_per_1m is None else float(output_price_per_1m)
+        self.reasoning_effort = None if reasoning_effort is None else str(reasoning_effort)
         self.agent = str(agent)
+
+        self._effective_output_price_per_1m = 0.0
+        self._cache_write_allowance_usd = 0.0
+        self._reservation_usd = 0.0
+        self._one_step_worst_case_usd = 0.0
 
         self.logger = logger
         self._progress_cb = progress or _default_progress
@@ -142,6 +175,56 @@ class BackgammonRunner(AgentRunner):
             raise ValueError("token_cap must be >= 1")
         if self.run_timeout_s < 1:
             raise ValueError("run_timeout_s must be >= 1")
+        if self.cost_limit_usd is not None and self.cost_limit_usd <= 0:
+            raise ValueError("cost_limit_usd must be > 0")
+        if self.cost_target_usd is not None and self.cost_target_usd <= 0:
+            raise ValueError("cost_target_usd must be > 0")
+        if self.max_output_tokens is not None and self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be > 0")
+        if self.max_steps_per_attempt is not None and self.max_steps_per_attempt <= 0:
+            raise ValueError("max_steps_per_attempt must be > 0")
+        if self.output_price_per_1m is not None and self.output_price_per_1m <= 0:
+            raise ValueError("output_price_per_1m must be > 0")
+        if self.cost_limit_usd is not None and self.cost_target_usd is not None:
+            if self.cost_target_usd >= self.cost_limit_usd:
+                raise ValueError("cost_target_usd must be < cost_limit_usd")
+
+        if self.cost_limit_usd is not None:
+            if self.max_output_tokens is None:
+                raise ValueError("cost_limit_usd requires max_output_tokens for hard reservation guard")
+            if self.max_steps_per_attempt is None:
+                raise ValueError("cost_limit_usd requires max_steps_per_attempt for hard reservation guard")
+
+            self._effective_output_price_per_1m = self._resolve_output_price_per_1m(
+                model=self.model,
+                explicit_output_price_per_1m=self.output_price_per_1m,
+            )
+            cache_write_price_per_1m = self._resolve_cache_write_price_per_1m(
+                model=self.model,
+                fallback_price_per_1m=self._effective_output_price_per_1m,
+            )
+            self._cache_write_allowance_usd = (
+                float(self.max_output_tokens) * cache_write_price_per_1m / 1_000_000.0
+            )
+            self._reservation_usd = self._worst_case_reservation_usd(
+                max_steps=self.max_steps_per_attempt,
+                max_output_tokens=self.max_output_tokens,
+                output_price_per_1m=self._effective_output_price_per_1m,
+                safety_factor=_RESERVATION_SAFETY_FACTOR,
+                cache_write_allowance_usd=self._cache_write_allowance_usd,
+            )
+            self._one_step_worst_case_usd = self._worst_case_reservation_usd(
+                max_steps=1,
+                max_output_tokens=self.max_output_tokens,
+                output_price_per_1m=self._effective_output_price_per_1m,
+                safety_factor=_RESERVATION_SAFETY_FACTOR,
+                cache_write_allowance_usd=0.0,
+            )
+
+        allowed_reasoning_efforts = {"minimal", "low", "medium", "high", "xhigh", "none"}
+        if self.reasoning_effort is not None and self.reasoning_effort not in allowed_reasoning_efforts:
+            allowed = ", ".join(sorted(allowed_reasoning_efforts))
+            raise ValueError(f"reasoning_effort must be one of: {allowed}")
 
     def build_need_card(self, task_id: str) -> NeedCard:
         intent = "debug" if "debug" in task_id.lower() else "build"
@@ -180,7 +263,7 @@ class BackgammonRunner(AgentRunner):
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
             turns=result.turns,
-            wall_cost_usd=0.0,
+            wall_cost_usd=result.wall_cost_usd,
             wall_seconds=result.wall_seconds,
         )
 
@@ -193,6 +276,7 @@ class BackgammonRunner(AgentRunner):
         injected_memory: list[RecalledMemory],
     ) -> BackgammonCellResult:
         started = time.monotonic()
+        cell_cost_usd = 0.0
         run_dir = Path(run_dir).expanduser().resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -221,6 +305,7 @@ class BackgammonRunner(AgentRunner):
         attempts_to_green: int | str = "FAIL"
 
         worker_killed_reason: str | None = None
+        budget_stop_reason: str | None = None
         active_cell: DockerCell | None = None
         cell_context: Any = nullcontext()
 
@@ -271,12 +356,14 @@ class BackgammonRunner(AgentRunner):
                 f"PROGRESS run_label={run_label} step=worker-isolation isolation=docker "
                 f"image={WORKER_IMAGE} memory_mode={self.memory_mode} container={container_name}"
             )
+            cell_config = DockerCellConfig(
+                worktree=worktree,
+                memory_mode=self.memory_mode,
+                container_name=container_name,
+            )
+            cell_config.output_token_max = self.max_output_tokens
             cell_context = DockerCell(
-                DockerCellConfig(
-                    worktree=worktree,
-                    memory_mode=self.memory_mode,
-                    container_name=container_name,
-                ),
+                cell_config,
                 progress=self._progress,
             )
 
@@ -291,7 +378,6 @@ class BackgammonRunner(AgentRunner):
                     f"PROGRESS run_label={run_label} step=worker-launch-start mode=real model={self.model} "
                     f"pure={pure} prompt_chars={len(task_prompt)}"
                 )
-                self._write_worker_permission_config(worktree=worktree)
                 initial_inner = [
                     "opencode",
                     "run",
@@ -308,147 +394,200 @@ class BackgammonRunner(AgentRunner):
                 if pure:
                     initial_inner.append("--pure")
 
-                first_run = self._run_opencode(
-                    cmd=active_cell.exec_argv(initial_inner),
-                    worktree=worktree,
-                    events_path=events_path,
-                    env=run_env,
+                self._emit_cost_target_warning_if_reached(
                     run_label=run_label,
                     phase="initial",
-                    fallback_session_id=None,
-                    kill_hook=active_cell.force_kill,
+                    cumulative_cost_usd=cell_cost_usd,
                 )
-                session_id = first_run.session_id
-                input_tokens_total += first_run.input_tokens
-                output_tokens_total += first_run.output_tokens + first_run.reasoning_tokens
-                turns_total += first_run.turns
-                worker_killed_reason = first_run.killed_reason
-                self._progress(
-                    f"PROGRESS run_label={run_label} step=worker-launch-end mode=real "
-                    f"exit={first_run.exit_code} killed={first_run.killed_reason or 'none'} "
-                    f"turns={first_run.turns} input={first_run.input_tokens} "
-                    f"output={first_run.output_tokens} reasoning={first_run.reasoning_tokens} "
-                    f"session_id={session_id or 'none'}"
-                )
-
-            for attempt in range(1, self.max_attempts + 1):
-                report_json = run_dir / f"attempt-{attempt}-report.json"
-                gate_log = run_dir / f"attempt-{attempt}-gate.log"
-                self._progress(
-                    f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
-                )
-                report = self._run_gate_report(
-                    worktree=worktree,
-                    report_path=report_json,
-                    log_path=gate_log,
-                )
-                final_report = report
-
-                attempt_verdict = str(report.get("verdict", "FAIL"))
-                conformed = bool(report.get("conformed", False))
-                problems = report.get("problems") if isinstance(report.get("problems"), list) else []
-                failed_gates_raw = report.get("failed_gates")
-                failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
-
-                attempt_reports.append(
-                    {
-                        "attempt": attempt,
-                        "verdict": attempt_verdict,
-                        "conformed": conformed,
-                        "n_problems": len(problems),
-                        "failed_gates": failed_gates,
-                    }
-                )
-                self._progress(
-                    f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
-                    f"conformed={conformed} problems={len(problems)}"
-                )
-
-                if attempt_verdict == "PASS":
-                    verdict = "PASS"
-                    attempts_to_green = attempt - 1
-                    break
-
-                if worker_killed_reason is not None:
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
-                        f"reason=container-dead killed={worker_killed_reason}"
-                    )
-                    verdict = "FAIL"
-                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                    break
-
-                if attempt < self.max_attempts:
-                    if self.mock is not None:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
-                        )
-                        continue
-
-                    if active_cell is None:
-                        raise RuntimeError("feedback loop requires an active docker cell")
-
-                    if not session_id:
-                        raise RuntimeError("feedback loop requires a session_id, but none was captured")
-
-                    feedback_checks = [
-                        str(p.get("check", "")).strip()
-                        for p in problems
-                        if isinstance(p, dict) and str(p.get("check", "")).strip()
-                    ]
-                    feedback = self._build_feedback_prompt(checks=feedback_checks)
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
-                        f"checks={len(feedback_checks)}"
-                    )
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
-                        f"problem_count={len(problems)} session_id={session_id}"
-                    )
+                if self._refuse_invocation_by_reservation(
+                    run_label=run_label,
+                    phase="initial",
+                    accrued_cost_usd=cell_cost_usd,
+                ):
+                    budget_stop_reason = "cost_reservation_refused"
+                    verdict = "BUDGET_STOP"
+                    attempts_to_green = "BUDGET_STOP"
+                else:
                     self._write_worker_permission_config(worktree=worktree)
-                    feedback_inner = [
-                        "opencode",
-                        "run",
-                        feedback,
-                        "--session",
-                        session_id,
-                        "--dir",
-                        "/work",
-                        "--format",
-                        "json",
-                    ]
-                    if pure:
-                        feedback_inner.append("--pure")
-
-                    feedback_run = self._run_opencode(
-                        cmd=active_cell.exec_argv(feedback_inner),
+                    first_run = self._run_opencode(
+                        cmd=active_cell.exec_argv(initial_inner),
                         worktree=worktree,
                         events_path=events_path,
                         env=run_env,
                         run_label=run_label,
-                        phase=f"feedback-{attempt}",
-                        fallback_session_id=session_id,
+                        phase="initial",
+                        fallback_session_id=None,
+                        prior_cost_usd=cell_cost_usd,
                         kill_hook=active_cell.force_kill,
                     )
-                    if feedback_run.session_id:
-                        session_id = feedback_run.session_id
-
-                    input_tokens_total += feedback_run.input_tokens
-                    output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
-                    turns_total += feedback_run.turns
-                    if feedback_run.killed_reason:
-                        worker_killed_reason = feedback_run.killed_reason
+                    cell_cost_usd += first_run.cost_usd
+                    session_id = first_run.session_id
+                    input_tokens_total += first_run.input_tokens
+                    output_tokens_total += first_run.output_tokens + first_run.reasoning_tokens
+                    turns_total += first_run.turns
+                    worker_killed_reason = first_run.killed_reason
                     self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
-                        f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
-                        f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
-                        f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens}"
+                        f"PROGRESS run_label={run_label} step=worker-launch-end mode=real "
+                        f"exit={first_run.exit_code} killed={first_run.killed_reason or 'none'} "
+                        f"turns={first_run.turns} input={first_run.input_tokens} "
+                        f"output={first_run.output_tokens} reasoning={first_run.reasoning_tokens} "
+                        f"session_id={session_id or 'none'} cost_usd={first_run.cost_usd:.4f} "
+                        f"cell_cost_usd={cell_cost_usd:.4f}"
                     )
-                    continue
+                    if first_run.killed_reason in _BUDGET_STOP_REASONS:
+                        budget_stop_reason = first_run.killed_reason
+                        verdict = "BUDGET_STOP"
+                        attempts_to_green = "BUDGET_STOP"
 
-                verdict = "FAIL"
-                attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                break
+            if budget_stop_reason is None:
+                for attempt in range(1, self.max_attempts + 1):
+                    report_json = run_dir / f"attempt-{attempt}-report.json"
+                    gate_log = run_dir / f"attempt-{attempt}-gate.log"
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
+                    )
+                    report = self._run_gate_report(
+                        worktree=worktree,
+                        report_path=report_json,
+                        log_path=gate_log,
+                    )
+                    final_report = report
+
+                    attempt_verdict = str(report.get("verdict", "FAIL"))
+                    conformed = bool(report.get("conformed", False))
+                    problems = report.get("problems") if isinstance(report.get("problems"), list) else []
+                    failed_gates_raw = report.get("failed_gates")
+                    failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
+
+                    attempt_reports.append(
+                        {
+                            "attempt": attempt,
+                            "verdict": attempt_verdict,
+                            "conformed": conformed,
+                            "n_problems": len(problems),
+                            "failed_gates": failed_gates,
+                        }
+                    )
+                    self._progress(
+                        f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
+                        f"conformed={conformed} problems={len(problems)}"
+                    )
+
+                    if attempt_verdict == "PASS":
+                        verdict = "PASS"
+                        attempts_to_green = attempt - 1
+                        break
+
+                    if worker_killed_reason is not None:
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
+                            f"reason=container-dead killed={worker_killed_reason}"
+                        )
+                        if worker_killed_reason in _BUDGET_STOP_REASONS:
+                            budget_stop_reason = worker_killed_reason
+                            verdict = "BUDGET_STOP"
+                            attempts_to_green = "BUDGET_STOP"
+                        else:
+                            verdict = "FAIL"
+                            attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        break
+
+                    if attempt < self.max_attempts:
+                        if self.mock is not None:
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
+                            )
+                            continue
+
+                        if active_cell is None:
+                            raise RuntimeError("feedback loop requires an active docker cell")
+
+                        if not session_id:
+                            raise RuntimeError("feedback loop requires a session_id, but none was captured")
+
+                        feedback_checks = [
+                            str(p.get("check", "")).strip()
+                            for p in problems
+                            if isinstance(p, dict) and str(p.get("check", "")).strip()
+                        ]
+                        feedback = self._build_feedback_prompt(checks=feedback_checks)
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
+                            f"checks={len(feedback_checks)}"
+                        )
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
+                            f"problem_count={len(problems)} session_id={session_id}"
+                        )
+                        feedback_inner = [
+                            "opencode",
+                            "run",
+                            feedback,
+                            "--session",
+                            session_id,
+                            "--dir",
+                            "/work",
+                            "--format",
+                            "json",
+                        ]
+                        if pure:
+                            feedback_inner.append("--pure")
+
+                        self._emit_cost_target_warning_if_reached(
+                            run_label=run_label,
+                            phase=f"feedback-{attempt}",
+                            cumulative_cost_usd=cell_cost_usd,
+                        )
+                        if self._refuse_invocation_by_reservation(
+                            run_label=run_label,
+                            phase=f"feedback-{attempt}",
+                            accrued_cost_usd=cell_cost_usd,
+                        ):
+                            budget_stop_reason = "cost_reservation_refused"
+                            verdict = "BUDGET_STOP"
+                            attempts_to_green = "BUDGET_STOP"
+                            break
+
+                        self._write_worker_permission_config(worktree=worktree)
+
+                        feedback_run = self._run_opencode(
+                            cmd=active_cell.exec_argv(feedback_inner),
+                            worktree=worktree,
+                            events_path=events_path,
+                            env=run_env,
+                            run_label=run_label,
+                            phase=f"feedback-{attempt}",
+                            fallback_session_id=session_id,
+                            prior_cost_usd=cell_cost_usd,
+                            kill_hook=active_cell.force_kill,
+                        )
+                        cell_cost_usd += feedback_run.cost_usd
+                        if feedback_run.session_id:
+                            session_id = feedback_run.session_id
+
+                        input_tokens_total += feedback_run.input_tokens
+                        output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
+                        turns_total += feedback_run.turns
+                        if feedback_run.killed_reason:
+                            worker_killed_reason = feedback_run.killed_reason
+                            if feedback_run.killed_reason in _BUDGET_STOP_REASONS:
+                                budget_stop_reason = feedback_run.killed_reason
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
+                            f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
+                            f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
+                            f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens} "
+                            f"cost_usd={feedback_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
+                        )
+                        if budget_stop_reason is not None:
+                            verdict = "BUDGET_STOP"
+                            attempts_to_green = "BUDGET_STOP"
+                            break
+                        continue
+
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    break
 
         wall_seconds = time.monotonic() - started
         problems_final = self._normalize_problems(final_report.get("problems"))
@@ -514,6 +653,7 @@ class BackgammonRunner(AgentRunner):
             session_id=session_id,
             memory_mode=self.memory_mode,
             model=self.model,
+            wall_cost_usd=cell_cost_usd,
             cheated=cheated,
             cheat_detail=cheat_detail,
         )
@@ -538,6 +678,27 @@ class BackgammonRunner(AgentRunner):
                 "question": "deny",
             },
         }
+        provider_id, _, model_id = self.model.partition("/")
+        # Output token caps are enforced via Docker env
+        # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, not model `options.max_tokens`
+        # in opencode.json.
+        if provider_id and model_id and self.reasoning_effort is not None:
+            options: dict[str, Any] = {}
+            options["reasoning"] = {"effort": self.reasoning_effort}
+
+            config["provider"] = {
+                provider_id: {
+                    "models": {
+                        model_id: {
+                            "options": options,
+                        }
+                    }
+                }
+            }
+            self._progress(
+                "PROGRESS step=worker-permission-config "
+                f"reasoning_effort={self.reasoning_effort} model={self.model}"
+            )
         (worktree / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         self._progress(
             "PROGRESS step=worker-permission-config external_directory=deny "
@@ -687,6 +848,7 @@ class BackgammonRunner(AgentRunner):
         run_label: str,
         phase: str,
         fallback_session_id: str | None,
+        prior_cost_usd: float = 0.0,
         kill_hook: Callable[[], None] | None = None,
     ) -> _OpencodeRunStats:
         state_lock = threading.Lock()
@@ -696,6 +858,7 @@ class BackgammonRunner(AgentRunner):
             "sum_output": 0,
             "sum_reasoning": 0,
             "max_input": 0,
+            "sum_cost": 0.0,
         }
         stderr_tail: collections.deque[str] = collections.deque(maxlen=120)
         reader_failures: list[str] = []
@@ -739,11 +902,13 @@ class BackgammonRunner(AgentRunner):
                         input_tokens = max(0, self._to_int(tokens.get("input")))
                         output_tokens = max(0, self._to_int(tokens.get("output")))
                         reasoning_tokens = max(0, self._to_int(tokens.get("reasoning")))
+                        step_cost = part.get("cost")
 
                         with state_lock:
                             state["turns"] += 1
                             state["sum_output"] += output_tokens
                             state["sum_reasoning"] += reasoning_tokens
+                            state["sum_cost"] += float(step_cost) if isinstance(step_cost, (int, float)) else 0.0
                             if input_tokens > state["max_input"]:
                                 state["max_input"] = input_tokens
                 except Exception as exc:  # noqa: BLE001 - log and continue teardown.
@@ -780,6 +945,15 @@ class BackgammonRunner(AgentRunner):
 
             killed_reason: str | None = None
             kill_hook_ran = False
+            target_warning_emitted = False
+
+            if self.cost_target_usd is not None and prior_cost_usd >= self.cost_target_usd:
+                target_warning_emitted = True
+                self._progress(
+                    f"WARNING run_label={run_label} step=cost-target phase={phase} "
+                    f"reason=cost_target_reached cumulative_cost_usd={prior_cost_usd:.4f} "
+                    f"target_usd={self.cost_target_usd:.4f}"
+                )
 
             def run_kill_hook(*, reason: str) -> None:
                 nonlocal kill_hook_ran
@@ -803,6 +977,21 @@ class BackgammonRunner(AgentRunner):
                 elapsed = time.monotonic() - started
                 with state_lock:
                     est_tokens = state["sum_output"] + state["sum_reasoning"] + state["max_input"]
+                    turns = self._to_int(state["turns"])
+                    sum_cost = float(state["sum_cost"])
+                    cumulative_cost = prior_cost_usd + sum_cost
+
+                if (
+                    self.cost_target_usd is not None
+                    and not target_warning_emitted
+                    and cumulative_cost >= self.cost_target_usd
+                ):
+                    target_warning_emitted = True
+                    self._progress(
+                        f"WARNING run_label={run_label} step=cost-target phase={phase} "
+                        f"reason=cost_target_reached cumulative_cost_usd={cumulative_cost:.4f} "
+                        f"target_usd={self.cost_target_usd:.4f}"
+                    )
 
                 if rc is not None:
                     break
@@ -815,6 +1004,15 @@ class BackgammonRunner(AgentRunner):
                     self._kill_process_group(proc)
                     run_kill_hook(reason="run_timeout")
                     break
+                if self.max_steps_per_attempt is not None and turns > self.max_steps_per_attempt:
+                    killed_reason = "max_steps_per_attempt"
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=worker-kill phase={phase} "
+                        f"reason=max_steps_per_attempt turns={turns} max_steps_per_attempt={self.max_steps_per_attempt}"
+                    )
+                    self._kill_process_group(proc)
+                    run_kill_hook(reason="max_steps_per_attempt")
+                    break
                 if est_tokens > self.token_cap:
                     killed_reason = "token_cap"
                     self._progress(
@@ -823,6 +1021,22 @@ class BackgammonRunner(AgentRunner):
                     )
                     self._kill_process_group(proc)
                     run_kill_hook(reason="token_cap")
+                    break
+                if self._cost_limit_exceeded(
+                    prior_cost_usd=prior_cost_usd,
+                    sum_cost=sum_cost,
+                    one_step_worst_case_usd=self._one_step_worst_case_usd,
+                    limit=self.cost_limit_usd,
+                ):
+                    killed_reason = "cost_limit"
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=worker-kill phase={phase} "
+                        f"reason=cost_limit cumulative_cost_usd={cumulative_cost:.4f} "
+                        f"one_step_worst_case_usd={self._one_step_worst_case_usd:.4f} "
+                        f"limit_usd={self.cost_limit_usd:.4f}"
+                    )
+                    self._kill_process_group(proc)
+                    run_kill_hook(reason="cost_limit")
                     break
                 time.sleep(2.0)
 
@@ -837,6 +1051,17 @@ class BackgammonRunner(AgentRunner):
             stderr_thread.join(timeout=5)
             exit_code = proc.returncode
 
+        if (
+            self.cost_target_usd is not None
+            and not target_warning_emitted
+            and (prior_cost_usd + float(state.get("sum_cost", 0.0))) >= self.cost_target_usd
+        ):
+            self._progress(
+                f"WARNING run_label={run_label} step=cost-target phase={phase} "
+                f"reason=cost_target_reached cumulative_cost_usd={(prior_cost_usd + float(state.get('sum_cost', 0.0))):.4f} "
+                f"target_usd={self.cost_target_usd:.4f}"
+            )
+
         for failure in reader_failures:
             self._progress(f"PROGRESS run_label={run_label} step=reader-failure phase={phase} detail={failure}")
 
@@ -846,6 +1071,7 @@ class BackgammonRunner(AgentRunner):
             input_tokens = self._to_int(state["max_input"])
             output_tokens = self._to_int(state["sum_output"])
             reasoning_tokens = self._to_int(state["sum_reasoning"])
+            cost_usd = float(state["sum_cost"])
 
         if exit_code not in (0, None) and stderr_tail:
             self._progress(
@@ -861,6 +1087,109 @@ class BackgammonRunner(AgentRunner):
             session_id=session_id,
             killed_reason=killed_reason,
             exit_code=exit_code,
+            cost_usd=cost_usd,
+        )
+
+    def _emit_cost_target_warning_if_reached(
+        self,
+        *,
+        run_label: str,
+        phase: str,
+        cumulative_cost_usd: float,
+    ) -> None:
+        if self.cost_target_usd is None:
+            return
+        if cumulative_cost_usd < self.cost_target_usd:
+            return
+        self._progress(
+            f"WARNING run_label={run_label} step=cost-target phase={phase} "
+            f"reason=cost_target_reached cumulative_cost_usd={cumulative_cost_usd:.4f} "
+            f"target_usd={self.cost_target_usd:.4f}"
+        )
+
+    def _refuse_invocation_by_reservation(
+        self,
+        *,
+        run_label: str,
+        phase: str,
+        accrued_cost_usd: float,
+    ) -> bool:
+        if self.cost_limit_usd is None:
+            return False
+        if not self._reservation_would_exceed(
+            accrued_usd=accrued_cost_usd,
+            reservation_usd=self._reservation_usd,
+            limit_usd=self.cost_limit_usd,
+        ):
+            return False
+        self._progress(
+            f"PROGRESS run_label={run_label} step=worker-launch-refused phase={phase} "
+            f"reason=cost_reservation_refused accrued_cost_usd={accrued_cost_usd:.4f} "
+            f"reservation_usd={self._reservation_usd:.4f} limit_usd={self.cost_limit_usd:.4f}"
+        )
+        return True
+
+    @staticmethod
+    def _model_id_from_selector(model: str) -> str:
+        provider_id, sep, model_id = str(model).partition("/")
+        if sep and model_id:
+            return model_id
+        return provider_id
+
+    @classmethod
+    def _pricing_row_for_model(cls, model: str) -> dict[str, float] | None:
+        return _MODEL_PRICING_USD_PER_1M.get(cls._model_id_from_selector(model))
+
+    @classmethod
+    def _resolve_output_price_per_1m(
+        cls,
+        *,
+        model: str,
+        explicit_output_price_per_1m: float | None,
+    ) -> float:
+        if explicit_output_price_per_1m is not None:
+            return float(explicit_output_price_per_1m)
+        pricing = cls._pricing_row_for_model(model)
+        if pricing is None:
+            model_id = cls._model_id_from_selector(model)
+            raise ValueError(
+                "missing authoritative output pricing for "
+                f"model_id={model_id!r}; set output_price_per_1m override to run with cost_limit_usd"
+            )
+        return float(pricing["output"])
+
+    @classmethod
+    def _resolve_cache_write_price_per_1m(
+        cls,
+        *,
+        model: str,
+        fallback_price_per_1m: float,
+    ) -> float:
+        pricing = cls._pricing_row_for_model(model)
+        if pricing is not None and "cache_write" in pricing:
+            return float(pricing["cache_write"])
+        return float(fallback_price_per_1m)
+
+    @staticmethod
+    def _reservation_would_exceed(
+        accrued_usd: float,
+        reservation_usd: float,
+        limit_usd: float | None,
+    ) -> bool:
+        return limit_usd is not None and (accrued_usd + reservation_usd) > limit_usd
+
+    @staticmethod
+    def _worst_case_reservation_usd(
+        max_steps: int,
+        max_output_tokens: int,
+        output_price_per_1m: float,
+        safety_factor: float,
+        cache_write_allowance_usd: float,
+    ) -> float:
+        output_price_per_token = float(output_price_per_1m) / 1_000_000.0
+        return (
+            float(max_steps) * float(max_output_tokens) * output_price_per_token * float(safety_factor)
+            + float(cache_write_allowance_usd)
         )
 
     @staticmethod
@@ -885,6 +1214,15 @@ class BackgammonRunner(AgentRunner):
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             return
+
+    @staticmethod
+    def _cost_limit_exceeded(
+        prior_cost_usd: float,
+        sum_cost: float,
+        one_step_worst_case_usd: float,
+        limit: float | None,
+    ) -> bool:
+        return limit is not None and (prior_cost_usd + sum_cost + one_step_worst_case_usd) > limit
 
     def _progress(self, message: str) -> None:
         self._progress_cb(message)

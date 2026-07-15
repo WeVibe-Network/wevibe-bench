@@ -120,6 +120,15 @@ After a clean wipe (`make redeploy` from `wevibe-meta` + clear `/tmp` bench keys
 GLM-5.2 OFF cell in Docker, let the host oracle score it, extract one memory, verify accepted storage + retrieval
 through the real transport, then wipe again.
 
+**Prerequisite gate (Option A, 15-07-26):** before the conditional GLM-5.2/MiMo-V2.5-Pro roster unlocks,
+Opus-4.8 at HIGH reasoning must first PASS one clean recall-OFF Docker smoke of the repaired benchmark under a hard
+cumulative paid ceiling of $12. The prior Opus-4.8 HIGH passability smoke already ran and FAILED at $11.8035 on four
+now-repaired gates (`15-07-26-1019-opus48-high-passability-smoke.md`), so the repaired instrument awaits a fresh
+clean PASS before any scored roster/candidate work.
+
+**Provider-pinning/roster is separate and still blocked:** provider-routing capability in the harness remains
+UNPROVEN; no candidate is authorized until that separate prerequisite is implemented and verified.
+
 **This is the paid validation smoke; requires Walter roster confirmation; NOT part of build/verify.**
 
 ## THE HARD RULE
@@ -133,6 +142,10 @@ through the real transport, then wipe again.
 
 **Invariant:** workers must never access gate oracle/test sources; worker feedback is
 problems-only.
+
+**Option-A note (15-07-26):** publishing edge-rules/constants into the public
+`tasks/backgammon/CONTRACT.md` so pass-required behavior is derivable is ORTHOGONAL to integrity; it does NOT weaken
+the three enforcement layers below (physical isolation, cheat-gate invalidation, problems-only feedback).
 
 - Enforcement is three layers: (1) physical isolation (oracle never copied into
   worktree), (2) permission-deny (no `--dangerously-skip-permissions`; headless

@@ -105,7 +105,7 @@ function emptyPoints(): number[] {
   return new Array(26).fill(0);
 }
 
-test("[F01] page loads, no console errors", async ({ page }) => {
+test("[F01] REQ-RENDER — page loads, no console errors", async ({ page }) => {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
 
@@ -126,7 +126,7 @@ test("[F01] page loads, no console errors", async ({ page }) => {
   expect(pageErrors).toEqual([]);
 });
 
-test("[F02] start game renders full board", async ({ page }) => {
+test("[F02] REQ-RENDER — start game renders full board", async ({ page }) => {
   await openApp(page);
 
   await postJson<ApiState>(page, "/api/new", {});
@@ -139,7 +139,7 @@ test("[F02] start game renders full board", async ({ page }) => {
   await expect(page.locator('[data-testid="checker"][data-color="black"]')).toHaveCount(15);
 });
 
-test("[F03] play vs AI (a real move advances state)", async ({ page }) => {
+test("[F03] REQ-HINT — play vs AI (a real move advances state)", async ({ page }) => {
   await openApp(page);
 
   await postJson<ApiState>(page, "/api/new", {});
@@ -190,7 +190,7 @@ test("[F03] play vs AI (a real move advances state)", async ({ page }) => {
   expect(after.remainingDice.length).toBe(expectedRemaining);
 });
 
-test("[F04] legal-move affordance + die attribution", async ({ page }) => {
+test("[F04] REQ-HINT — legal-move affordance + die attribution", async ({ page }) => {
   await openApp(page);
 
   await postJson<ApiState>(page, "/api/new", {});
@@ -222,7 +222,7 @@ test("[F04] legal-move affordance + die attribution", async ({ page }) => {
   }
 });
 
-test("[F05] no-legal-move notice", async ({ page }) => {
+test("[F05] REQ-TURN — no-legal-move notice", async ({ page }) => {
   await openApp(page);
 
   const points = emptyPoints();
@@ -266,7 +266,7 @@ test("[F05] no-legal-move notice", async ({ page }) => {
   expect(state.legalMoves).toHaveLength(0);
 });
 
-test("[F06] pip display cross-checked vs engine", async ({ page }) => {
+test("[F06] REQ-PIPUI — pip display cross-checked vs engine", async ({ page }) => {
   await openApp(page);
 
   await postJson<ApiState>(page, "/api/new", {});
@@ -309,7 +309,7 @@ test("[F06] pip display cross-checked vs engine", async ({ page }) => {
   expect(customDomBlack).toBe(customState.pip.black);
 });
 
-test("[F07] cube UI", async ({ page }) => {
+test("[F07] REQ-CUBEUI — cube UI", async ({ page }) => {
   await openApp(page);
 
   await postJson<ApiState>(page, "/api/new", {});
@@ -333,7 +333,7 @@ test("[F07] cube UI", async ({ page }) => {
   expectOwnerLabelToMatchState(ownerLabel, state.cube.owner);
 });
 
-test("[F08] difficulty selector", async ({ page }) => {
+test("[F08] REQ-TESTID — difficulty selector", async ({ page }) => {
   await openApp(page);
 
   const difficulty = page.getByTestId("difficulty");

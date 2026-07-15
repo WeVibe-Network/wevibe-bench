@@ -39,6 +39,12 @@ class RunConfig:
     session_token_path: str = "~/.wevibe/mcp-session-token"  # Bearer token source (seam)
     embedding_model: str = "nomic-embed-text:v1.5"  # 768-d local embedding (documentation only)
     harness_version: str = "0.1.0"
+    cost_limit_usd: float | None = None
+    cost_target_usd: float | None = None
+    max_output_tokens: int | None = None
+    max_steps_per_attempt: int | None = None
+    output_price_per_1m: float | None = None
+    reasoning_effort: str | None = None
 
     def relevance_floor(self) -> float:
         """Return the ratified relevance floor sent as `relevance_floor` on the wire."""
@@ -67,4 +73,10 @@ class RunConfig:
             "session_token_path": self.session_token_path,
             "embedding_model": self.embedding_model,
             "harness_version": self.harness_version,
+            "cost_limit_usd": self.cost_limit_usd,
+            "cost_target_usd": self.cost_target_usd,
+            "max_output_tokens": self.max_output_tokens,
+            "max_steps_per_attempt": self.max_steps_per_attempt,
+            "output_price_per_1m": self.output_price_per_1m,
+            "reasoning_effort": self.reasoning_effort,
         }
