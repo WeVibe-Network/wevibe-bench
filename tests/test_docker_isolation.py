@@ -416,3 +416,44 @@ def test_gate_oracle_scoring_is_host_only_structurally() -> None:
     docker_cfg_kw = {kw.arg for kw in docker_cfg_calls[0].keywords}
     assert docker_cfg_kw == {"worktree", "memory_mode", "container_name"}
     assert "docker exec" not in gate_source.lower()
+
+
+def test_run_argv_makes_home_and_tmp_writable_tmpfs_mode_1777() -> None:
+    # Pure-unit (no docker): regression for the TASK-4 fix #1. The container runs as the
+    # host non-root uid via --user, and opencode writes $HOME/.local/share; a default tmpfs
+    # is root:root 0755 -> EACCES. Both HOME and /tmp tmpfs must carry mode=1777.
+    cfg = DockerCellConfig(
+        worktree=Path("/tmp/argv-mode-check"),
+        memory_mode="off",
+        container_name="wevibe-bench-cell-mode-check",
+    )
+    argv = _build_run_argv(config=cfg, worktree=cfg.worktree, uid=501, gid=20, memory_mode="off")
+    assert _contains_pair(argv, "--tmpfs", "/tmp:mode=1777")
+    assert _contains_pair(argv, "--tmpfs", f"{cfg.home_dir}:mode=1777")
+    # --read-only isolation must remain (writable tmpfs, not a writable root fs).
+    assert "--read-only" in argv
+    # A bare (non-writable) tmpfs for HOME must NOT be present.
+    assert not _contains_pair(argv, "--tmpfs", cfg.home_dir)
+
+
+def test_run_argv_redirects_xdg_state_into_writable_home_and_keeps_baked_config() -> None:
+    # Pure-unit (no docker): regression for the TASK-4 fix #2. The image pins
+    # XDG_CONFIG_HOME/OPENCODE_CONFIG_DIR under /etc/xdg on the --read-only root, so opencode
+    # cannot write its config-dir state. The adapter must redirect XDG + opencode state dirs
+    # into the writable HOME tmpfs while still loading the baked config via OPENCODE_CONFIG.
+    cfg = DockerCellConfig(
+        worktree=Path("/tmp/argv-xdg-check"),
+        memory_mode="off",
+        container_name="wevibe-bench-cell-xdg-check",
+    )
+    argv = _build_run_argv(config=cfg, worktree=cfg.worktree, uid=501, gid=20, memory_mode="off")
+    home = cfg.home_dir
+    assert _contains_pair(argv, "-e", f"XDG_CONFIG_HOME={home}/.config")
+    assert _contains_pair(argv, "-e", f"XDG_DATA_HOME={home}/.local/share")
+    assert _contains_pair(argv, "-e", f"XDG_CACHE_HOME={home}/.cache")
+    assert _contains_pair(argv, "-e", f"OPENCODE_CONFIG_DIR={home}/.config/opencode")
+    # Baked config file stays readable/loaded from the read-only image path.
+    assert _contains_pair(argv, "-e", "OPENCODE_CONFIG=/etc/xdg/opencode/opencode.json")
+    # HOME still points at the writable tmpfs.
+    assert _contains_pair(argv, "-e", f"HOME={home}")
+

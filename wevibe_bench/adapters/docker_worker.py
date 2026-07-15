@@ -334,12 +334,32 @@ def _build_run_argv(
         "--security-opt",
         "no-new-privileges",
         "--read-only",
+        # tmpfs mounts default to root:root 0755; the worker runs as the host
+        # (non-root) uid via --user, so HOME/tmp must be world-writable (1777,
+        # standard /tmp semantics) or opencode's ~/.local/share mkdir fails with
+        # EACCES. Isolation is preserved by --read-only + cap-drop ALL +
+        # no-new-privileges + external_directory deny, not by tmpfs ownership.
         "--tmpfs",
-        "/tmp",
+        "/tmp:mode=1777",
         "--tmpfs",
-        config.home_dir,
+        f"{config.home_dir}:mode=1777",
         "-e",
         f"HOME={config.home_dir}",
+        # The image pins XDG_CONFIG_HOME/OPENCODE_CONFIG_DIR under /etc/xdg on the
+        # --read-only root, but opencode must WRITE state (e.g. its config-dir
+        # .gitignore) or it aborts with "FileSystem.writeFile". Redirect the XDG +
+        # opencode state dirs into the writable HOME tmpfs; the baked config file
+        # is still loaded via OPENCODE_CONFIG (read-only reads are fine).
+        "-e",
+        f"XDG_CONFIG_HOME={config.home_dir}/.config",
+        "-e",
+        f"XDG_DATA_HOME={config.home_dir}/.local/share",
+        "-e",
+        f"XDG_CACHE_HOME={config.home_dir}/.cache",
+        "-e",
+        f"OPENCODE_CONFIG_DIR={config.home_dir}/.config/opencode",
+        "-e",
+        "OPENCODE_CONFIG=/etc/xdg/opencode/opencode.json",
         "-e",
         "OPENROUTER_API_KEY",
         "-v",

@@ -216,11 +216,76 @@ def main() -> int:
                     ),
                     20,
                 ),
+                # --- TASK-4 Docker runtime fixes: no-paid-model regression probes ---
+                # fix1: HOME + /tmp tmpfs are writable by the non-root worker (mode=1777).
+                (
+                    "home-tmpfs-writable",
+                    cell.exec_argv(
+                        ["sh", "-lc", 'echo probe > "$HOME/.smoke-probe" && test -s "$HOME/.smoke-probe"']
+                    ),
+                    20,
+                ),
+                (
+                    "tmp-tmpfs-writable",
+                    cell.exec_argv(["sh", "-lc", "echo probe > /tmp/.smoke-probe && test -s /tmp/.smoke-probe"]),
+                    20,
+                ),
+                # fix2: XDG + opencode state dirs resolve UNDER the writable HOME (not the read-only /etc/xdg).
+                (
+                    "xdg-state-under-home",
+                    cell.exec_argv(
+                        [
+                            "sh",
+                            "-lc",
+                            'for v in "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$OPENCODE_CONFIG_DIR"; do '
+                            'case "$v" in "$HOME"/*) ;; *) echo "not under HOME: $v"; exit 1;; esac; done',
+                        ]
+                    ),
+                    20,
+                ),
+                # fix2: the redirected opencode config dir is actually writable (the .gitignore-write path).
+                (
+                    "opencode-config-dir-writable",
+                    cell.exec_argv(
+                        [
+                            "sh",
+                            "-lc",
+                            'mkdir -p "$OPENCODE_CONFIG_DIR" && echo x > "$OPENCODE_CONFIG_DIR/.smoke-probe" '
+                            '&& test -s "$OPENCODE_CONFIG_DIR/.smoke-probe"',
+                        ]
+                    ),
+                    20,
+                ),
+                # fix2: the baked config file on the read-only root stays READABLE.
+                (
+                    "baked-opencode-config-readable",
+                    cell.exec_argv(["test", "-r", "/etc/xdg/opencode/opencode.json"]),
+                    20,
+                ),
             ]
 
             for check_name, argv, timeout_s in checks:
                 _run_cmd(argv, step=f"check-{check_name}", log=log, timeout_s=timeout_s)
                 log(f"PROGRESS step=check-{check_name} phase=result result=PASS")
+
+            # fix3: an in-container opencode STARTUP probe must initialize cleanly under the
+            # redirected env — NO EACCES / read-only FileSystem.writeFile (the prior blockers).
+            # `--version` is a no-model, no-network startup path (NOT `opencode run`, which is
+            # the paid benchmark path). The writable-config-dir property itself is asserted by
+            # the `opencode-config-dir-writable` probe above.
+            oc = _run_cmd(
+                cell.exec_argv(["opencode", "--version"]),
+                step="opencode-startup",
+                log=log,
+                timeout_s=60,
+            )
+            oc_combined = (oc.stdout or "") + (oc.stderr or "")
+            for forbidden in ("EACCES", "FileSystem.writeFile", "read-only file system", "EROFS", "Permission denied"):
+                if forbidden in oc_combined:
+                    raise SmokeFailure(
+                        f"opencode startup emitted forbidden error {forbidden!r}: {_sanitize(oc_combined)}"
+                    )
+            log("PROGRESS step=opencode-startup phase=result result=PASS")
 
             mounts_raw = _run_cmd(
                 ["docker", "inspect", container_name, "--format", "{{json .Mounts}}"],
