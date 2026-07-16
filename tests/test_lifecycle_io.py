@@ -264,3 +264,36 @@ def test_mcp_rest_extract_and_recall_build_expected_urls_and_bearer_header(tmp_p
     recall_headers = calls[1]["headers"]
     assert isinstance(recall_headers, dict)
     assert recall_headers["Authorization"] == "Bearer bearer-xyz"
+
+
+def test_mcp_rest_extract_includes_session_id_only_when_provided(tmp_path) -> None:
+    logger, _ = _capture_logger("test.lifecycle.mcp_rest.session_id")
+    token_path = tmp_path / "token"
+    token_path.write_text("bearer-xyz", encoding="utf-8")
+
+    calls: list[dict[str, object]] = []
+
+    def transport(url: str, headers: dict[str, str], body: dict[str, object] | None):
+        calls.append({"url": url, "headers": headers, "body": body})
+        if url.endswith("/v1/extract"):
+            return 202, {"job_id": f"job-{len(calls)}", "status": "accepted"}, True
+        raise AssertionError(f"unexpected url {url}")
+
+    cfg = LifecycleConfig(session_token_path=str(token_path))
+    client = McpRest("http://127.0.0.1:4450", cfg, logger, transport=transport)
+
+    assert client.extract("transcript text", "model-a", org_id="org-7", session_id="sess-xyz") == "job-1"
+    assert client.extract("transcript text", "model-a", org_id="org-7") == "job-2"
+    assert client.extract("transcript text", "model-a", org_id="org-7", session_id=None) == "job-3"
+
+    first_body = calls[0]["body"]
+    assert isinstance(first_body, dict)
+    assert first_body["session_id"] == "sess-xyz"
+
+    second_body = calls[1]["body"]
+    assert isinstance(second_body, dict)
+    assert "session_id" not in second_body
+
+    third_body = calls[2]["body"]
+    assert isinstance(third_body, dict)
+    assert "session_id" not in third_body

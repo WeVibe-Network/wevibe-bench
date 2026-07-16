@@ -12,7 +12,7 @@ from typing import Any, Callable
 from .hub_client import HubClient
 from .identity import Identity
 from .lconfig import LifecycleConfig
-from .logging_util import new_trace_id
+from .logging_util import fp, new_trace_id
 from .mcp_rest import McpRest
 from .qdrant_probe import find_org_collection, snapshot_counts
 
@@ -324,6 +324,7 @@ class M2Proof:
         provider: str = "openrouter",
         base_url: str | None = None,
         extract_timeout_s: float = 900,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         if isinstance(self._direct_memory, dict):
             raw_text = self._direct_memory.get("text")
@@ -338,7 +339,7 @@ class M2Proof:
                     0,
                     text_size=len(text),
                     keyword_count=len(keywords),
-                    text_prefix=text[:24],
+                    memory_fp=fp(text),
                 )
                 return {
                     "text": text,
@@ -364,6 +365,7 @@ class M2Proof:
             provider=provider,
             api_key=hosted_api_key,
             base_url=base_url,
+            session_id=session_id,
         )
         self._log("info", "lifecycle.m2.extract_wait", new_trace_id(), "ok", 0, job_id=job_id, timeout_s=extract_timeout_s)
         status = client.wait_extract(job_id, timeout_s=extract_timeout_s)
@@ -391,7 +393,9 @@ class M2Proof:
                 "stack_hint": stack_hint,
             }
 
-        raise RuntimeError(f"extract produced no usable memory candidate: {status}")
+        if isinstance(status, dict):
+            raise RuntimeError(f"extract produced no usable memory candidate (status_keys={sorted(status)})")
+        raise RuntimeError("extract produced no usable memory candidate")
 
     def submit_memory(self, org_id: str, memory: dict[str, Any]) -> str:
         text = memory.get("text")
@@ -542,11 +546,13 @@ class M2Proof:
         queue_items = self._queue_items(queue_payload)
         pending = self._find_submission(queue_items, submission_hash)
         if pending is None:
-            raise RuntimeError(f"submission {submission_hash} not found in moderation queue: {queue_payload}")
+            raise RuntimeError(
+                f"submission {submission_hash} not found in moderation queue (queue_size={len(queue_items)})"
+            )
         for field in ("ciphertext_hex", "wrapped_dek_mod"):
             value = pending.get(field)
             if not isinstance(value, str) or not value:
-                raise RuntimeError(f"moderation queue item missing {field}: {pending}")
+                raise RuntimeError(f"moderation queue item missing {field}")
 
         embed_request = {
             "id": submission_hash,
@@ -566,7 +572,11 @@ class M2Proof:
             ),
         )
         if not isinstance(embed_payload, list) or not embed_payload or not isinstance(embed_payload[0], dict):
-            raise RuntimeError(f"embed retrieval card invalid payload: {embed_payload}")
+            raise RuntimeError(
+                "embed retrieval card invalid payload "
+                f"(type={type(embed_payload).__name__}, "
+                f"len={len(embed_payload) if isinstance(embed_payload, (list, dict)) else 'n/a'})"
+            )
 
         card = embed_payload[0]
         classified = self._build_classified_keywords(keywords)
@@ -626,7 +636,7 @@ class M2Proof:
                 }
             self._sleep(0.5)
 
-        raise TimeoutError(f"commit_status did not report committed for {submission_hash}: {commit_payload}")
+        raise TimeoutError(f"commit_status did not report committed for {submission_hash}")
 
     def prove_delivery(self, org_id: str, expected_text_fragment: str) -> dict[str, Any]:
         payload = self._leader_rest().recall(
@@ -697,16 +707,45 @@ class M2Proof:
         qdrant_after = self._snapshot_fn(self._qdrant_url)
         qdrant_delta = self._qdrant_delta(org_id, qdrant_before, qdrant_after)
         if not qdrant_delta["saw_plus_one"]:
-            raise RuntimeError(f"INV-10 failed: expected +1 point delta, got {qdrant_delta}")
+            raise RuntimeError(
+                "expected +1 Qdrant point delta after commit, got "
+                f"saw_plus_one={qdrant_delta.get('saw_plus_one')} grew={qdrant_delta.get('grew')}"
+            )
 
         expected_fragment = memory["text"].strip()[:64]
         delivery = self.prove_delivery(org_id, expected_fragment)
 
+        memory_text = memory["text"] if isinstance(memory.get("text"), str) else ""
+        keywords = memory.get("keywords")
+        memory_keywords = keywords if isinstance(keywords, list) else []
+        hops = verify_commit.get("hops") if isinstance(verify_commit, dict) else []
+        verify_hops: list[Any] = []
+        if isinstance(hops, list):
+            for hop in hops:
+                if isinstance(hop, dict):
+                    verify_hops.append(
+                        {
+                            "hop": hop.get("hop"),
+                            "phase": hop.get("phase"),
+                            "status": hop.get("status"),
+                        }
+                    )
+                    continue
+                verify_hops.append(hop)
+
         result = {
             "org_id": org_id,
             "submission_hash": submission_hash,
-            "memory": memory,
-            "verify_commit": verify_commit,
+            "memory": {
+                "memory_fp": fp(memory_text),
+                "text_size": len(memory_text.encode("utf-8")),
+                "keyword_count": len(memory_keywords),
+            },
+            "verify_commit": {
+                "committed": True,
+                "hop_count": len(verify_hops),
+                "hops": verify_hops,
+            },
             "qdrant_delta": qdrant_delta,
             "delivery": delivery,
         }

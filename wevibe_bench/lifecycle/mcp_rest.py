@@ -145,6 +145,7 @@ class McpRest:
         base_url: str | None = None,
         num_ctx: int | None = None,
         prompt: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         body: dict[str, Any] = {
             "transcript": transcript,
@@ -164,6 +165,8 @@ class McpRest:
             body["num_ctx"] = num_ctx
         if prompt is not None:
             body["prompt"] = prompt
+        if session_id:
+            body["session_id"] = session_id
 
         payload = self._request("lifecycle.mcp.extract", "/v1/extract", body, expected_statuses=(200, 202))
         if not isinstance(payload, dict) or not isinstance(payload.get("job_id"), str) or not payload["job_id"]:
