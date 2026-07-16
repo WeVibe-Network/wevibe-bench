@@ -1,4 +1,4 @@
-"""Capture OFF backgammon worker reasoning, extract memory, submit+approve to org-0, prove delivery."""
+"""Capture backgammon worker reasoning, extract memory, submit+approve to org-0, prove delivery."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.preflight import preflight
 
 
-DEFAULT_RUN_LABEL = "gemini-off-smoke"
+DEFAULT_RUN_LABEL = "backgammon-smoke"
 DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_RUNS_DIR = "runs/backgammon"
 DEFAULT_TRANSCRIPT_CHAR_CAP = 120_000
@@ -87,6 +87,7 @@ class _PromptInjectingRest:
         base_url: str | None = None,
         num_ctx: int | None = None,
         prompt: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         return self._inner.extract(
             transcript=transcript,
@@ -98,6 +99,7 @@ class _PromptInjectingRest:
             base_url=base_url,
             num_ctx=num_ctx,
             prompt=prompt if prompt is not None else self._prompt,
+            session_id=session_id,
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -107,14 +109,20 @@ class _PromptInjectingRest:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Capture OFF backgammon worker reasoning, distill memory with S/E prompts, "
+            "Capture backgammon worker reasoning from the selected session mode, distill memory with S/E prompts, "
             "submit+approve into org-0 via bench clone :4550, and prove delivery."
         ),
     )
     parser.add_argument(
         "--run-label",
         default=DEFAULT_RUN_LABEL,
-        help="Backgammon run label under --runs-dir (default: gemini-off-smoke).",
+        help="Backgammon run label under --runs-dir (default: backgammon-smoke).",
+    )
+    parser.add_argument(
+        "--source-mode",
+        choices=("off", "on"),
+        default="off",
+        help="Session mode subdirectory under --run-label to extract from (default: off).",
     )
     parser.add_argument(
         "--org-id",
@@ -125,7 +133,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--session-model",
         required=True,
         help=(
-            "The model slug that PRODUCED the OFF session being distilled — "
+            "The model slug that PRODUCED the selected session being distilled — "
             "the default self-extraction model E."
         ),
     )
@@ -183,15 +191,68 @@ def _json_line(path: Path, line_no: int, raw: str) -> dict[str, Any]:
     return payload
 
 
-def _event_files(off_dir: Path) -> list[Path]:
-    files = sorted({p.resolve() for p in off_dir.rglob("*.events.jsonl")})
+def _event_files(session_dir: Path) -> list[Path]:
+    files = sorted({p.resolve() for p in session_dir.rglob("*.events.jsonl")})
     if files:
         return files
 
-    fallback = off_dir / "worktree.events.jsonl"
+    fallback = session_dir / "worktree.events.jsonl"
     if fallback.is_file():
         return [fallback.resolve()]
-    raise RuntimeError(f"no worker events JSONL files found under {off_dir}")
+    raise RuntimeError(f"no worker events JSONL files found under {session_dir}")
+
+
+def _session_id_counts_from_events(session_dir: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for events_file in _event_files(session_dir):
+        try:
+            lines = events_file.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise RuntimeError(f"unable to read events file {events_file}: {exc}") from exc
+
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            session_id = payload.get("sessionID")
+            if not isinstance(session_id, str):
+                continue
+            normalized = session_id.strip()
+            if not normalized:
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
+
+
+def _session_id_from_events(
+    session_dir: Path,
+    *,
+    session_counts: dict[str, int] | None = None,
+) -> str | None:
+    counts = session_counts if session_counts is not None else _session_id_counts_from_events(session_dir)
+    if not counts:
+        return None
+    if len(counts) == 1:
+        return next(iter(counts))
+
+    chosen_session_id, _ = max(counts.items(), key=lambda item: (item[1], item[0]))
+    counts_blob = ", ".join(
+        f"{session_id}:{count}"
+        for session_id, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    )
+    print(
+        f"[{_utc_iso()}] WARNING multiple sessionIDs in events session_dir={session_dir} "
+        f"chosen_session_id={chosen_session_id} distinct_sessions={counts_blob}",
+        flush=True,
+    )
+    return chosen_session_id
 
 
 def _assistant_text_chunks(events_file: Path) -> list[str]:
@@ -221,19 +282,19 @@ def _source_section(path: Path, *, cap: int) -> str:
 
 def _build_transcript(
     *,
-    off_dir: Path,
+    session_dir: Path,
     run_label: str,
     s_prompt: str,
     transcript_cap: int,
     source_cap: int,
 ) -> tuple[str, int, list[Path]]:
-    events_files = _event_files(off_dir)
+    events_files = _event_files(session_dir)
 
     chunks: list[str] = []
     for events_file in events_files:
         chunks.extend(_assistant_text_chunks(events_file))
 
-    worktree_src = off_dir / "worktree" / "src"
+    worktree_src = session_dir / "worktree" / "src"
     game_path = worktree_src / "game.ts"
     ai_path = worktree_src / "ai.ts"
     server_path = worktree_src / "server.ts"
@@ -241,7 +302,7 @@ def _build_transcript(
     transcript_parts = [
         f"TASK: {TASK_HEADER}",
         f"RUN_LABEL: {run_label}",
-        f"OFF_DIR: {off_dir}",
+        f"SESSION_DIR: {session_dir}",
         "",
         "=== S PROMPT (fork reasoning strategy) ===",
         s_prompt.strip(),
@@ -339,7 +400,7 @@ def _memory_fragment(text: str, limit: int = 84) -> str:
 
 
 def _memory_fingerprint_fields(text: str) -> dict[str, Any]:
-    """R-37-safe fingerprint of a memory's plaintext for logs/results.
+    """Content-free fingerprint of a memory's plaintext for logs/results (no plaintext).
 
     Emits ONLY a sha256 first-8 hex fingerprint + byte size — NEVER the plaintext
     itself (no fragment, no prefix). Used wherever delivery-proof outcome is logged.
@@ -405,11 +466,13 @@ def main() -> int:
     contributor_instance: McpInstance | None = None
     leader_reused = False
     procman: McpProcessManager | None = None
+    session_dir = (runs_dir / args.run_label / args.source_mode).resolve()
+    session_id: str | None = None
+    progress(f"source selection source_mode={args.source_mode} session_dir={session_dir}")
 
     try:
-        off_dir = (runs_dir / args.run_label / "off").resolve()
-        if not off_dir.is_dir():
-            raise RuntimeError(f"off run directory not found: {off_dir}")
+        if not session_dir.is_dir():
+            raise RuntimeError(f"session run directory not found: {session_dir}")
 
         repo_root = Path(__file__).resolve().parents[1]
         e_prompt_path = repo_root / "scaffold" / "sxe-candidate" / "E-assembled.txt"
@@ -419,12 +482,24 @@ def main() -> int:
 
         stage = "transcript"
         transcript, text_chunks, events_files = _build_transcript(
-            off_dir=off_dir,
+            session_dir=session_dir,
             run_label=args.run_label,
             s_prompt=s_prompt,
             transcript_cap=DEFAULT_TRANSCRIPT_CHAR_CAP,
             source_cap=DEFAULT_SOURCE_CHAR_CAP,
         )
+        session_counts = _session_id_counts_from_events(session_dir)
+        session_id = _session_id_from_events(session_dir, session_counts=session_counts)
+        progress(
+            "session linkage "
+            f"source_mode={args.source_mode} distinct_session_count={len(session_counts)} "
+            f"chosen_session_id={session_id or 'none'}"
+        )
+        if args.source_mode == "on" and session_id is None:
+            progress(
+                "WARNING source_mode=on no sessionID found in events; "
+                "injected_memory dedup will be skipped for this run"
+            )
         progress(
             "transcript built "
             f"events_files={len(events_files)} text_chunks={text_chunks} transcript_chars={len(transcript)}"
@@ -519,8 +594,8 @@ def main() -> int:
         )
 
         project_context = {
-            "title": f"backgammon-off-{args.run_label}",
-            "directory": str(off_dir / "worktree"),
+            "title": f"backgammon-{args.source_mode}-{args.run_label}",
+            "directory": str(session_dir / "worktree"),
             "stack": ["typescript", "node", "backgammon"],
             "task": TASK_HEADER,
             "strategy_s_prompt": s_prompt,
@@ -531,12 +606,17 @@ def main() -> int:
         extract_provider = "openrouter"
         if not extract_provider.strip():
             raise RuntimeError("extract provider must be non-empty")
-        if extract_model.startswith("openrouter/"):
-            raise RuntimeError(
-                "extract model slug must be the RAW provider id (e.g. "
-                "'anthropic/claude-opus-4.8'), NOT openrouter/-prefixed; "
-                f"provider is passed separately: got {extract_model!r}"
-            )
+        # The opencode SESSION slug is provider-prefixed (e.g. 'openrouter/anthropic/claude-opus-4.6'),
+        # but /v1/extract wants the RAW provider id with `provider` passed separately. For
+        # self-extraction (extract_model defaults to session_model) normalize by stripping a leading
+        # provider prefix that matches extract_provider.
+        _provider_prefix = f"{extract_provider}/"
+        if extract_model.startswith(_provider_prefix):
+            _normalized = extract_model[len(_provider_prefix):]
+            progress(f"extract model normalized from={extract_model} to={_normalized} provider={extract_provider}")
+            extract_model = _normalized
+        if not extract_model.strip():
+            raise RuntimeError(f"extract model empty after normalization: provider={extract_provider!r}")
 
         stage = "extract"
         extract_start = time.perf_counter()
@@ -555,6 +635,7 @@ def main() -> int:
             org_id=org_id,
             provider=extract_provider,
             extract_timeout_s=args.extract_timeout,
+            session_id=session_id,
         )
         extract_path = "extract"
 

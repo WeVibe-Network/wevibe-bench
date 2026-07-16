@@ -135,11 +135,22 @@ def build_extract_cmd(
     args: argparse.Namespace,
     run_label: str,
 ) -> list[str]:
+    raw_memory_modes = str(args.memory_modes or "")
+    memory_modes = [part.strip().lower() for part in raw_memory_modes.split(",") if part.strip()]
+    if len(memory_modes) != 1 or memory_modes[0] not in {"off", "on"}:
+        raise RuntimeError(
+            "--memory-modes must contain exactly one mode ('off' or 'on') for extraction; "
+            f"got {raw_memory_modes!r}"
+        )
+    source_mode = memory_modes[0]
+
     cmd = [
         python_exe,
         str(scripts_dir / "backgammon_sxe.py"),
         "--run-label",
         run_label,
+        "--source-mode",
+        source_mode,
         "--session-model",
         str(args.model),
         "--extract-timeout",
