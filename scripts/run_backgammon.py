@@ -162,6 +162,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps-per-attempt", type=int, default=None)
     parser.add_argument("--output-price-per-1m", type=float, default=None)
     parser.add_argument("--run-timeout", type=int, default=1800)
+    parser.add_argument(
+        "--completion-grace",
+        type=int,
+        default=30,
+        help=(
+            "Seconds of idle after the model's final stop before the driver terminates "
+            "a hung opencode process (deterministic bounded exit)."
+        ),
+    )
     parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--proxy-base-url", default=None)
     parser.add_argument("--proxy-token-file", default=None)
@@ -302,6 +311,7 @@ def main() -> int:
             max_attempts=cfg.max_attempts,
             token_cap=args.token_cap,
             run_timeout_s=args.run_timeout,
+            completion_grace_s=args.completion_grace,
             cost_limit_usd=cfg.cost_limit_usd,
             cost_target_usd=cfg.cost_target_usd,
             max_output_tokens=cfg.max_output_tokens,

@@ -128,6 +128,7 @@ class BackgammonRunner(AgentRunner):
         max_attempts: int = 3,
         token_cap: int = 200000,
         run_timeout_s: int = 1200,
+        completion_grace_s: int = 30,
         cost_limit_usd: float | None = None,
         cost_target_usd: float | None = None,
         max_output_tokens: int | None = None,
@@ -150,6 +151,7 @@ class BackgammonRunner(AgentRunner):
         self.max_attempts = int(max_attempts)
         self.token_cap = int(token_cap)
         self.run_timeout_s = int(run_timeout_s)
+        self.completion_grace_s = int(completion_grace_s)
         self.cost_limit_usd = None if cost_limit_usd is None else float(cost_limit_usd)
         self.cost_target_usd = None if cost_target_usd is None else float(cost_target_usd)
         self.max_output_tokens = None if max_output_tokens is None else int(max_output_tokens)
@@ -179,6 +181,8 @@ class BackgammonRunner(AgentRunner):
             raise ValueError("token_cap must be >= 1")
         if self.run_timeout_s < 1:
             raise ValueError("run_timeout_s must be >= 1")
+        if self.completion_grace_s < 1:
+            raise ValueError("completion_grace_s must be >= 1")
         if self.cost_limit_usd is not None and self.cost_limit_usd <= 0:
             raise ValueError("cost_limit_usd must be > 0")
         if self.cost_target_usd is not None and self.cost_target_usd <= 0:
@@ -669,6 +673,8 @@ class BackgammonRunner(AgentRunner):
         golden_dir = str((self.task_dir / "golden").resolve())
         config = {
             "$schema": "https://opencode.ai/config.json",
+            "model": self.model,
+            "small_model": self.model,
             "permission": {
                 "*": "allow",
                 "external_directory": {"*": "deny"},
@@ -869,6 +875,7 @@ class BackgammonRunner(AgentRunner):
             "sum_reasoning": 0,
             "max_input": 0,
             "sum_cost": 0.0,
+            "completed_at": None,
         }
         stderr_tail: collections.deque[str] = collections.deque(maxlen=120)
         reader_failures: list[str] = []
@@ -904,11 +911,17 @@ class BackgammonRunner(AgentRunner):
                             if sid and not state["session_id"]:
                                 state["session_id"] = str(sid)
 
-                        if event.get("type") != "step_finish":
+                        event_type = event.get("type")
+                        if event_type == "step_start":
+                            with state_lock:
+                                state["completed_at"] = None
+                            continue
+                        if event_type != "step_finish":
                             continue
 
                         part = event.get("part") if isinstance(event.get("part"), dict) else {}
                         tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+                        reason = part.get("reason")
                         input_tokens = max(0, self._to_int(tokens.get("input")))
                         output_tokens = max(0, self._to_int(tokens.get("output")))
                         reasoning_tokens = max(0, self._to_int(tokens.get("reasoning")))
@@ -921,6 +934,8 @@ class BackgammonRunner(AgentRunner):
                             state["sum_cost"] += float(step_cost) if isinstance(step_cost, (int, float)) else 0.0
                             if input_tokens > state["max_input"]:
                                 state["max_input"] = input_tokens
+                            if reason == "stop":
+                                state["completed_at"] = time.monotonic()
                 except Exception as exc:  # noqa: BLE001 - log and continue teardown.
                     reader_failures.append(f"stdout reader failure ({phase}): {exc}")
                 finally:
@@ -1004,6 +1019,16 @@ class BackgammonRunner(AgentRunner):
                     )
 
                 if rc is not None:
+                    break
+                # Bound process teardown after a final stop while allowing any subsequent resumed step to reset the grace window.
+                with state_lock:
+                    completed_at = state["completed_at"]
+                if completed_at is not None and (time.monotonic() - completed_at) >= self.completion_grace_s:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=worker-complete phase={phase} "
+                        f"reason=idle_after_stop grace={self.completion_grace_s}s elapsed={elapsed:.2f}s"
+                    )
+                    self._kill_process_group(proc)
                     break
                 if elapsed > self.run_timeout_s:
                     killed_reason = "run_timeout"

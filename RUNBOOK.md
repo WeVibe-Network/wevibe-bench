@@ -110,9 +110,16 @@ host-side by a dummy oracle (NO paid model, NO live corpus).
 ### How a cell runs (informational)
 - `backgammon.py` preflights `docker_available()` + `image_exists()`.
 - The adapter starts one container per cell, mounting ONLY the worktree at `/work`.
+- Each cell worktree pins OpenCode to exactly one model: both `model` and `small_model` are set to that cell's
+  selected roster model, so the cell only requests that model. The host proxy remains a hard backstop and rejects
+  any non-matching model.
 - It runs `docker exec … opencode run … --dir /work` (`--pure` for OFF), then re-injects problems-only feedback into
   the same container/session.
-- Cell teardown is deterministic: `docker rm -f` at cell end.
+- The driver watches streamed events for the model's final stop. If OpenCode 1.18.1 finishes work but does not exit,
+  the driver waits a bounded idle grace (`--completion-grace`, default 30s) and then terminates the finished process
+  instead of waiting the full `--run-timeout`; `--run-timeout` remains the ceiling for runs that never finish.
+- Cell teardown is deterministic: `docker rm -f` at cell end, which always reaps the container and remaining
+  processes.
 - OFF/ON recall reaches the host clone at `host.docker.internal:4550`; NO host keys/corpus enter the container.
 
 ## OpenRouter proxy (the ONE paid transport path)
@@ -213,6 +220,8 @@ the proxy path.
 Base-URL override wiring is proven on OpenCode 1.17.20 and structurally certain
 for the worker's 1.18.1 configuration path. One remaining live-request
 byte-verification is intentionally deferred because it cannot be done zero-cost.
+Known OpenCode 1.18.1 post-completion exit hangs are handled by the driver's
+bounded `--completion-grace` termination path documented above.
 
 ### Later (paid) smoke — DO NOT RUN in setup; Walter-gated
 After a clean wipe (`make redeploy` from `wevibe-meta` + clear `/tmp` bench keystores): start `:4550`, run ONE
