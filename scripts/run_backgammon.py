@@ -163,6 +163,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-price-per-1m", type=float, default=None)
     parser.add_argument("--run-timeout", type=int, default=1800)
     parser.add_argument("--reasoning-effort", default=None)
+    parser.add_argument("--proxy-base-url", default=None)
+    parser.add_argument("--proxy-token-file", default=None)
     parser.add_argument("--agent", default="build")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--runs-dir", default=str(_default_runs_dir()))
@@ -176,6 +178,9 @@ def main() -> int:
     memory_modes = _parse_memory_modes(args.memory_modes)
     mock_mode = None if args.mock == "none" else args.mock
     run_ts = _utc_compact()
+    proxy_token: str | None = None
+    if args.proxy_token_file:
+        proxy_token = Path(args.proxy_token_file).expanduser().read_text(encoding="utf-8").strip()
 
     if args.cost_limit is not None and args.cost_limit <= 0:
         raise ValueError("--cost-limit must be > 0")
@@ -225,6 +230,8 @@ def main() -> int:
         start_line += f" output_price_per_1m={args.output_price_per_1m:.4f}"
     if args.reasoning_effort is not None:
         start_line += f" reasoning_effort={args.reasoning_effort}"
+    if args.proxy_base_url is not None:
+        start_line += f" proxy_base_url={args.proxy_base_url}"
     progress(start_line)
 
     cfg = RunConfig(
@@ -301,6 +308,8 @@ def main() -> int:
             max_steps_per_attempt=cfg.max_steps_per_attempt,
             output_price_per_1m=cfg.output_price_per_1m,
             reasoning_effort=cfg.reasoning_effort,
+            proxy_base_url=args.proxy_base_url,
+            proxy_token=proxy_token,
             agent=args.agent,
             logger=logger,
             progress=progress,

@@ -134,6 +134,8 @@ class BackgammonRunner(AgentRunner):
         max_steps_per_attempt: int | None = None,
         output_price_per_1m: float | None = None,
         reasoning_effort: str | None = None,
+        proxy_base_url: str | None = None,
+        proxy_token: str | None = None,
         agent: str = "build",
         logger: Any = None,
         progress: Callable[[str], None] | None = None,
@@ -154,6 +156,8 @@ class BackgammonRunner(AgentRunner):
         self.max_steps_per_attempt = None if max_steps_per_attempt is None else int(max_steps_per_attempt)
         self.output_price_per_1m = None if output_price_per_1m is None else float(output_price_per_1m)
         self.reasoning_effort = None if reasoning_effort is None else str(reasoning_effort)
+        self.proxy_base_url = None if proxy_base_url is None else str(proxy_base_url)
+        self.proxy_token = None if proxy_token is None else str(proxy_token)
         self.agent = str(agent)
 
         self._effective_output_price_per_1m = 0.0
@@ -362,6 +366,8 @@ class BackgammonRunner(AgentRunner):
                 container_name=container_name,
             )
             cell_config.output_token_max = self.max_output_tokens
+            cell_config.proxy_base_url = self.proxy_base_url
+            cell_config.proxy_token = self.proxy_token
             cell_context = DockerCell(
                 cell_config,
                 progress=self._progress,
@@ -679,26 +685,30 @@ class BackgammonRunner(AgentRunner):
             },
         }
         provider_id, _, model_id = self.model.partition("/")
+        provider_config: dict[str, Any] = {}
+        if self.proxy_base_url is not None:
+            provider_config["openrouter"] = {
+                "options": {
+                    "baseURL": self.proxy_base_url,
+                }
+            }
+
         # Output token caps are enforced via Docker env
         # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, not model `options.max_tokens`
         # in opencode.json.
         if provider_id and model_id and self.reasoning_effort is not None:
-            options: dict[str, Any] = {}
+            provider_block = provider_config.setdefault(provider_id, {})
+            models_block = provider_block.setdefault("models", {})
+            model_block = models_block.setdefault(model_id, {})
+            options = model_block.setdefault("options", {})
             options["reasoning"] = {"effort": self.reasoning_effort}
-
-            config["provider"] = {
-                provider_id: {
-                    "models": {
-                        model_id: {
-                            "options": options,
-                        }
-                    }
-                }
-            }
             self._progress(
                 "PROGRESS step=worker-permission-config "
                 f"reasoning_effort={self.reasoning_effort} model={self.model}"
             )
+
+        if provider_config:
+            config["provider"] = provider_config
         (worktree / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         self._progress(
             "PROGRESS step=worker-permission-config external_directory=deny "

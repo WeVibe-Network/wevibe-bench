@@ -35,6 +35,9 @@ REQUIRES_DOCKER = pytest.mark.skipif(
     reason=f"docker unavailable: {_DOCKER_DETAIL}",
 )
 
+TEST_PROXY_BASE_URL = "http://host.docker.internal:8789/api/v1"
+TEST_PROXY_TOKEN = "test-ephemeral-token"
+
 
 def _run(
     argv: list[str],
@@ -76,6 +79,8 @@ def _started_cell(worktree: Path, *, memory_mode: str) -> DockerCell:
             worktree=worktree,
             memory_mode=memory_mode,
             container_name=_unique_container_name(),
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
         )
     )
     try:
@@ -136,6 +141,75 @@ def _contains_pair(argv: list[str], left: str, right: str) -> bool:
         if item == left and argv[idx + 1] == right:
             return True
     return False
+
+
+def test_docker_cell_requires_proxy_token_no_fallback(tmp_path: Path) -> None:
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "missing-proxy-token-worktree",
+            memory_mode="off",
+            container_name="wevibe-bench-cell-missing-token",
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=None,
+        )
+    )
+
+    with pytest.raises(ValueError, match="proxy token required"):
+        cell.__enter__()
+
+
+def test_docker_cell_forwards_ephemeral_proxy_token_not_host_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_openrouter_key = "sk-or-host-openrouter-key"
+    captured: dict[str, object] = {}
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if len(argv) >= 2 and argv[0] == "docker" and argv[1] == "run":
+            captured["argv"] = list(argv)
+            env_payload = kwargs.get("env", {})
+            assert isinstance(env_payload, dict)
+            captured["env"] = dict(env_payload)
+            return subprocess.CompletedProcess(argv, 0, stdout="fake-container-id\n", stderr="")
+        if len(argv) >= 2 and argv[0] == "docker" and argv[1] == "rm":
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker invocation: {argv!r}")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", host_openrouter_key)
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.ensure_network", lambda *_: None)
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker._host_uid", lambda: 501)
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker._host_gid", lambda: 20)
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "argv-ephemeral-token-worktree",
+            memory_mode="off",
+            container_name="wevibe-bench-cell-argv-ephemeral-token",
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+        )
+    )
+
+    try:
+        cell.__enter__()
+    finally:
+        cell.teardown()
+
+    assert "argv" in captured
+    assert "env" in captured
+    run_argv = captured["argv"]
+    run_env = captured["env"]
+    assert isinstance(run_argv, list)
+    assert isinstance(run_env, dict)
+
+    assert _contains_pair(run_argv, "-e", "OPENROUTER_API_KEY")
+    assert all(not part.startswith("OPENROUTER_API_KEY=") for part in run_argv)
+    assert all(host_openrouter_key not in part for part in run_argv)
+
+    assert run_env.get("OPENROUTER_API_KEY") == TEST_PROXY_TOKEN
+    assert run_env.get("OPENROUTER_API_KEY") != host_openrouter_key
 
 
 @REQUIRES_DOCKER
@@ -364,6 +438,8 @@ def test_image_and_run_argv_do_not_embed_secrets(tmp_path: Path) -> None:
         worktree=worktree,
         memory_mode="off",
         container_name="wevibe-bench-cell-argv-check",
+        proxy_base_url=TEST_PROXY_BASE_URL,
+        proxy_token=TEST_PROXY_TOKEN,
     )
     run_argv = _build_run_argv(config=cfg, worktree=worktree, uid=1000, gid=1000, memory_mode="off")
     assert _contains_pair(run_argv, "-e", "OPENROUTER_API_KEY")
@@ -426,6 +502,8 @@ def test_run_argv_makes_home_and_tmp_writable_tmpfs_mode_1777() -> None:
         worktree=Path("/tmp/argv-mode-check"),
         memory_mode="off",
         container_name="wevibe-bench-cell-mode-check",
+        proxy_base_url=TEST_PROXY_BASE_URL,
+        proxy_token=TEST_PROXY_TOKEN,
     )
     argv = _build_run_argv(config=cfg, worktree=cfg.worktree, uid=501, gid=20, memory_mode="off")
     assert _contains_pair(argv, "--tmpfs", "/tmp:mode=1777")
@@ -445,6 +523,8 @@ def test_run_argv_redirects_xdg_state_into_writable_home_and_keeps_baked_config(
         worktree=Path("/tmp/argv-xdg-check"),
         memory_mode="off",
         container_name="wevibe-bench-cell-xdg-check",
+        proxy_base_url=TEST_PROXY_BASE_URL,
+        proxy_token=TEST_PROXY_TOKEN,
     )
     argv = _build_run_argv(config=cfg, worktree=cfg.worktree, uid=501, gid=20, memory_mode="off")
     home = cfg.home_dir
@@ -456,4 +536,3 @@ def test_run_argv_redirects_xdg_state_into_writable_home_and_keeps_baked_config(
     assert _contains_pair(argv, "-e", "OPENCODE_CONFIG=/etc/xdg/opencode/opencode.json")
     # HOME still points at the writable tmpfs.
     assert _contains_pair(argv, "-e", f"HOME={home}")
-

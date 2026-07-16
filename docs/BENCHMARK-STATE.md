@@ -34,6 +34,10 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
 - **Recall MCP clone:** `wevibe-bench/scaffold/wevibe-mcp-clone` (dist), runs on **:4550** (`WEVIBE_BENCH_ENDPOINTS=1`,
   seed identity, does recall+decrypt host-side; canonical wevibe-mcp UNTOUCHED). Dedup hard-drop lives in its
   `src/extraction.ts` + `dist/extraction.js:1024` (filters near_dup after `near_dup_drop` log; 0.93 threshold).
+- **Host-side OpenRouter proxy:** `wevibe_bench/adapters/openrouter_proxy.py` (policy + budget ledger),
+  `wevibe_bench/adapters/openrouter_proxy_server.py` (HTTP transport), `scripts/run_openrouter_proxy.py` (CLI shim).
+  It serves `/api/v1/chat/completions` on host loopback, keeps the real OpenRouter key on host only, issues
+  ephemeral per-run worker tokens, and persists checkpoint+R-37 logs under `runs/openrouter-proxy/`.
 - **Config/runbook:** `config/bench.env` (durable env: umbral+guard bins, keystore paths, recall-mode, endpoints),
   `RUNBOOK.md` (clone launch + two-tier topology + clean-start), `docs/` (proposal + directive, see §6).
 - **Clean-start:** `make docker-down && docker-up` (full wipe chain/pg/qdrant) PAIRED with
@@ -90,6 +94,12 @@ verbose output, not injection volume. "all-11=bloat" UNSUPPORTED. mgr-verified v
   worktree-local opencode.json allow-worktree/DENY-oracle, allow/deny only NO `ask`) + HARD CHEAT GATE
   (cheat_detector, verdict=CHEAT overrides PASS). Directive: `wevibe-bench/docs/ORACLE-ISOLATION-DIRECTIVE.md`.
   reports `14-07-26-0210/0207/0215/0218`.
+- **Paid transport hardening (proxy):** host-side proxy is the one paid path and hard-injects per-profile
+  OpenRouter `provider` policy (pinned `order`/`only`, `allow_fallbacks:false`, `require_parameters:true`,
+  profile quantizations when configured), rejects worker-side `provider` overrides, and clamps `max_tokens`.
+- **Hard-ceiling spend ledger (proxy):** conservative reservation before dispatch, refuse-before-dispatch on
+  projected spend over cap, retain-on-uncertainty (never release), atomic checkpoint resume. Ceiling is
+  genuinely hard at `min(configured cap, $12)` and restart cannot reset spend.
 - **Known limitation:** perm-deny leaks (bash indirection, file-copy) → cheat-gate is the guaranteed backstop,
   but for clean scored data the oracle must be physically absent.
 
@@ -130,6 +140,12 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - **Roster remains BLOCKED-BY-PASSABILITY:** before any scored roster/full ladder, the repaired benchmark must first
   clear a fresh clean Opus-4.8 HIGH recall-OFF Docker passability smoke PASS under the hard $12 ceiling (§6A);
   Walter roster confirmation is still required after that.
+- **Provider-routing mechanism status:** the prior "harness provider-routing UNPROVEN" gap is now closed by the
+  host-side proxy enforcement path (policy injection + persistent budget ledger). This closure does NOT authorize
+  scored runs by itself.
+- **Opus provider-pin DECISION GATE (OPEN):** Opus paid smoke remains BLOCKED until Walter supplies an explicit
+  OpenRouter provider pin for Opus and one live verification run is executed. The proxy policy already requires
+  this field; current Opus profile is `provider_object=None` and therefore blocked.
 - The prior Opus-4.8 HIGH passability smoke already ran (15-07) and failed on four now-repaired gates, motivating
   Option A (`15-07-26-1019-opus48-high-passability-smoke.md`).
 - Finish minimax rung 13-14? Low marginal value; needs extractor override (confounds self-extraction) or skip-flag.

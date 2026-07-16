@@ -10,6 +10,24 @@ quantization, output-cap, and TTFT claim below is a **July-15-2026 snapshot** an
 authenticated / live-re-verified before any spend.** Do not treat any slug or pin as a verified current
 endpoint — resolve against the live OpenRouter API first.
 
+**⚙ LIVE-VERIFY RESULT (15-07-26, reports `…-1519-…-live-passability.md` + `…-2019-…-pins-docker-leg.md`):**
+Real-transport passability through the host-side proxy is **PROVEN** at every layer (direct HTTP AND the
+Docker worker→host-proxy leg), key auto-sourced from OpenCode `auth.json`, provider objects injected, budget
+accrued. **Walter's pin forks are RESOLVED and live-verified — all three roster members are TRANSPORT+ELIGIBILITY GREEN:**
+- **GLM `z-ai/glm-5.2` → `novita`, `quantizations:["fp8"]`** (the defective `fireworks`+fp8 pin was REMOVED — Fireworks has no fp8 endpoint). Live: HTTP 200 via **Novita**, real content, ~$0.00014.
+- **MiMo `xiaomi/mimo-v2.5-pro` → `deepinfra`** (quant omitted). Live: HTTP 200 via **DeepInfra**, ~$0.00025.
+- **Opus `anthropic/claude-opus-4.8` → first-party `anthropic`**. Live: HTTP 200 via **Anthropic**, real content, ~$0.00018.
+Total real spend across all live smokes ≈ **$0.0007** (well under the $12 hard aggregate ceiling). Pricing is
+runtime-sourced at launch (never baked); the provider pins are now the SoT in `wevibe_bench/adapters/openrouter_proxy.py::DEFAULT_PROFILES`.
+**Docker-leg note:** opencode-in-docker reached the host proxy and completed a real Novita call, but the
+`opencode run` process did not self-terminate within the 180s bound (a session-lifecycle behavior INDEPENDENT of the
+proxy — the proxy handled every call correctly; it correctly 400-rejected opencode's auxiliary `google/gemini-3.1-flash-image`
+call under the single-model pin). Full scored cells must configure opencode to use ONLY the pinned model (or the driver
+must tolerate the aux 400, which it did — the main call succeeded). This is a benchmark-cell config item, NOT a transport defect.
+**STILL BLOCKING scored runs (unchanged):** transport passability ≠ benchmark authorization — the Opus HIGH oracle smoke
+FAILED (report 1019), and Walter's explicit scored-run authorization + the benchmark-instrument question remain open.
+
+
 **Scope:** benchmark roster / measurement integrity ONLY. This does NOT alter locked network-wide memory
 design or any locked DECISIONS. It sits alongside `BENCHMARK-STATE.md`, `RUNBOOK.md`,
 `ORACLE-ISOLATION-DIRECTIVE.md`, `DOCKER-SANDBOX-PROPOSAL.md`.
@@ -37,49 +55,64 @@ passability smoke works. It does not.
   `docs/CONTRACT-TRACEABILITY.md`.
 - **Unblocking requirement remains:** a fresh clean Opus-4.8 HIGH recall-OFF Docker passability smoke must PASS on
   the repaired instrument under the hard $12 cumulative ceiling before any scored/candidate roster run.
-- **Still separate + blocked:** harness provider-routing capability remains UNPROVEN; no candidate is authorized;
-  corpus remains 0.
+- **Still separate + blocked:** provider-routing enforcement now exists via the host-side proxy, but no candidate is
+  authorized; corpus remains 0 until all remaining gates clear (§3).
 
 ---
 
 ## 2. PRIMARY-CANDIDATE roster (proposed — NOT authorized)
 
-Two models. Per-request OpenRouter `provider` object is the **intended routing control** (see §3).
+Two models. Per-request OpenRouter `provider` object is now the **implemented routing
+control** via the host-side proxy (see §3).
 
 ### 2.1 GLM 5.2 — `z-ai/glm-5.2`
-- **Recommended provider pin:** `fireworks`.
+- **Provider pin (Walter-approved 15-07-26, live-verified):** `novita`.
 - **Routing policy (per-request `provider` object):**
-  - `only` / `order` = `fireworks` (pin the single endpoint),
+  - `only` / `order` = `novita` (pin the single endpoint),
   - `allow_fallbacks: false` (no silent route swap during a run),
   - `require_parameters: true`,
   - `quantizations: ["fp8"]`.
-- **Research-note reserves (NOT run-time fallbacks):** `novita`, `siliconflow`. These are research reserves
-  only — they must NOT be used as fallbacks during a run (fallbacks are disabled by policy).
+- **⚠ The prior `fireworks` pin was REMOVED (defective):** live OpenRouter shows Fireworks serves
+  `z-ai/glm-5.2` only at `quant=unknown` (no fp8 endpoint), so `fireworks`+`fp8` matched zero endpoints
+  (`404 No endpoints found … quantization: fp8`). Novita serves fp8 (px $0.9786/$3.0756/Mtok, uptime 99.0%) and is live-verified (HTTP 200).
+- **Enforcement path (implemented):** the OpenRouter proxy hard-injects this exact
+  `provider` object on every request; worker-side `provider` overrides are rejected.
+- **Research-note reserves (NOT run-time fallbacks):** `siliconflow`, `baidu`, `streamlake` (other fp8 endpoints).
+  These are research reserves only — they must NOT be used as fallbacks during a run (fallbacks are disabled by policy).
+
 
 ### 2.2 MiMo-V2.5-Pro — `xiaomi/mimo-v2.5-pro`
 - **Recommended provider pin:** `deepinfra`.
 - **Routing policy (per-request `provider` object):** same no-fallback / require-parameters policy
   (`allow_fallbacks: false`, `require_parameters: true`, single-endpoint pin).
 - **Quantization:** **OMITTED pending live verification** (do not assume a quant tier until re-verified live).
+- **Enforcement path (implemented):** the OpenRouter proxy hard-injects this profile's
+  `provider` object on every request; worker-side `provider` overrides are rejected.
 - **Research-note reserve (NOT run-time fallback):** `novita` — research reserve only, not a runtime fallback.
 
-> **Provider-control mechanism (important):** the per-request OpenRouter **provider object** is the intended
-> pinning control. The **account ignore-list is NOT per-key and is NOT the benchmark pinning mechanism** — do
-> not rely on it to pin endpoints for a scored run.
+> **Provider-control mechanism (important):** the per-request OpenRouter
+> **provider object** (hard-injected by the host-side proxy) is the benchmark
+> pinning control. The **account ignore-list is NOT per-key and is NOT the
+> benchmark pinning mechanism** — do not rely on it to pin endpoints for a scored run.
 
 ---
 
 ## 3. Hard prerequisites before ANY scored run
 
-1. **Harness provider-routing capability is UNPROVEN.** The current harness does **not yet prove** it can
-   **send, enforce, and persist** endpoint-level provider routing (the per-request `provider` object above).
-   **No scored run may occur until that capability is implemented and verified.** (Documented as an open gap:
-   OpenRouter's `provider` object is a real API capability + prescribed policy, but harness send/enforce/persist
-   is not a built, verified feature.)
-2. **Live re-verification before spend** of every July-15-2026 snapshot claim (§ snapshot caveat).
-3. **Passability instrument fixed / Opus smoke passing** (§1) — Walter's drawing-board decision.
-4. **Roster confirmation by Walter** — the full/scored run remains FORBIDDEN until explicit confirmation
-   (`BENCHMARK-STATE.md`, `RUNBOOK.md`, `DOCKER-SANDBOX-PROPOSAL.md`, `BENCHMARK-DIRECTIVES.md`).
+1. **Provider-routing enforcement mechanism = CLOSED-BY-PROXY.** The host-side
+   OpenRouter proxy now hard-injects per-request provider policy, clamps
+   `max_tokens`, and persists cumulative spend via checkpoint ledger.
+   This closes the specific "send/enforce/persist provider routing" capability gap.
+2. **Passability gate still BLOCKING:** repaired-instrument Opus-4.8 HIGH
+   recall-OFF Docker smoke must PASS under the hard $12 cumulative ceiling (§1).
+3. **Opus provider-pin gate still BLOCKING:** Walter has not yet supplied an
+   explicit OpenRouter provider pin for Opus; no Opus paid smoke/scored path is
+   authorized until that pin is supplied and live-verified.
+4. **Live re-verification before spend** of July-15-2026 snapshot claims,
+   including GLM/MiMo provider availability + pricing.
+5. **Explicit run authorization by Walter** — full/scored runs remain FORBIDDEN
+   until explicit confirmation (`BENCHMARK-STATE.md`, `RUNBOOK.md`,
+   `DOCKER-SANDBOX-PROPOSAL.md`, `BENCHMARK-DIRECTIVES.md`).
 
 ---
 
@@ -100,6 +133,10 @@ The existing full anti-cheat stack (oracle isolation / Docker sandbox / cheat-ga
 ---
 
 ## 6. Reconciliation flags (surfaced, not decided — R-36)
+
+- **Provider-routing status changed:** the prior "harness provider-routing
+  UNPROVEN" gap is now closed by the host-side proxy enforcement path. This is
+  a mechanism closure only; it does NOT authorize roster runs by itself.
 
 - **GLM 5.2 tension:** GLM 5.2 currently sits on the roster **EXCLUSIONS** list
   (`OPENROUTER-BENCHMARK-ROSTER-RESEARCH-HANDOFF.md §10`: "cheated with recall ON by reading oracle files;

@@ -143,7 +143,8 @@ class DockerCellConfig:
     recall_url: str = "http://host.docker.internal:4550"
     hub_url: str = "http://host.docker.internal:4440"
     recall_mode: str = "test"
-    provider_key_env: str = "OPENROUTER_API_KEY"
+    proxy_base_url: str | None = None
+    proxy_token: str | None = None
     home_dir: str = "/home/worker"
     output_token_max: int | None = None
 
@@ -170,22 +171,19 @@ class DockerCell:
         worktree = Path(self.config.worktree).expanduser().resolve()
         worktree.mkdir(parents=True, exist_ok=True)
 
+        proxy_token = (self.config.proxy_token or "").strip()
+        if not proxy_token:
+            raise ValueError(
+                "proxy token required; direct OpenRouter key forwarding is removed "
+                "(R-13 one path, no fallback)"
+            )
+
+        key_present = True
+        key_len = len(proxy_token)
+
         self._progress(f"PROGRESS docker-network ensure name={self.config.network}")
         ensure_network(self.config.network)
         self._progress(f"PROGRESS docker-network ready name={self.config.network}")
-
-        provider_env_name = self.config.provider_key_env.strip() or "OPENROUTER_API_KEY"
-        provider_value = os.environ.get(provider_env_name, "")
-        if not provider_value and provider_env_name != "OPENROUTER_API_KEY":
-            provider_value = os.environ.get("OPENROUTER_API_KEY", "")
-
-        key_present = bool(provider_value)
-        key_len = len(provider_value)
-        if not key_present:
-            self._progress(
-                "PROGRESS docker-run warn provider_key_missing "
-                f"env={provider_env_name} exported_as=OPENROUTER_API_KEY key_present=false key_len=0"
-            )
 
         uid = _host_uid()
         gid = _host_gid()
@@ -198,7 +196,7 @@ class DockerCell:
             memory_mode=mode,
         )
         run_env = os.environ.copy()
-        run_env["OPENROUTER_API_KEY"] = provider_value
+        run_env["OPENROUTER_API_KEY"] = proxy_token
 
         self._progress(
             "PROGRESS docker-run start "

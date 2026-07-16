@@ -21,6 +21,8 @@ from wevibe_bench.adapters.docker_worker import (
 
 
 HANG_TIMEOUT_S = 60
+SMOKE_PROXY_BASE_URL = "http://host.docker.internal:8789/api/v1"
+SMOKE_PROXY_TOKEN = "smoke-token"
 
 
 class SmokeFailure(RuntimeError):
@@ -165,6 +167,8 @@ def main() -> int:
                 worktree=worktree,
                 memory_mode="off",
                 container_name=container_name,
+                proxy_base_url=SMOKE_PROXY_BASE_URL,
+                proxy_token=SMOKE_PROXY_TOKEN,
             )
         )
 

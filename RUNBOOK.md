@@ -115,6 +115,105 @@ host-side by a dummy oracle (NO paid model, NO live corpus).
 - Cell teardown is deterministic: `docker rm -f` at cell end.
 - OFF/ON recall reaches the host clone at `host.docker.internal:4550`; NO host keys/corpus enter the container.
 
+## OpenRouter proxy (the ONE paid transport path)
+
+This proxy is the only paid-transport path for benchmark cells.
+
+- Host-side proxy process (`scripts/run_openrouter_proxy.py`) sources the REAL
+  OpenRouter upstream key at launch from OpenCode auth (`~/.local/share/opencode/auth.json`).
+  Use `--auth-path` only to override location in tests; there is no env-var path and no fallback.
+- Docker workers receive only an ephemeral per-run bearer token + proxy base URL.
+- The proxy hard-injects provider routing policy and hard-clamps output-token ceilings.
+- R-13 one path: direct provider-key forwarding/fallback is removed.
+- R-37 observability: run with a dedicated timestamped logfile under
+  `runs/openrouter-proxy/`.
+
+### Start the proxy (host shell only)
+
+```bash
+uv run python scripts/run_openrouter_proxy.py \
+  --run-id <id> \
+  --model openrouter/<vendor>/<model> \
+  --profile <glm|mimo|opus> \
+  --cap-usd 12 \
+  --target-usd <lower operational target> \
+  --port 8789 \
+  --checkpoint runs/openrouter-proxy/<run>-budget.json \
+  --log runs/openrouter-proxy/<iso>.log \
+  --max-output-tokens 8192 \
+  --token-file runs/openrouter-proxy/<run>.token
+```
+
+To authorize a blocked profile with live pricing at launch, add:
+`--authorize --pricing-input <USD/Mtok> --pricing-output <USD/Mtok> [--pricing-cache-read <USD/Mtok>] [--pricing-cache-write <USD/Mtok>]`.
+Pricing values must be live-verified from OpenRouter immediately before each authorized run; pricing snapshots are never baked into code.
+
+The proxy prints `http://host.docker.internal:8789/api/v1` on startup and writes
+an ephemeral run token to `--token-file` (0600 permissions).
+
+### Wire the worker (the worker never gets the real key)
+
+```bash
+scripts/run_backgammon.py \
+  --proxy-base-url http://host.docker.internal:8789/api/v1 \
+  --proxy-token-file runs/openrouter-proxy/<run>.token \
+  ...
+```
+
+`run_backgammon.py` reads the token file and threads only that token into Docker
+as `OPENROUTER_API_KEY`. The real OpenRouter key never enters the worker.
+
+### Policy + budget invariants enforced by proxy
+
+- Exact per-profile `provider` object is hard-injected on every request:
+  - pinned `order`/`only` (SoT = `DEFAULT_PROFILES` in `wevibe_bench/adapters/openrouter_proxy.py`:
+    GLM `z-ai/glm-5.2`→`novita`, MiMo `xiaomi/mimo-v2.5-pro`→`deepinfra`, Opus `anthropic/claude-opus-4.8`→`anthropic`),
+  - `allow_fallbacks: false`,
+  - `require_parameters: true`,
+  - `quantizations` only when configured (GLM `["fp8"]`; MiMo/Opus omit — no fp8-tagged endpoint).
+  - All three pins live-verified 15-07-26 (HTTP 200 via Novita/DeepInfra/Anthropic) — see `docs/BENCHMARK-ROSTER.md`.
+- Client-supplied `provider` is rejected.
+- Request model must match the selected profile model.
+- `max_tokens` is hard-clamped to `--max-output-tokens`.
+- Hard paid ceiling is absolute: `hard_cap = min(--cap-usd, 12.0)`.
+- `--target-usd` is an optional lower operational target (not the hard ceiling).
+- Before dispatch, proxy reserves a conservative worst-case USD bound.
+- If projected cumulative spend would exceed hard cap, request is refused
+  before dispatch.
+- On uncertainty (missing/invalid `usage.cost`, upstream error, stream failure),
+  reservation is retained as committed-unproven (never released).
+- Budget checkpoint persists atomically and is policy-bound to
+  `(run-id, model, profile, hard_cap)`; resume under mismatched policy is
+  refused.
+- `--reject-on-equality` is optional stricter mode (default allows projected
+  equality and refuses only projected greater-than cap).
+
+### Checkpoint / restart
+
+Restarting the proxy cannot reset spend. If the same run binding is reused, the
+ledger resumes from checkpoint. Any run-id/model/profile/cap mismatch is refused
+at startup.
+
+### Verification (zero-cost)
+
+Zero-cost verification procedure (fake upstream; no paid OpenRouter call):
+
+```bash
+python -m pytest \
+  tests/test_openrouter_proxy.py \
+  tests/test_openrouter_proxy_server.py \
+  tests/test_openrouter_proxy_docker_e2e.py -q
+```
+
+These suites are the policy/budget/routing/streaming/logging proof surface for
+the proxy path.
+
+### 1.18.1 residual
+
+Base-URL override wiring is proven on OpenCode 1.17.20 and structurally certain
+for the worker's 1.18.1 configuration path. One remaining live-request
+byte-verification is intentionally deferred because it cannot be done zero-cost.
+
 ### Later (paid) smoke — DO NOT RUN in setup; Walter-gated
 After a clean wipe (`make redeploy` from `wevibe-meta` + clear `/tmp` bench keystores): start `:4550`, run ONE
 GLM-5.2 OFF cell in Docker, let the host oracle score it, extract one memory, verify accepted storage + retrieval
@@ -126,8 +225,11 @@ cumulative paid ceiling of $12. The prior Opus-4.8 HIGH passability smoke alread
 now-repaired gates (`15-07-26-1019-opus48-high-passability-smoke.md`), so the repaired instrument awaits a fresh
 clean PASS before any scored roster/candidate work.
 
-**Provider-pinning/roster is separate and still blocked:** provider-routing capability in the harness remains
-UNPROVEN; no candidate is authorized until that separate prerequisite is implemented and verified.
+**Provider-pinning/roster is separate and still blocked:** provider-routing enforcement now exists via the host-side
+proxy, and all three pins are live-verified transport+eligibility GREEN (Novita/DeepInfra/Anthropic, 15-07-26). Real-transport
+passability is PROVEN at both the direct-HTTP and Docker worker→host-proxy layers. Candidate/scored authorization
+nonetheless remains blocked pending the repaired-instrument Opus passability smoke (the prior HIGH smoke FAILED the oracle)
+and Walter's explicit run authorization. (Live GLM/MiMo/Opus PRICING and the Opus provider pin `anthropic` are now supplied/verified.)
 
 **This is the paid validation smoke; requires Walter roster confirmation; NOT part of build/verify.**
 
