@@ -166,6 +166,9 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
             return "provisioned"
 
     class FakeHubClient:
+        def __init__(self) -> None:
+            self._contributor_member_orgs_checks = 0
+
         def enable_recall(self, identity: Identity, org_id: str, member_pubkey: str, free: bool = True) -> Any:
             calls.append("enable_recall")
             assert identity is leader
@@ -175,8 +178,14 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
             return {"status": "ok"}
 
         def member_orgs(self, identity: Identity) -> Any:
-            calls.append("poll_membership")
+            if identity is leader:
+                return []
             assert identity is contributor
+            self._contributor_member_orgs_checks += 1
+            # run_m1 checks membership before invite/add-member, then checks again while polling.
+            if self._contributor_member_orgs_checks == 1:
+                return []
+            calls.append("poll_membership")
             return [{"org_id": "org-123"}]
 
     class FakeMcpRest:
@@ -296,6 +305,138 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
     assert isinstance(add_member_env, dict)
     assert add_member_env["WEVIBE_IDENTITY_SEED_HEX"] == leader.seed_hex
     assert add_member_env["WEVIBE_CHAIN_RPC"] == "http://localhost:26657"
+
+
+def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
+    logger, _ = _capture_logger("test.lifecycle.orchestrator.m1.reuse")
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+        session_token_path="~/test-session-token",
+        leader_signer_dir="/opt/leader-signer",
+    )
+    leader = Identity.from_hex("11" * 32)
+    contributor = Identity.from_hex("22" * 32)
+
+    calls: list[str] = []
+    signer_calls: list[dict[str, Any]] = []
+
+    class FakeAdminCli:
+        def __init__(self, env: dict[str, str]) -> None:
+            self._env = env
+
+        def invite(
+            self,
+            org_id: str,
+            invitee_pubkey: str,
+            invitee_x25519: str,
+            invitee_pre_pubkey: str,
+            can_contribute: bool = True,
+            can_moderate: bool = False,
+        ) -> str:
+            raise AssertionError("invite should be skipped when contributor is already a member")
+
+        def provision_recall(self, org_id: str) -> str:
+            calls.append("provision_recall")
+            assert org_id == "org-123"
+            return "provisioned"
+
+    class FakeHubClient:
+        def __init__(self) -> None:
+            self._contributor_member_orgs_checks = 0
+
+        def enable_recall(self, identity: Identity, org_id: str, member_pubkey: str, free: bool = True) -> Any:
+            calls.append("enable_recall")
+            assert identity is leader
+            assert org_id == "org-123"
+            assert member_pubkey == "ed-contrib"
+            assert free is True
+            return {"status": "ok"}
+
+        def member_orgs(self, identity: Identity) -> Any:
+            if identity is leader:
+                return []
+            assert identity is contributor
+            self._contributor_member_orgs_checks += 1
+            # run_m1 checks membership before invite/add-member, then checks again while polling.
+            if self._contributor_member_orgs_checks == 1:
+                return [{"org_id": "org-123"}]
+            calls.append("poll_membership")
+            return [{"org_id": "org-123"}]
+
+    class FakeMcpRest:
+        def identity_pubkeys(self) -> dict[str, str]:
+            calls.append("contributor_pubkeys")
+            return {"ed25519": "ed-contrib", "x25519": "x-contrib", "pre_pubkey": "pre-contrib"}
+
+    class FakeProcman:
+        pass
+
+    def run_cmd(*args, **kwargs):
+        cmd = args[0]
+        signer_calls.append(
+            {
+                "cmd": cmd,
+                "cwd": kwargs.get("cwd"),
+                "env": kwargs.get("env"),
+            }
+        )
+        if "register-org" in cmd:
+            return subprocess.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='register-org done\n{"org_id":"org-123","tx_hash":"tx-1","leader_wallet":"wallet-1","hub_serving_key":"hub-key"}\n',
+                stderr="",
+            )
+        if "add-member" in cmd:
+            raise AssertionError("add-member should be skipped when contributor is already a member")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    orchestrator = LifecycleOrchestrator(
+        cfg=cfg,
+        wevibe_root="/workspace",
+        leader=leader,
+        contributor=contributor,
+        leader_keystore="/tmp/leader.ks",
+        contributor_keystore="/tmp/contrib.ks",
+        leader_wallet="wallet-1",
+        logger=logger,
+        procman=FakeProcman(),
+        admin_cli_factory=lambda env: FakeAdminCli(env),
+        hub_client=FakeHubClient(),
+        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        sleep_fn=lambda _seconds: None,
+        run_cmd=run_cmd,
+    )
+
+    result = orchestrator.run_m1()
+
+    assert result["org_id"] == "org-123"
+    assert [step["step"] for step in result["steps"]] == [
+        "create_org",
+        "contributor_pubkeys",
+        "enable_recall",
+        "provision_recall",
+        "poll_membership",
+    ]
+    assert calls == [
+        "contributor_pubkeys",
+        "enable_recall",
+        "provision_recall",
+        "poll_membership",
+    ]
+
+    assert len(signer_calls) == 1
+    assert signer_calls[0]["cmd"] == [
+        "node",
+        "/opt/leader-signer/dist/cli.js",
+        "register-org",
+        "--org-name",
+        "wevibe-bench-lifecycle",
+        "--domain",
+        "bench.wevibe.local",
+    ]
+    assert all("add-member" not in call["cmd"] for call in signer_calls)
 
 
 def test_m2_proof_produce_memory_uses_direct_memory_without_extract() -> None:

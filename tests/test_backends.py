@@ -101,7 +101,9 @@ def test_wevibe_backend_parses_200_response_verifies_yes_and_sends_expected_wire
     assert sent_body["session_id"] == "session-xyz"
     assert sent_body["relevance_floor"] == cfg.relevance_floor()
     assert sent_body["surface_budget"] == cfg.surface_budget
-    assert sent_body["limit"] == cfg.surface_budget
+    # Recall fetches a wide candidate set (limit) and surfaces only the top surface_budget; the two are intentionally distinct.
+    assert sent_body["limit"] == cfg.deterministic_recall_limit
+    assert sent_body["limit"] != sent_body["surface_budget"]
     assert sent_body["errorStrings"] == ["ERR_PARSE"]
     assert sent_body["projectName"] == "bench-project"
     assert "prompt_digest" not in sent_body
