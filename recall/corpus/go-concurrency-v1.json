@@ -1,0 +1,163 @@
+{
+  "topic": "go-concurrency",
+  "description": "Reproducible in-domain corpus of non-obvious Go concurrency lessons (goroutines, channels, context, sync). Each entry is a distinct pitfall paired with its fix, written as a concise engineering note. Serves as the fixed 12-memory fixture for recall-readiness benchmarking.",
+  "memories": [
+    {
+      "id": "gc_goroutine_leak_unbuffered_send",
+      "text": "Goroutine leak from an unbuffered channel send after the receiver is gone: if a worker goroutine does `ch <- result` on an unbuffered channel but the receiver has already returned (e.g. the caller timed out), the sender blocks forever and the goroutine is never collected. The fix is to make the send non-blocking with a select on ctx.Done(): `select { case ch <- result: case <-ctx.Done(): return }`, or give the channel a buffer of 1 so the final send never blocks even when nobody reads it.",
+      "keywords": [
+        "goroutine",
+        "leak",
+        "channel",
+        "unbuffered",
+        "context",
+        "select",
+        "blocking"
+      ],
+      "stack_hint": "go,concurrency,goroutines,channels"
+    },
+    {
+      "id": "gc_loop_var_capture",
+      "text": "Loop-variable capture in goroutines before Go 1.22: launching `go func(){ use(i) }()` inside a `for i := range xs` loop makes every goroutine observe the SAME `i` (usually the last value) because the loop variable was shared across iterations. The fix pre-1.22 is to shadow it per iteration with `i := i` at the top of the loop body, or pass it as an argument `go func(i int){...}(i)`. Go 1.22 changed loop semantics so each iteration gets a fresh variable, but code must not rely on that when it may build under an older toolchain.",
+      "keywords": [
+        "goroutine",
+        "loop",
+        "variable",
+        "capture",
+        "closure",
+        "range"
+      ],
+      "stack_hint": "go,concurrency,goroutines"
+    },
+    {
+      "id": "gc_context_defer_cancel",
+      "text": "Always `defer cancel()` even on the success path when you create a context with context.WithCancel/WithTimeout/WithDeadline. The cancel func releases the context's internal timer goroutine and child tracking; forgetting to call it on the happy path leaks that goroutine and the timer until the parent is cancelled. `go vet` (lostcancel) flags a cancel func that is not used on all paths. Pattern: `ctx, cancel := context.WithTimeout(parent, d); defer cancel()`.",
+      "keywords": [
+        "context",
+        "cancel",
+        "defer",
+        "timeout",
+        "leak",
+        "goroutine"
+      ],
+      "stack_hint": "go,concurrency,context"
+    },
+    {
+      "id": "gc_select_default_busyloop",
+      "text": "A `select` with a `default` clause inside a `for` loop turns into a CPU-burning busy-loop: the default is taken immediately every iteration when no channel is ready, spinning at 100% on one core. Use `default` only for a genuine one-shot non-blocking probe. For a polling loop, drop the default and let the select block on the channels, or add a `<-time.After(interval)` / ticker case so the loop sleeps between checks.",
+      "keywords": [
+        "select",
+        "default",
+        "busyloop",
+        "cpu",
+        "channel",
+        "polling"
+      ],
+      "stack_hint": "go,concurrency,channels"
+    },
+    {
+      "id": "gc_channel_close_ownership",
+      "text": "Only the sender closes a channel, and only once. Closing from the receiver side, or closing twice, panics with 'close of closed channel', and sending on a closed channel panics too. Establish single-owner semantics: the goroutine that owns the send side closes the channel when it is done producing, and never a downstream consumer. When multiple producers share a channel, guard the close with sync.Once or coordinate shutdown through a separate `done` channel instead of closing the data channel.",
+      "keywords": [
+        "channel",
+        "close",
+        "panic",
+        "sender",
+        "ownership",
+        "once"
+      ],
+      "stack_hint": "go,concurrency,channels"
+    },
+    {
+      "id": "gc_waitgroup_add_before_goroutine",
+      "text": "sync.WaitGroup.Add must be called BEFORE the goroutine is launched, not inside it. If you do `go func(){ wg.Add(1); ...; wg.Done() }()`, Wait can observe a counter of zero and return before the goroutines have even registered, so you miss work. Correct pattern: `wg.Add(1); go func(){ defer wg.Done(); ... }()` in the launching goroutine, so the counter is incremented synchronously before Wait can run.",
+      "keywords": [
+        "waitgroup",
+        "add",
+        "goroutine",
+        "race",
+        "wait",
+        "sync"
+      ],
+      "stack_hint": "go,concurrency,sync"
+    },
+    {
+      "id": "gc_concurrent_map_race",
+      "text": "Concurrent access to a plain built-in map from multiple goroutines is a data race and Go's runtime will hard-crash with 'fatal error: concurrent map writes' (not a recoverable panic). Protect the map with a sync.RWMutex (RLock for reads, Lock for writes), or switch to sync.Map when the access pattern is write-once/read-many or disjoint keys. Run tests with `-race` to catch these before they crash production.",
+      "keywords": [
+        "map",
+        "race",
+        "concurrent",
+        "mutex",
+        "rwmutex",
+        "syncmap"
+      ],
+      "stack_hint": "go,concurrency,sync"
+    },
+    {
+      "id": "gc_time_after_timer_leak",
+      "text": "`time.After` inside a hot `select` loop leaks a timer on every iteration: each call allocates a new Timer that is not garbage-collected until it fires (up to the full duration), so a tight loop accumulates thousands of live timers. For a repeating timeout, create one `time.NewTimer` and `Reset` it each pass, or use `time.NewTicker` and `defer ticker.Stop()`. Reserve `time.After` for a single one-shot deadline outside a loop.",
+      "keywords": [
+        "timer",
+        "timeafter",
+        "leak",
+        "select",
+        "ticker",
+        "reset"
+      ],
+      "stack_hint": "go,concurrency,channels"
+    },
+    {
+      "id": "gc_mutex_copy_by_value",
+      "text": "Copying a sync.Mutex (or a struct that embeds one) by value silently breaks mutual exclusion: the copy has its own independent lock state, so two goroutines can each 'hold' their own copy and enter the critical section together. This happens easily when a method has a value receiver on a struct containing a Mutex, or when such a struct is passed/returned by value. Always use pointer receivers and pass structs-with-locks by pointer. `go vet` copylocks detects it.",
+      "keywords": [
+        "mutex",
+        "copy",
+        "value",
+        "pointer",
+        "receiver",
+        "govet"
+      ],
+      "stack_hint": "go,concurrency,sync"
+    },
+    {
+      "id": "gc_errgroup_bounded",
+      "text": "Use golang.org/x/sync/errgroup to run a set of goroutines, collect the first error, and cancel the siblings: `g, ctx := errgroup.WithContext(parent)` gives a ctx that is cancelled when any g.Go func returns non-nil, and g.Wait() returns that first error after all finish. For bounded concurrency call g.SetLimit(n) so only n run at once instead of spawning one goroutine per work item. Each g.Go closure must respect ctx cancellation so siblings actually stop early.",
+      "keywords": [
+        "errgroup",
+        "context",
+        "goroutine",
+        "concurrency",
+        "setlimit",
+        "cancel"
+      ],
+      "stack_hint": "go,concurrency,errgroup"
+    },
+    {
+      "id": "gc_fanout_worker_pool",
+      "text": "A fan-out worker pool over a jobs channel must close the jobs channel exactly once when all jobs are queued so the `for job := range jobs` in each worker terminates, and use a WaitGroup to know when all workers have drained. Deadlock trap: if workers also send to an unbuffered results channel while the collector hasn't started ranging over it, everything blocks. Start the results collector before feeding jobs, or buffer results, and close(results) only after wg.Wait() completes in a separate goroutine.",
+      "keywords": [
+        "worker",
+        "pool",
+        "fanout",
+        "channel",
+        "waitgroup",
+        "deadlock"
+      ],
+      "stack_hint": "go,concurrency,channels"
+    },
+    {
+      "id": "gc_nil_channel_select_disable",
+      "text": "A receive or send on a nil channel blocks forever, and this is useful on purpose: setting a channel variable to nil inside a `select` disables that case permanently, which is the idiomatic way to stop listening on a channel that has been drained/closed without spinning. After a `v, ok := <-ch; if !ok { ch = nil; continue }`, the closed channel's case stops being selected instead of firing repeatedly with a zero value. Never leave a closed channel active in a select or it busy-fires.",
+      "keywords": [
+        "nil",
+        "channel",
+        "select",
+        "closed",
+        "disable",
+        "block"
+      ],
+      "stack_hint": "go,concurrency,channels"
+    }
+  ]
+}

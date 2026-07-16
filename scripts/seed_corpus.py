@@ -12,6 +12,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
+from wevibe_bench import recall_gold
 from wevibe_bench.benv import load_bench_env
 from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
@@ -819,6 +820,53 @@ def main() -> int:
         return 1
     if not count_match:
         return 1
+
+    gold_path_raw = os.environ.get("WEVIBE_BENCH_GOLD_FILE", "").strip()
+    if gold_path_raw:
+        resolve_run_id = org_id.strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        resolve_out_path = Path(cfg.runs_dir) / f"recall-cid-map-{resolve_run_id}.json"
+        try:
+            resolved_mapping = recall_gold.resolve_from_files(
+                gold_path=gold_path_raw,
+                corpus_path=corpus_path,
+                checkpoint_path=checkpoint_path,
+                run_id=resolve_run_id,
+                out_path=resolve_out_path,
+            )
+        except (recall_gold.GoldError, recall_gold.ResolveError) as exc:
+            logger.exception(
+                (
+                    "op=seed.corpus.resolve status=failed gold_path=%s corpus_path=%s "
+                    "checkpoint_path=%s err=%s"
+                ),
+                gold_path_raw,
+                corpus_path,
+                checkpoint_path,
+                exc,
+            )
+            print(f"[seed] ERROR post-seed slug->CID resolve failed: {exc}")
+            return 1
+
+        required_slugs: set[str] = set()
+        cases_payload = resolved_mapping.get("cases")
+        if isinstance(cases_payload, dict):
+            for case_payload in cases_payload.values():
+                if not isinstance(case_payload, dict):
+                    continue
+                expected_slugs = case_payload.get("expected_slugs")
+                if not isinstance(expected_slugs, list):
+                    continue
+                for slug in expected_slugs:
+                    if isinstance(slug, str) and slug.strip():
+                        required_slugs.add(slug.strip())
+
+        n_required = len(required_slugs)
+        logger.info(
+            "op=seed.corpus.resolve status=ok n_required=%s n_resolved=%s out_path=%s",
+            n_required,
+            n_required,
+            resolve_out_path,
+        )
     return 0
 
 
