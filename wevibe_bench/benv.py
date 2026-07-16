@@ -39,6 +39,9 @@ def load_bench_env(path: str | os.PathLike[str] | None = None) -> Path | None:
     if not env_path.is_file():
         return None
 
+    # Seed workspace-root anchor so bench.env path vars resolve repo-relative without hardcoded absolute paths.
+    os.environ.setdefault("WEVIBE_BENCH_WEVIBE_ROOT", str(_REPO_ROOT.parent))
+
     seen: dict[str, str] = {}
     for raw in env_path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
