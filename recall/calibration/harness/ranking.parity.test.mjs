@@ -86,7 +86,10 @@ function hasKeywordOverlap(queryKeywordWeights, docKeywordWeights) {
  * - projects legacy parity-fixture knobs (gate/denials/newMem) into effective vectors
  *   before feeding tracked inputs.
  */
-function adaptCandidateForTrackedRank(fixtureCase, queryKeywordWeights, candidate) {
+function adaptCandidateForTrackedRank(fixtureCase, query, candidate) {
+  const queryKeywordWeights = Array.isArray(query?.keyword_weights)
+    ? query.keyword_weights
+    : [];
   const docKeywordWeights = toKeywordWeightRows(candidate.keywordWeights);
   let vectorScore = toFiniteNumber(candidate.vectorScore, 0);
   let droppedByLegacyGate = false;
@@ -104,7 +107,24 @@ function adaptCandidateForTrackedRank(fixtureCase, queryKeywordWeights, candidat
     vectorScore = Math.max(0, vectorScore - pendingDenials * 0.05);
   }
 
-  if (fixtureCase?.opts?.newMemBoost === true && vectorScore > 0) {
+  const preFreshnessVector = vectorScore;
+  const preFreshnessScore = scoreCombined(
+    query?.vector,
+    queryKeywordWeights,
+    vecForCosine(preFreshnessVector),
+    docKeywordWeights,
+    { gamma: 0.1, delta: 0.15 },
+  );
+  const floor = toFiniteNumber(fixtureCase?.opts?.floor, 0);
+  let droppedByFloor = false;
+  let projectedFinal = preFreshnessScore?.final ?? null;
+
+  if (floor > 0 && preFreshnessScore !== null && preFreshnessScore.final < floor) {
+    droppedByFloor = true;
+  }
+
+  let vectorForRank = preFreshnessVector;
+  if (!droppedByFloor && fixtureCase?.opts?.newMemBoost === true && vectorForRank > 0) {
     const grace = toFiniteNumber(fixtureCase?.opts?.grace, 20);
     const boostWindow = toFiniteNumber(fixtureCase?.opts?.boostWindow, 30);
     const newMemMult = toFiniteNumber(fixtureCase?.opts?.newMemMult, 0.5);
@@ -115,14 +135,20 @@ function adaptCandidateForTrackedRank(fixtureCase, queryKeywordWeights, candidat
       ? Math.max(0, 1 - age / window)
       : 0;
 
-    vectorScore = vectorScore * (1 + newMemMult * fraction);
+    const freshnessMultiplier = 1 + newMemMult * fraction;
+    vectorForRank = vectorForRank * freshnessMultiplier;
+    if (projectedFinal !== null) {
+      projectedFinal = projectedFinal * freshnessMultiplier;
+    }
   }
 
   return {
     droppedByLegacyGate,
+    droppedByFloor,
+    projectedFinal,
     memory: {
       slug: String(candidate?.id ?? '').trim(),
-      doc_vector: vecForCosine(vectorScore),
+      doc_vector: vecForCosine(vectorForRank),
       keyword_weights: docKeywordWeights,
     },
   };
@@ -141,8 +167,8 @@ const fixtureRaw = fs.readFileSync(FIXTURE_PATH, 'utf8');
 const parity = JSON.parse(fixtureRaw);
 const fixtureCases = Array.isArray(parity?.cases) ? parity.cases : [];
 
-if (fixtureCases.length !== 9) {
-  throw new Error(`[parity] expected 9 fixture cases, got ${fixtureCases.length}`);
+if (fixtureCases.length !== 10) {
+  throw new Error(`[parity] expected 10 fixture cases, got ${fixtureCases.length}`);
 }
 
 for (const fixtureCase of fixtureCases) {
@@ -152,18 +178,30 @@ for (const fixtureCase of fixtureCases) {
       vector: [1, 0],
       keyword_weights: queryKeywordWeights,
     };
+    const floorEnabled = toFiniteNumber(fixtureCase?.opts?.floor, 0) > 0;
 
     const memories = [];
     const memoryBySlug = new Map();
+    const projectedFinalBySlug = new Map();
     let legacyGateDrops = 0;
+    let floorDrops = 0;
+    const totalCandidates = Array.isArray(fixtureCase?.candidates)
+      ? fixtureCase.candidates.length
+      : 0;
 
     for (const candidate of fixtureCase.candidates ?? []) {
-      const adapted = adaptCandidateForTrackedRank(fixtureCase, queryKeywordWeights, candidate);
-      memories.push(adapted.memory);
-      memoryBySlug.set(adapted.memory.slug, adapted.memory);
+      const adapted = adaptCandidateForTrackedRank(fixtureCase, query, candidate);
       if (adapted.droppedByLegacyGate) {
         legacyGateDrops += 1;
       }
+      if (adapted.droppedByFloor) {
+        floorDrops += 1;
+        continue;
+      }
+
+      memories.push(adapted.memory);
+      memoryBySlug.set(adapted.memory.slug, adapted.memory);
+      projectedFinalBySlug.set(adapted.memory.slug, adapted.projectedFinal);
     }
 
     const ranked = rankCase(query, memories, {
@@ -171,19 +209,29 @@ for (const fixtureCase of fixtureCases) {
       delta: 0.15,
     });
 
-    const actualOrder = ranked.preFloor.map((row) => row.slug);
+    const actualOrder = floorEnabled
+      ? ranked.ranked.map((row) => row.slug)
+      : ranked.preFloor.map((row) => row.slug);
     assert.deepEqual(
       actualOrder,
       fixtureCase.expected.order,
       `[parity] ${fixtureCase.name}: order mismatch`,
     );
 
-    const actualDropCount = {
-      gate: legacyGateDrops,
-      vector: Math.max(0, ranked.dropCount.vector - legacyGateDrops),
-      kept: ranked.preFloor.length,
-      total: memories.length,
-    };
+    const actualDropCount = floorEnabled
+      ? {
+        gate: legacyGateDrops,
+        vector: Math.max(0, ranked.dropCount.vector - legacyGateDrops),
+        floor: floorDrops,
+        kept: ranked.ranked.length,
+        total: totalCandidates,
+      }
+      : {
+        gate: legacyGateDrops,
+        vector: Math.max(0, ranked.dropCount.vector - legacyGateDrops),
+        kept: ranked.preFloor.length,
+        total: memories.length,
+      };
 
     assert.deepEqual(
       actualDropCount,
@@ -191,7 +239,8 @@ for (const fixtureCase of fixtureCases) {
       `[parity] ${fixtureCase.name}: dropCount mismatch`,
     );
 
-    for (const row of ranked.preFloor) {
+    const rowsForFinalAssertions = floorEnabled ? ranked.ranked : ranked.preFloor;
+    for (const row of rowsForFinalAssertions) {
       const expectedFinal = fixtureCase.expected.finals[row.slug];
       assert.notEqual(
         expectedFinal,
@@ -199,11 +248,25 @@ for (const fixtureCase of fixtureCases) {
         `[parity] ${fixtureCase.name}: expected final missing for ${row.slug}`,
       );
 
-      assertAlmostEqual(
-        row.final,
-        expectedFinal,
-        `[parity] ${fixtureCase.name}: final mismatch for ${row.slug}`,
-      );
+      if (floorEnabled) {
+        const projectedFinal = projectedFinalBySlug.get(row.slug);
+        assert.notEqual(
+          projectedFinal,
+          undefined,
+          `[parity] ${fixtureCase.name}: projected final missing for ${row.slug}`,
+        );
+        assertAlmostEqual(
+          projectedFinal,
+          expectedFinal,
+          `[parity] ${fixtureCase.name}: final mismatch for ${row.slug}`,
+        );
+      } else {
+        assertAlmostEqual(
+          row.final,
+          expectedFinal,
+          `[parity] ${fixtureCase.name}: final mismatch for ${row.slug}`,
+        );
+      }
 
       const adaptedMemory = memoryBySlug.get(row.slug);
       const rescored = scoreCombined(
@@ -227,10 +290,12 @@ for (const fixtureCase of fixtureCases) {
       );
     }
 
-    assert.deepEqual(
-      ranked.ranked.map((row) => row.slug),
-      actualOrder,
-      `[parity] ${fixtureCase.name}: ranked and preFloor diverged with floor omitted`,
-    );
+    if (!floorEnabled) {
+      assert.deepEqual(
+        ranked.ranked.map((row) => row.slug),
+        actualOrder,
+        `[parity] ${fixtureCase.name}: ranked and preFloor diverged with floor omitted`,
+      );
+    }
   });
 }
