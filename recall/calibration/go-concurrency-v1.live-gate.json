@@ -1,0 +1,70 @@
+{
+  "schema": "rb1a-live-gate/v1",
+  "version": "1.0.0",
+  "fixture_version": "go-concurrency-v1",
+  "provisional_floor": 0.75,
+  "generated_at": "2026-07-16T14:20:19.471Z",
+  "pipeline_fingerprint": {
+    "embedding_model": "nomic-embed-text:v1.5",
+    "embedding_dim": 768,
+    "card_pipeline": "production buildRetrievalCard/buildPromptDigest (real nomic-768, asymmetric role prefixes)",
+    "transport": "real recall transport, local mcp, test mode",
+    "org": "wevibe-org-0"
+  },
+  "denominators": {
+    "positive": 16,
+    "expected_empty": 7,
+    "total": 23
+  },
+  "sim_positive_binary_recall5": 14,
+  "live_positive_binary_recall5": 16,
+  "live_expected_empty_correct": 0,
+  "gates": {
+    "positive_within_one_of_sim": {
+      "rule": "|live - sim| <= 1 (admissible 13..15)",
+      "observed": 16,
+      "pass": false
+    },
+    "expected_empty_strict": {
+      "rule": "all 7 expected-empty return zero",
+      "observed_correct": 0,
+      "pass": false
+    }
+  },
+  "pass": false,
+  "production_floor": {
+    "value": 0.55,
+    "changed": false,
+    "reason": "live agreement failed; no production calibration applied"
+  },
+  "root_cause_class": "score_scale_mismatch",
+  "scale_mismatch_summary": "The live floor gate runs on a score scale that includes a new-memory freshness multiplier (about 1.5x for freshly seeded age-0 memories), while the simulator ground truth does not model that factor, so a provisional floor calibrated on the sim scale does not transfer to the live scale; positives matched, ruling out embedding/model/prefix drift and CID/seed mapping.",
+  "per_category": {
+    "cross_stack_negative": {
+      "partition": "expected_empty",
+      "cases": 5,
+      "expected_empty_correct": 0
+    },
+    "near_tie": {
+      "partition": "positive",
+      "cases": 2,
+      "positive_binary_recall5_hits": 2
+    },
+    "no_match": {
+      "partition": "expected_empty",
+      "cases": 2,
+      "expected_empty_correct": 0
+    },
+    "single_hit": {
+      "partition": "positive",
+      "cases": 12,
+      "positive_binary_recall5_hits": 12
+    },
+    "thin_prompt": {
+      "partition": "positive",
+      "cases": 2,
+      "positive_binary_recall5_hits": 2
+    }
+  },
+  "disclaimer": "Offline 23-case results are directional small-sample evidence, not a production population statistic. 0.75 is provisional. Live agreement FAILED. No production calibration is claimed; production relevance floor remains 0.55 pending canon scale reconciliation and a passing rerun."
+}
