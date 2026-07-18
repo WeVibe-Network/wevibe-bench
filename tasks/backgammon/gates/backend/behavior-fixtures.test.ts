@@ -9,7 +9,11 @@ import {
   shouldAiAccept as shouldAiAcceptInvalid,
   winProbability as winProbabilityInvalid,
 } from "../fixtures/ai-invalid-const.ts";
-import { withinParityBand } from "../lib/acceptance.ts";
+import {
+  expectedOfferAction,
+  isNonDecreasing,
+  withinParityBand,
+} from "../lib/acceptance.ts";
 
 function emptyPoints(): number[] {
   return new Array(26).fill(0);
@@ -71,20 +75,31 @@ describe("G12 behavior fixtures", () => {
     expect(withinParityBand(winProbabilityValid(nearEven, "black"))).toBe(true);
     expect(winProbabilityValid(farBehind, "black")).toBeLessThan(0.24);
     expect(winProbabilityValid(farAhead, "black")).toBeGreaterThan(0.9);
+    expect(
+      isNonDecreasing(
+        [farBehind, nearEven, window, farAhead].map((b) =>
+          winProbabilityValid(b, "black"),
+        ),
+      ),
+    ).toBe(true);
 
     expect(shouldAiAcceptValid(nearEven, "black", "hard").action).toBe("double");
     expect(shouldAiAcceptValid(farBehind, "black", "hard").action).toBe(
       "no-double",
     );
 
+    // Formula-agnostic: the valid fixture's OFFER on the ambiguous window board must be
+    // consistent with ITS OWN win-probability estimate under the published REQ-CUBE-AI policy.
+    const validWindowWp = winProbabilityValid(window, "black");
+
     expect(
       shouldAiDoubleValid(window, "black", { value: 1, owner: null }, "hard")
         .action,
-    ).toBe("double");
+    ).toBe(expectedOfferAction(validWindowWp, "hard", true));
     expect(
       shouldAiDoubleValid(window, "black", { value: 1, owner: null }, "easy")
         .action,
-    ).toBe("no-double");
+    ).toBe(expectedOfferAction(validWindowWp, "easy", true));
   });
 
   it("rejects invalid constant win-probability behavior", () => {

@@ -10,7 +10,13 @@ import {
   emptyPoints,
   makeState,
 } from "../lib/harness.ts";
-import { withinParityBand } from "../lib/acceptance.ts";
+import {
+  DOUBLE_WINDOW,
+  TAKE_POINT,
+  expectedOfferAction,
+  isNonDecreasing,
+  withinParityBand,
+} from "../lib/acceptance.ts";
 
 const { game, ai } = await loadEngine();
 
@@ -19,18 +25,6 @@ const bd = (
   bar = { white: 0, black: 0 },
   off = { white: 0, black: 0 },
 ) => ({ points: pts, bar, off });
-
-const TAKE_POINT = {
-  easy: 0.32,
-  medium: 0.27,
-  hard: 0.24,
-} as const;
-
-const DOUBLE_WINDOW = {
-  mediumLower: 0.72,
-  hardLower: 0.68,
-  upper: 0.9,
-} as const;
 
 const refWp = (myPip: number, oppPip: number): number => {
   if (myPip === 0 && oppPip === 0) return 0.5;
@@ -210,21 +204,22 @@ describe("[G12] REQ-CUBE-AI — cube AI accept/decline and offer window threshol
 
     const windowMyPip = game.pipCount(windowBoard, "black");
     const windowOppPip = game.pipCount(windowBoard, "white");
-    const windowWp = refWp(windowMyPip, windowOppPip);
-
     expect({ windowMyPip, windowOppPip }).toEqual({ windowMyPip: 30, windowOppPip: 61 });
-    expect(windowWp).toBeGreaterThanOrEqual(DOUBLE_WINDOW.hardLower);
-    expect(windowWp).toBeGreaterThanOrEqual(DOUBLE_WINDOW.mediumLower);
-    expect(windowWp).toBeLessThanOrEqual(DOUBLE_WINDOW.upper);
 
+    // REQ-WINPROB is formula-agnostic: on a board near the 0.90 "too good" ceiling, one
+    // conforming monotonic model may rate this position INSIDE the offer window (=> double)
+    // while a steeper conforming model rates it > 0.90 (=> hold, too good). The contract does
+    // NOT fix a single decision here. So grade the candidate's OFFER for internal consistency
+    // with its OWN win-probability estimate under the published REQ-CUBE-AI policy, rather than
+    // forcing the reference formula's decision on this ambiguous board.
+    const windowWpCand = ai.winProbability(windowBoard, "black");
     expect(
-      ai.shouldAiDouble(windowBoard, "black", { value: 1, owner: null }, "easy")
-        .action,
-    ).toBe("no-double");
+      ai.shouldAiDouble(windowBoard, "black", { value: 1, owner: null }, "hard").action,
+    ).toBe(expectedOfferAction(windowWpCand, "hard", true));
+    // easy never offers a double, regardless of win probability
     expect(
-      ai.shouldAiDouble(windowBoard, "black", { value: 1, owner: null }, "hard")
-        .action,
-    ).toBe("double");
+      ai.shouldAiDouble(windowBoard, "black", { value: 1, owner: null }, "easy").action,
+    ).toBe(expectedOfferAction(windowWpCand, "easy", true));
 
     const tooGoodPoints = emptyPoints();
     tooGoodPoints[24] = -1; // black pip 1
@@ -241,5 +236,28 @@ describe("[G12] REQ-CUBE-AI — cube AI accept/decline and offer window threshol
       ai.shouldAiDouble(tooGoodBoard, "black", { value: 1, owner: null }, "hard")
         .action,
     ).toBe("no-double");
+  });
+
+  it("[G12] REQ-WINPROB — winProbability is monotonically non-decreasing in the player's pip lead", () => {
+    const fbPoints = emptyPoints();
+    fbPoints[2] = 1;
+    const farBehind = bd(fbPoints, { white: 0, black: 14 }); // black 350 vs white 2 (lead -348)
+    const nePoints = emptyPoints();
+    nePoints[6] = 5;
+    nePoints[19] = -5;
+    const nearEven = bd(nePoints); // 30 vs 30 (lead 0)
+    const winPoints = emptyPoints();
+    winPoints[19] = -5;
+    winPoints[6] = 10;
+    winPoints[1] = 1;
+    const windowB = bd(winPoints); // black 30 vs white 61 (lead +31)
+    const faPoints = emptyPoints();
+    faPoints[24] = -1;
+    const farAhead = bd(faPoints, { white: 14, black: 0 }); // black 1 vs white 350 (lead +349)
+    // ordered by INCREASING black pip lead
+    const wps = [farBehind, nearEven, windowB, farAhead].map((b) =>
+      ai.winProbability(b, "black"),
+    );
+    expect(isNonDecreasing(wps)).toBe(true);
   });
 });
