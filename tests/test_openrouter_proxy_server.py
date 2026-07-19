@@ -346,8 +346,9 @@ def _open_stream_request(
     body: dict[str, Any],
     *,
     token: str,
+    timeout_s: float = 5.0,
 ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
-    conn = http.client.HTTPConnection(running.host, running.port, timeout=5)
+    conn = http.client.HTTPConnection(running.host, running.port, timeout=float(timeout_s))
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
@@ -423,6 +424,63 @@ def _stream_lines_with_usage(cost: float) -> list[bytes]:
     ]
 
 
+def _tool_call_stream_lines(
+    *,
+    cost: float,
+    tool_call_id: str | None,
+    include_done: bool,
+) -> list[bytes]:
+    first = {
+        "id": "chatcmpl-tool-fake",
+        "object": "chat.completion.chunk",
+        "model": "z-ai/glm-5.2",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.text",
+                            "format": "anthropic-claude-v1",
+                            "index": 0,
+                            "signature": "c2lnbmF0dXJlLWxvb2tpbmctdGVzdA==",
+                            "text": "reasoning text",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    final = {
+        "id": "chatcmpl-tool-fake",
+        "object": "chat.completion.chunk",
+        "model": "z-ai/glm-5.2",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {
+            "completion_tokens": 5,
+            "completion_tokens_details": {"reasoning_tokens": 3},
+            "cost": cost,
+        },
+    }
+
+    lines = [
+        f"data: {json.dumps(first, separators=(',', ':'))}\n\n".encode("utf-8"),
+        f"data: {json.dumps(final, separators=(',', ':'))}\n\n".encode("utf-8"),
+    ]
+    if include_done:
+        lines.append(b"data: [DONE]\n\n")
+    return lines
+
+
 class _DelayedStream:
     def __init__(self, lines: list[bytes], *, delay_s: float = 0.05):
         self._lines = list(lines)
@@ -438,6 +496,12 @@ class _DelayedStream:
                 yield line
         finally:
             self.drained.set()
+
+
+def _read_stream_to_eof(response: http.client.HTTPResponse) -> tuple[bytes, float]:
+    started = time.monotonic()
+    payload = response.read()
+    return payload, time.monotonic() - started
 
 
 def test_auth_requires_run_token_and_allows_correct_token(tmp_path: Path) -> None:
@@ -710,3 +774,155 @@ def test_logfile_contains_fingerprints_and_status_without_secrets_or_prompt(tmp_
     assert prompt_text not in log_text
     assert running.run_token not in log_text
     assert running.upstream_key not in log_text
+
+
+def test_stream_response_is_close_delimited_and_readable_to_eof(tmp_path: Path) -> None:
+    lines = _tool_call_stream_lines(cost=0.04, tool_call_id="call_regression_001", include_done=True)
+    fake = _FakeUpstream(
+        [
+            UpstreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=None,
+                stream_lines=lines,
+            )
+        ]
+    )
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
+        conn, response = _open_stream_request(
+            running,
+            _glm_request_body(stream=True),
+            token=running.run_token,
+            timeout_s=4.0,
+        )
+        try:
+            assert response.status == 200
+            connection_header = response.getheader("Connection")
+            body, elapsed_s = _read_stream_to_eof(response)
+        finally:
+            response.close()
+            conn.close()
+
+    assert connection_header == "close"
+    assert elapsed_s < 4.0
+    assert b"tool_calls" in body
+    assert b"data: [DONE]" in body
+
+
+def test_stream_without_done_marker_still_terminates(tmp_path: Path) -> None:
+    lines = _tool_call_stream_lines(cost=0.04, tool_call_id="call_without_done_001", include_done=False)
+    fake = _FakeUpstream(
+        [
+            UpstreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=None,
+                stream_lines=lines,
+            )
+        ]
+    )
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
+        conn, response = _open_stream_request(
+            running,
+            _glm_request_body(stream=True),
+            token=running.run_token,
+            timeout_s=4.0,
+        )
+        try:
+            assert response.status == 200
+            connection_header = response.getheader("Connection")
+            body, elapsed_s = _read_stream_to_eof(response)
+        finally:
+            response.close()
+            conn.close()
+
+    assert connection_header == "close"
+    assert elapsed_s < 4.0
+    assert b"tool_calls" in body
+    assert b"data: [DONE]" not in body
+
+
+def test_stream_with_malformed_tool_call_id_relays_without_hang(tmp_path: Path) -> None:
+    lines = _tool_call_stream_lines(cost=0.06, tool_call_id=None, include_done=True)
+    fake = _FakeUpstream(
+        [
+            UpstreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=None,
+                stream_lines=lines,
+            )
+        ]
+    )
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
+        conn, response = _open_stream_request(
+            running,
+            _glm_request_body(stream=True),
+            token=running.run_token,
+            timeout_s=4.0,
+        )
+        try:
+            assert response.status == 200
+            connection_header = response.getheader("Connection")
+            body, elapsed_s = _read_stream_to_eof(response)
+        finally:
+            response.close()
+            conn.close()
+
+    assert connection_header == "close"
+    assert elapsed_s < 4.0
+    assert b'"tool_calls"' in body
+    assert b'"id":null' in body
+    assert b"data: [DONE]" in body
+
+
+def test_stream_upstream_iterator_failure_retains_unproven_and_logs_no_hang(tmp_path: Path) -> None:
+    def _broken_stream() -> Iterable[bytes]:
+        yield (
+            b'data: {"id":"chatcmpl-fake","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{"content":"x"}}]}\n\n'
+        )
+        raise RuntimeError("truncated upstream")
+
+    fake = _FakeUpstream(
+        [
+            UpstreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=None,
+                stream_lines=_broken_stream(),
+            )
+        ]
+    )
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake, hard_cap_usd=1.0) as running:
+        conn, response = _open_stream_request(
+            running,
+            _glm_request_body(stream=True),
+            token=running.run_token,
+            timeout_s=4.0,
+        )
+        try:
+            assert response.status == 200
+            connection_header = response.getheader("Connection")
+            body, elapsed_s = _read_stream_to_eof(response)
+        finally:
+            response.close()
+            conn.close()
+
+        assert _wait_until(lambda: running.ledger.snapshot()["outstanding_total"] == 0.0)
+        snapshot = running.ledger.snapshot()
+        log_text = running.log_path.read_text(encoding="utf-8")
+
+    assert connection_header == "close"
+    assert elapsed_s < 4.0
+    assert body.startswith(b"data: ")
+    assert "event=\"stream_relay_end\"" in log_text
+    assert "stream_error=\"upstream stream failure: truncated upstream\"" in log_text
+    assert snapshot["accrued"] == pytest.approx(0.0)
+    assert snapshot["committed_unproven"] > 0.0
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+    assert len(fake.calls) == 1

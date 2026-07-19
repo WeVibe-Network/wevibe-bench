@@ -618,13 +618,16 @@ class ProxyServer:
                         lines = _iter_single_chunk(upstream.body)
 
                 client_connected = True
+                stream_lines_relayed = 0
                 try:
+                    handler.close_connection = True
                     handler.send_response(status)
                     self._copy_upstream_headers(
                         handler,
                         upstream.headers,
                         default_content_type="text/event-stream",
                     )
+                    handler.send_header("Connection", "close")
                     handler.send_header("X-WeVibe-Trace-Id", trace_id)
                     handler.end_headers()
                 except OSError:
@@ -632,6 +635,7 @@ class ProxyServer:
 
                 try:
                     for line in lines:
+                        stream_lines_relayed += 1
                         payload = _parse_sse_data_json(line)
                         if isinstance(payload, dict):
                             if isinstance(payload.get("model"), str):
@@ -660,6 +664,15 @@ class ProxyServer:
                     error_text = f"upstream stream failure: {exc}"
                     if proven_cost is None:
                         proven_cost = None
+
+                self.logger.event(
+                    event="stream_relay_end",
+                    trace_id=trace_id,
+                    stream_lines_relayed=stream_lines_relayed,
+                    client_connected=client_connected,
+                    stream_error=error_text or "",
+                    status=status,
+                )
 
                 self._finalize_reservation(
                     reserved=reserved,

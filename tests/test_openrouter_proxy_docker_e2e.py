@@ -88,6 +88,7 @@ class _RunningProxy:
     glm_provider_object: dict[str, Any]
     ledger: BudgetLedger
     fake_upstream: _FakeUpstream
+    log_path: Path
 
 
 def _runnable_glm_profiles() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -117,7 +118,8 @@ def _running_proxy_server(
         hard_cap_usd=float(hard_cap_usd),
         checkpoint_path=str(tmp_path / f"ledger-{uuid.uuid4().hex}.json"),
     )
-    logger = ProxyLogger(str(tmp_path / f"proxy-{uuid.uuid4().hex}.log"))
+    log_path = tmp_path / f"proxy-{uuid.uuid4().hex}.log"
+    logger = ProxyLogger(str(log_path))
     run_token = f"run-token-{uuid.uuid4().hex}"
 
     proxy = ProxyServer(
@@ -145,6 +147,7 @@ def _running_proxy_server(
             glm_provider_object=glm_provider_object,
             ledger=ledger,
             fake_upstream=fake_upstream,
+            log_path=log_path,
         )
     finally:
         server.shutdown()
@@ -176,6 +179,143 @@ def _stream_lines_with_usage(cost: float) -> list[bytes]:
         f"data: {json.dumps(final, separators=(',', ':'))}\n".encode("utf-8"),
         b"data: [DONE]\n",
     ]
+
+
+def _streamed_tool_then_stop_responses() -> list[UpstreamResponse]:
+    tool_call_id = "call_c0probe_001"
+    tool_arguments = json.dumps({"command": "echo hi"}, separators=(",", ":"))
+
+    tool_call_chunk = {
+        "id": "chatcmpl-c0probe-1",
+        "object": "chat.completion.chunk",
+        "model": "z-ai/glm-5.2",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "arguments": tool_arguments,
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    tool_call_finish = {
+        "id": "chatcmpl-c0probe-1",
+        "object": "chat.completion.chunk",
+        "model": "z-ai/glm-5.2",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {
+            "prompt_tokens": 14,
+            "completion_tokens": 6,
+            "total_tokens": 20,
+            "completion_tokens_details": {"reasoning_tokens": 0},
+            "cost": 0.003,
+        },
+    }
+
+    stop_chunk = {
+        "id": "chatcmpl-c0probe-2",
+        "object": "chat.completion.chunk",
+        "model": "z-ai/glm-5.2",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "done"}}],
+    }
+    stop_finish = {
+        "id": "chatcmpl-c0probe-2",
+        "object": "chat.completion.chunk",
+        "model": "z-ai/glm-5.2",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 18,
+            "completion_tokens": 4,
+            "total_tokens": 22,
+            "completion_tokens_details": {"reasoning_tokens": 0},
+            "cost": 0.002,
+        },
+    }
+
+    response_one = UpstreamResponse(
+        status=200,
+        headers={"Content-Type": "text/event-stream"},
+        body=None,
+        stream_lines=[
+            f"data: {json.dumps(tool_call_chunk, separators=(',', ':'))}\n\n".encode("utf-8"),
+            f"data: {json.dumps(tool_call_finish, separators=(',', ':'))}\n\n".encode("utf-8"),
+            b"data: [DONE]\n\n",
+        ],
+    )
+    response_two = UpstreamResponse(
+        status=200,
+        headers={"Content-Type": "text/event-stream"},
+        body=None,
+        stream_lines=[
+            f"data: {json.dumps(stop_chunk, separators=(',', ':'))}\n\n".encode("utf-8"),
+            f"data: {json.dumps(stop_finish, separators=(',', ':'))}\n\n".encode("utf-8"),
+            b"data: [DONE]\n\n",
+        ],
+    )
+    return [response_one, response_two]
+
+
+def _append_probe_log(log_path: Path, message: str) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp}Z {message}\n")
+
+
+def _parse_json_events(stdout_text: str) -> tuple[list[dict[str, Any]], int]:
+    parsed: list[dict[str, Any]] = []
+    malformed = 0
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if isinstance(payload, dict):
+            parsed.append(payload)
+    return parsed, malformed
+
+
+def _event_has_completed_tool_execution(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("type", "")).strip().lower()
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    part_type = str(part.get("type", "")).strip().lower()
+
+    if event_type in {"tool_result", "tool_finish", "tool_finished"}:
+        return True
+
+    if event_type in {"tool_use", "tool"} or part_type == "tool":
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        if not state and isinstance(event.get("state"), dict):
+            state = event.get("state")
+        status = str(state.get("status", "")).strip().lower()
+        if status in {"done", "complete", "completed", "finished", "success", "ok"}:
+            return True
+        if state.get("output") is not None:
+            return True
+
+    return False
+
+
+def _event_is_step_finish_stop(event: dict[str, Any]) -> bool:
+    if str(event.get("type", "")).strip().lower() != "step_finish":
+        return False
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    return str(part.get("reason", "")).strip().lower() == "stop"
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout_s: float = 3.0) -> bool:
@@ -486,3 +626,162 @@ def test_openrouter_proxy_worker_docker_best_effort_teardown_on_runtime_error(
             raise RuntimeError("synthetic-runtime-error")
 
     _assert_precise_single_rm_call(rm_calls, container_name=cfg.container_name)
+
+
+@pytest.mark.skipif(not (_DOCKER_OK and _IMAGE_OK), reason=_DOCKER_SKIP_REASON)
+def test_worker_completes_tool_result_continuation_through_fixed_proxy(tmp_path: Path) -> None:
+    fake = _FakeUpstream(_streamed_tool_then_stop_responses())
+    run_log_path = Path(__file__).resolve().parents[1] / "runs" / "proxy-e2e" / (
+        f"{time.strftime('%Y%m%d-%H%M%S')}-worker-continuation-c0probe-{uuid.uuid4().hex[:8]}.log"
+    )
+    completed: subprocess.CompletedProcess[str] | None = None
+
+    _append_probe_log(
+        run_log_path,
+        (
+            "start test_worker_completes_tool_result_continuation_through_fixed_proxy "
+            f"tmp_path={tmp_path}"
+        ),
+    )
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake, max_tokens_cap=96) as running:
+        worktree = tmp_path / "docker-worker-c0probe"
+        worktree.mkdir(parents=True, exist_ok=True)
+        proxy_base_url = f"http://host.docker.internal:{running.port}/api/v1"
+        _write_opencode_proxy_config(worktree=worktree, proxy_base_url=proxy_base_url)
+
+        cfg = DockerCellConfig(
+            worktree=worktree,
+            memory_mode="off",
+            container_name=f"wevibe-c0probe-{uuid.uuid4().hex[:12]}",
+        )
+        cfg.proxy_token = running.run_token
+
+        with _owned_docker_cell(cfg) as cell:
+            cmd = cell.exec_argv(
+                [
+                    "opencode",
+                    "run",
+                    "Use exactly one bash command `echo hi`, then reply with done.",
+                    "--model",
+                    "openrouter/z-ai/glm-5.2",
+                    "--agent",
+                    "build",
+                    "--dir",
+                    "/work",
+                    "--format",
+                    "json",
+                    "--pure",
+                ]
+            )
+            _append_probe_log(run_log_path, f"opencode command={cmd}")
+            try:
+                completed = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                _append_probe_log(
+                    run_log_path,
+                    (
+                        "opencode timeout "
+                        f"fake_calls={len(fake.calls)} timeout={exc.timeout} cmd={exc.cmd}"
+                    ),
+                )
+                if len(fake.calls) == 0:
+                    pytest.skip(
+                        "OpenCode c0 continuation probe skipped: docker command timed out before any proxy request "
+                        f"(likely offline handshake dependency): {exc}"
+                    )
+                pytest.fail(
+                    "OpenCode c0 continuation probe timed out after proxy activity "
+                    f"(fake_calls={len(fake.calls)}). This is a regression signal, not a skippable condition."
+                )
+
+        assert completed is not None
+        events_path = Path(f"{worktree}.events.jsonl")
+        events_path.write_text(completed.stdout, encoding="utf-8")
+
+        _append_probe_log(run_log_path, f"events_path={events_path}")
+        _append_probe_log(run_log_path, f"proxy_log_path={running.log_path}")
+        _append_probe_log(run_log_path, f"opencode returncode={completed.returncode}")
+        _append_probe_log(run_log_path, "opencode stderr begin")
+        if completed.stderr:
+            for line in completed.stderr.splitlines():
+                _append_probe_log(run_log_path, f"stderr {line}")
+        _append_probe_log(run_log_path, "opencode stderr end")
+
+        parsed_events, malformed_event_lines = _parse_json_events(completed.stdout)
+        for event in parsed_events:
+            _append_probe_log(
+                run_log_path,
+                f"event type={event.get('type')} session={event.get('sessionID', '')}",
+            )
+        _append_probe_log(run_log_path, f"event parse malformed_lines={malformed_event_lines}")
+
+        if len(fake.calls) == 0:
+            pytest.skip(
+                "OpenCode c0 continuation probe skipped: opencode exited before sending any chat/completions request "
+                f"(rc={completed.returncode}; stderr_tail={_tail(completed.stderr)})"
+            )
+
+        for idx, call in enumerate(fake.calls, start=1):
+            _append_probe_log(
+                run_log_path,
+                (
+                    f"proxy_call idx={idx} stream={call.stream} model={call.body_json.get('model')} "
+                    f"messages={len(call.body_json.get('messages', []))}"
+                ),
+            )
+
+        proxy_log_text = running.log_path.read_text(encoding="utf-8")
+        proxy_log_lines = [line for line in proxy_log_text.splitlines() if line.strip()]
+        request_event_count = sum(
+            1 for line in proxy_log_lines if "ordinal=" in line and 'event="stream_relay_end"' not in line
+        )
+        stream_relay_end_count = sum(1 for line in proxy_log_lines if 'event="stream_relay_end"' in line)
+        stream_relay_connected_count = sum(
+            1
+            for line in proxy_log_lines
+            if 'event="stream_relay_end"' in line and "client_connected=true" in line
+        )
+        _append_probe_log(
+            run_log_path,
+            (
+                "proxy_log_counts "
+                f"request_events={request_event_count} stream_relay_end={stream_relay_end_count} "
+                f"stream_relay_connected={stream_relay_connected_count}"
+            ),
+        )
+
+        if completed.returncode != 0 and len(fake.calls) == 0:
+            pytest.skip(
+                "OpenCode c0 continuation probe skipped: non-zero exit before proxy traffic "
+                f"(rc={completed.returncode}; stderr_tail={_tail(completed.stderr)})"
+            )
+
+        assert completed.returncode == 0, (
+            "opencode run exited non-zero in continuation probe "
+            f"(rc={completed.returncode}; stdout_tail={_tail(completed.stdout)}; stderr_tail={_tail(completed.stderr)})"
+        )
+        assert len(fake.calls) == 2, (
+            "expected tool-result continuation request through proxy; "
+            f"fake upstream saw {len(fake.calls)} calls"
+        )
+        assert all(call.url == OPENROUTER_UPSTREAM_URL for call in fake.calls)
+        assert all(call.stream for call in fake.calls)
+
+        tool_completed = any(_event_has_completed_tool_execution(event) for event in parsed_events)
+        step_finish_stop = any(_event_is_step_finish_stop(event) for event in parsed_events)
+        assert tool_completed, "expected at least one completed tool execution event in opencode json stream"
+        assert step_finish_stop, "expected step_finish reason=stop event in opencode json stream"
+
+        assert request_event_count >= 2, f"expected >=2 proxy request events, saw {request_event_count}"
+        assert stream_relay_end_count >= 2, f"expected >=2 stream_relay_end events, saw {stream_relay_end_count}"
+        assert stream_relay_connected_count >= 2, (
+            "expected >=2 stream_relay_end events with client_connected=true, "
+            f"saw {stream_relay_connected_count}"
+        )
