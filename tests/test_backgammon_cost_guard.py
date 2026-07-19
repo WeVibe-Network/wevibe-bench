@@ -132,6 +132,73 @@ def test_worker_run_argv_injects_output_token_env(tmp_path: Path) -> None:
     assert _contains_pair(run_argv, "-e", "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=8192")
 
 
+def test_worker_run_argv_omits_output_token_env_when_unclamped(tmp_path: Path) -> None:
+    cfg = DockerCellConfig(
+        worktree=tmp_path / "worktree",
+        memory_mode="off",
+        container_name="wevibe-bench-cell-unclamped-check",
+        output_token_max=None,
+    )
+    run_argv = _build_run_argv(config=cfg, worktree=cfg.worktree, uid=501, gid=20, memory_mode="off")
+
+    assert not any(item.startswith("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=") for item in run_argv)
+
+
+def test_cost_limit_without_output_clamp_arms_accrued_guard_only(tmp_path: Path) -> None:
+    runner = BackgammonRunner(
+        task_dir=TASK_DIR,
+        work_root=tmp_path / "work-root",
+        model="openrouter/anthropic/claude-opus-4.8",
+        cost_limit_usd=11.0,
+        cost_target_usd=10.0,
+        max_output_tokens=None,
+        max_steps_per_attempt=40,
+    )
+
+    assert runner._reservation_usd == 0.0
+    assert runner._one_step_worst_case_usd == 0.0
+    # Reservation refusal degrades to a pure accrued-vs-limit boundary check.
+    assert (
+        runner._refuse_invocation_by_reservation(
+            run_label="unclamped", phase="initial", accrued_cost_usd=10.99
+        )
+        is False
+    )
+    assert (
+        runner._refuse_invocation_by_reservation(
+            run_label="unclamped", phase="initial", accrued_cost_usd=11.01
+        )
+        is True
+    )
+    # Accrued kill (proven 15-07) still arms with cost_limit alone.
+    assert BackgammonRunner._cost_limit_exceeded(6.0, 5.1, runner._one_step_worst_case_usd, 11.0) is True
+    assert BackgammonRunner._cost_limit_exceeded(6.0, 4.9, runner._one_step_worst_case_usd, 11.0) is False
+
+
+def test_reservation_arms_only_with_clamp_and_step_cap(tmp_path: Path) -> None:
+    lookahead_only = BackgammonRunner(
+        task_dir=TASK_DIR,
+        work_root=tmp_path / "work-root-lookahead",
+        model="openrouter/anthropic/claude-opus-4.8",
+        cost_limit_usd=11.0,
+        max_output_tokens=8192,
+        max_steps_per_attempt=None,
+    )
+    assert lookahead_only._one_step_worst_case_usd > 0.0
+    assert lookahead_only._reservation_usd == 0.0
+
+    fully_armed = BackgammonRunner(
+        task_dir=TASK_DIR,
+        work_root=tmp_path / "work-root-armed",
+        model="openrouter/anthropic/claude-opus-4.8",
+        cost_limit_usd=11.0,
+        max_output_tokens=8192,
+        max_steps_per_attempt=40,
+    )
+    assert fully_armed._one_step_worst_case_usd > 0.0
+    assert fully_armed._reservation_usd > fully_armed._one_step_worst_case_usd
+
+
 def test_write_worker_config_no_provider_when_options_unset(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path, reasoning_effort=None, max_output_tokens=None)
     worktree = tmp_path / "worktree"

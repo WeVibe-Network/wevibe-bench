@@ -197,12 +197,15 @@ class BackgammonRunner(AgentRunner):
             if self.cost_target_usd >= self.cost_limit_usd:
                 raise ValueError("cost_target_usd must be < cost_limit_usd")
 
-        if self.cost_limit_usd is not None:
-            if self.max_output_tokens is None:
-                raise ValueError("cost_limit_usd requires max_output_tokens for hard reservation guard")
-            if self.max_steps_per_attempt is None:
-                raise ValueError("cost_limit_usd requires max_steps_per_attempt for hard reservation guard")
-
+        # Budget guards are layered (19-07-26-0913 audit):
+        # - cost_limit_usd alone arms the accrued `part.cost` kill (proven 15-07 at $11.80).
+        # - The worst-case RESERVATION guards additionally arm only when an output-token
+        #   clamp bounds a step: one-step lookahead needs max_output_tokens; the
+        #   whole-attempt reservation also needs max_steps_per_attempt. An un-clamped
+        #   run (no max_output_tokens) relies on the accrued kill + the proxy hard cap —
+        #   the 8192 clamp is NOT a required budget lever (it guillotined HIGH-effort
+        #   whole-file turns at finish=length; see the audit).
+        if self.cost_limit_usd is not None and self.max_output_tokens is not None:
             self._effective_output_price_per_1m = self._resolve_output_price_per_1m(
                 model=self.model,
                 explicit_output_price_per_1m=self.output_price_per_1m,
@@ -214,13 +217,6 @@ class BackgammonRunner(AgentRunner):
             self._cache_write_allowance_usd = (
                 float(self.max_output_tokens) * cache_write_price_per_1m / 1_000_000.0
             )
-            self._reservation_usd = self._worst_case_reservation_usd(
-                max_steps=self.max_steps_per_attempt,
-                max_output_tokens=self.max_output_tokens,
-                output_price_per_1m=self._effective_output_price_per_1m,
-                safety_factor=_RESERVATION_SAFETY_FACTOR,
-                cache_write_allowance_usd=self._cache_write_allowance_usd,
-            )
             self._one_step_worst_case_usd = self._worst_case_reservation_usd(
                 max_steps=1,
                 max_output_tokens=self.max_output_tokens,
@@ -228,6 +224,14 @@ class BackgammonRunner(AgentRunner):
                 safety_factor=_RESERVATION_SAFETY_FACTOR,
                 cache_write_allowance_usd=0.0,
             )
+            if self.max_steps_per_attempt is not None:
+                self._reservation_usd = self._worst_case_reservation_usd(
+                    max_steps=self.max_steps_per_attempt,
+                    max_output_tokens=self.max_output_tokens,
+                    output_price_per_1m=self._effective_output_price_per_1m,
+                    safety_factor=_RESERVATION_SAFETY_FACTOR,
+                    cache_write_allowance_usd=self._cache_write_allowance_usd,
+                )
 
         allowed_reasoning_efforts = {"minimal", "low", "medium", "high", "xhigh", "none"}
         if self.reasoning_effort is not None and self.reasoning_effort not in allowed_reasoning_efforts:
