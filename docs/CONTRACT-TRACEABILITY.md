@@ -45,14 +45,14 @@ formula, string, count, or mechanism that is not published in CONTRACT.md.*
 |---|---|---|---|---|
 | F01 | REQ-RENDER | §5 board renders, no console errors | no errors, board visible | Behavioural. |
 | F02 | REQ-RENDER | §5 15/side, 24 points | `toHaveCount(24)/(30)`, 15 each | Counts published. |
-| F03 | REQ-HINT | §5 hint text = die value/off; move advances state | remainingDice decrements | Hint semantics published. |
+| F03 | REQ-HINT | §5 hint text = die value/off; clicking a hint executes that move, consuming its die | remainingDice decrements | Hint semantics published; **click-hint-executes-move now PUBLISHED in §5** (was inherited from the golden one-shot only — 19-07-26-0913 audit OVERFIT finding). |
 | F04 | REQ-HINT | §5 hint text = rolled die values or "off" | hint text parts in dice/"off" | Published. |
 | F05 | REQ-TURN | §6 auto-pass message wording | `message` `/no legal move\|pass/i` | Message content published. |
 | F06 | REQ-PIPUI | §5 "Pip display" = engine pip; opening 167 | DOM pip === state.pip; `===167` | Published (REQ-PIP + REQ-PIPUI). |
 | F07 | REQ-CUBEUI | §5 "Cube UI" — value integer + owner vocabulary | `cubeVal` text "1"/"2"; owner label regex | Value + owner vocabulary (you/ai/center) now PUBLISHED. |
 | F08 | REQ-TESTID | §5 difficulty selector | difficulty field reflects selection | Published. |
 | F09 | REQ-HIT | §5 checker `data-loc="bar"` after hit | bar checker count 1 | Published. |
-| F10 | REQ-BAR | §2 REQ-BAR bar entry (white 25−die → loc 20/22) + REQ-HINT (one hint per die) | bar checker enters; lands at 25−die loc; 2 hints | **Bar-entry arithmetic now PUBLISHED** → loc "20"/"22" derivable; hint-per-die published. |
+| F10 | REQ-BAR | §2 REQ-BAR bar entry (white 25−die → loc 20/22) + REQ-HINT (one hint per die; click executes) | bar checker enters; lands at 25−die loc; 2 hints | **Bar-entry arithmetic now PUBLISHED** → loc "20"/"22" derivable; hint-per-die published; **click-hint-executes-move now PUBLISHED in §5** (0913 audit OVERFIT finding, shared with F03). |
 | F11 | REQ-BEAROFF | §5 off `data-loc="off"` | off checker count | Published. |
 | F12 | REQ-NEWGAME | §6 "You win" banner + new game no reload → opening position | "You win"; per-loc opening counts; modal hidden toggle | Win message + opening position now PUBLISHED (REQ-INIT). |
 | F13 | REQ-COMPACT | §6 no horizontal overflow @ 1280×800 / 1440×900 | scrollWidth ≤ clientWidth+1 | Published verbatim. |

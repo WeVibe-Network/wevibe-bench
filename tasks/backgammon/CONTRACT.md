@@ -282,7 +282,8 @@ elements carry the attributes listed.
   exactly 30 checkers (15 per colour), positioned at their board/bar/off location (REQ-RENDER).
 - Each move hint: `data-testid="hint"` (visible text = the die value(s), or `"off"` for bear-off).
   A hint appears for each playable die when a movable checker is selected (REQ-HINT). Selecting a
-  bar checker with two playable entry dice shows two hints, one per die.
+  bar checker with two playable entry dice shows two hints, one per die. Clicking a hint executes
+  that move for the selected checker, consuming the hint's die.
 - Each die: `data-testid="die"` (classes `used` / `rolling` convey state).
 - The bar column: `data-testid="bar"`.
 - The off tray: `data-testid="off-tray"`, with halves `data-testid="off-ai"` and `data-testid="off-you"`.
