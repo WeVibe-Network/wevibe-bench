@@ -237,6 +237,126 @@ def test_worst_case_usd_uses_cache_write_and_output_plus_reasoning() -> None:
     assert worst_case_usd(input_tokens_ub, priced, max_tokens_cap) == pytest.approx(expected)
 
 
+def test_worst_case_usd_prices_cached_prefix_at_cache_read() -> None:
+    glm = DEFAULT_PROFILES()["glm"]
+    priced = replace(
+        glm,
+        pricing={
+            "input": 1.0,
+            "output": 4.0,
+            "cache_read": 0.1,
+            "cache_write": 2.5,
+        },
+        max_reasoning_tokens=512,
+        authorized=True,
+    )
+
+    input_tokens_ub = 10_000
+    cached = 6_000
+    max_tokens_cap = 2048
+    expected = (
+        (((cached * 0.1) + ((input_tokens_ub - cached) * 2.5)) / 1_000_000)
+        + (((max_tokens_cap + 512) * 4.0) / 1_000_000)
+    ) * 1.06 * 1.10 + 0.001
+
+    got = worst_case_usd(
+        input_tokens_ub,
+        priced,
+        max_tokens_cap,
+        cached_input_tokens_ub=cached,
+    )
+    assert got == pytest.approx(expected)
+    assert got < worst_case_usd(input_tokens_ub, priced, max_tokens_cap)
+
+    # Cached bound clamps to the request's own input UB.
+    fully_cached_expected = (
+        ((input_tokens_ub * 0.1) / 1_000_000)
+        + (((max_tokens_cap + 512) * 4.0) / 1_000_000)
+    ) * 1.06 * 1.10 + 0.001
+    assert worst_case_usd(
+        input_tokens_ub,
+        priced,
+        max_tokens_cap,
+        cached_input_tokens_ub=10 * input_tokens_ub,
+    ) == pytest.approx(fully_cached_expected)
+
+    # Default (no cache history) is byte-identical to cached_input_tokens_ub=0.
+    assert worst_case_usd(input_tokens_ub, priced, max_tokens_cap) == pytest.approx(
+        worst_case_usd(input_tokens_ub, priced, max_tokens_cap, cached_input_tokens_ub=0)
+    )
+
+    # No cache-read pricing => the cached prefix earns no discount.
+    no_cache_read = replace(
+        priced,
+        pricing={"input": 1.0, "output": 4.0, "cache_write": 2.5},
+    )
+    assert worst_case_usd(
+        input_tokens_ub,
+        no_cache_read,
+        max_tokens_cap,
+        cached_input_tokens_ub=cached,
+    ) == pytest.approx(worst_case_usd(input_tokens_ub, no_cache_read, max_tokens_cap))
+
+
+def test_cached_prefix_reservation_admits_feedback_round_at_19b_numbers(tmp_path: Path) -> None:
+    """Regression for the opus48-smoke-19b feedback refusals (ordinals 39-41).
+
+    Numbers verbatim from runs/openrouter-proxy/20260719T180215Z-opus48-smoke-19b.log:
+    accrued=5.331406, committed_unproven=1.4157078, refused in_tokens_ub=569500
+    at reserved_usd=5.32282805, prior proven-billed in_tokens_ub=566665
+    (ordinal 38, status=200), hard cap 12, pricing 5/25/0.5/6.25,
+    max_tokens_cap=32000, max_reasoning_tokens=8192.
+    """
+    opus = replace(
+        DEFAULT_PROFILES()["opus"],
+        pricing={
+            "input": 5.0,
+            "output": 25.0,
+            "cache_read": 0.5,
+            "cache_write": 6.25,
+        },
+        max_reasoning_tokens=8192,
+        authorized=True,
+    )
+    max_tokens_cap = 32000
+    in_tokens_ub = 569_500
+    proven_billed_prefix = 566_665
+
+    ledger = BudgetLedger(
+        run_id="opus48-smoke-19b-shape",
+        model_id="anthropic/claude-opus-4.8",
+        profile_name="opus",
+        hard_cap_usd=12.0,
+        checkpoint_path=str(tmp_path / "ledger-19b-shape.json"),
+    )
+    ledger.reserve("history", 5.331406)
+    ledger.settle_actual("history", 5.331406)
+    ledger.reserve("aux-404", 1.4157078)
+    ledger.retain_unproven("aux-404")
+
+    # Without cache history the reservation stays conservative and still refuses.
+    conservative = worst_case_usd(in_tokens_ub, opus, max_tokens_cap)
+    assert conservative == pytest.approx(5.32282805, abs=1e-6)
+    with pytest.raises(BudgetExceededError):
+        ledger.reserve("feedback-conservative", conservative)
+
+    # With the proven-billed prefix priced at cache-read, the round is admitted.
+    cached = worst_case_usd(
+        in_tokens_ub,
+        opus,
+        max_tokens_cap,
+        cached_input_tokens_ub=proven_billed_prefix,
+    )
+    assert cached < conservative
+    ledger.reserve("feedback-cached", cached)
+    ledger.settle_actual("feedback-cached", cached)
+
+    # The accrued hard-cap backstop is untouched: once actual spend has grown,
+    # even a conservative-shaped ask is still refused at the same $12 ceiling.
+    with pytest.raises(BudgetExceededError):
+        ledger.reserve("post-feedback-conservative", conservative)
+
+
 def test_budget_ledger_boundary_and_equality_policy(tmp_path: Path) -> None:
     checkpoint = tmp_path / "ledger-boundary.json"
     ledger = BudgetLedger(

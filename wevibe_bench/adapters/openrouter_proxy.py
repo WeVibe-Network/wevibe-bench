@@ -255,14 +255,32 @@ def input_token_upper_bound(body: dict[str, Any]) -> int:
     return len(raw.encode("utf-8")) + (PER_MESSAGE_OVERHEAD_TOKENS * len(messages))
 
 
-def worst_case_usd(input_tokens_ub: int, profile: ProviderProfile, max_tokens_cap: int) -> float:
-    """Compute conservative reservation in USD from profile pricing and token bounds."""
+def worst_case_usd(
+    input_tokens_ub: int,
+    profile: ProviderProfile,
+    max_tokens_cap: int,
+    *,
+    cached_input_tokens_ub: int = 0,
+) -> float:
+    """Compute conservative reservation in USD from profile pricing and token bounds.
+
+    ``cached_input_tokens_ub`` is the portion of ``input_tokens_ub`` already
+    proven-billed upstream in this run (an established prompt-cache prefix);
+    it is priced at the cache-read rate when pricing provides one. Genuinely
+    new input keeps the conservative ``max(input, cache_write)`` rate and the
+    output window bound is unchanged. Reservation is admission control, not
+    billing: the accrued-actual ledger remains the hard backstop for any
+    provider-side cache miss.
+    """
     pricing = profile.pricing
     if pricing is None:
         raise ProfileBlockedError("pricing_missing")
 
-    in_price = max(pricing["input"], pricing.get("cache_write", pricing["input"]))
-    cost_in = float(input_tokens_ub) * float(in_price) / 1_000_000
+    fresh_price = float(max(pricing["input"], pricing.get("cache_write", pricing["input"])))
+    cached_price = min(float(pricing.get("cache_read", fresh_price)), fresh_price)
+    cached_tokens = max(0, min(int(cached_input_tokens_ub), int(input_tokens_ub)))
+    fresh_tokens = int(input_tokens_ub) - cached_tokens
+    cost_in = ((float(cached_tokens) * cached_price) + (float(fresh_tokens) * fresh_price)) / 1_000_000
     cost_out = (
         float(max_tokens_cap + profile.max_reasoning_tokens)
         * float(pricing["output"])

@@ -284,12 +284,30 @@ class ProxyServer:
         self._ordinal_lock = threading.Lock()
         self._upstream_key_fp = key_fingerprint(upstream_key)
 
+        # High-water input-token upper bound across PROVEN-billed requests
+        # (settled with upstream ``usage.cost``). This is the established
+        # prompt-cache prefix bound for reservation pricing; retained-unproven
+        # requests never establish it. In-process only by design: a proxy
+        # restart forgets the prefix and reservations degrade to conservative.
+        self._proven_billed_input_ub = 0
+        self._billed_ub_lock = threading.Lock()
+
         # Fail fast on unknown profile wiring.
         self.registry.get(profile_name)
 
     def _next_ordinal(self) -> int:
         with self._ordinal_lock:
             return int(next(self._ordinal_counter))
+
+    def _cached_input_ub(self, in_tokens_ub: int) -> int:
+        """Portion of this request's input UB covered by the proven-billed prefix."""
+        with self._billed_ub_lock:
+            return min(int(in_tokens_ub), self._proven_billed_input_ub)
+
+    def _record_proven_billed_input_ub(self, in_tokens_ub: int) -> None:
+        with self._billed_ub_lock:
+            if int(in_tokens_ub) > self._proven_billed_input_ub:
+                self._proven_billed_input_ub = int(in_tokens_ub)
 
     def build_handler_class(self) -> type[http.server.BaseHTTPRequestHandler]:
         proxy = self
@@ -393,11 +411,13 @@ class ProxyServer:
         reserved: bool,
         trace_id: str,
         proven_cost: float | None,
+        billed_input_ub: int = 0,
     ) -> None:
         if not reserved:
             return
         if proven_cost is not None:
             self.ledger.settle_actual(trace_id, proven_cost)
+            self._record_proven_billed_input_ub(billed_input_ub)
         else:
             self.ledger.retain_unproven(trace_id)
 
@@ -415,6 +435,7 @@ class ProxyServer:
         quantizations: list[str] = []
         in_bytes = 0
         in_tokens_ub = 0
+        cached_in_tokens_ub = 0
         out_tokens = 0
         reasoning_tokens = 0
         reserved_usd = 0.0
@@ -560,9 +581,18 @@ class ProxyServer:
             provider_slugs, quantizations = _provider_evidence(transformed.get("provider"))
             model_evidence = str(transformed.get("model", model_evidence) or model_evidence)
 
-            # 5) input upper bound + worst-case reservation.
+            # 5) input upper bound + worst-case reservation (established
+            # proven-billed prefix priced at cache-read rate).
             in_tokens_ub = input_token_upper_bound(transformed)
-            reserved_usd = float(worst_case_usd(in_tokens_ub, profile, self.max_tokens_cap))
+            cached_in_tokens_ub = self._cached_input_ub(in_tokens_ub)
+            reserved_usd = float(
+                worst_case_usd(
+                    in_tokens_ub,
+                    profile,
+                    self.max_tokens_cap,
+                    cached_input_tokens_ub=cached_in_tokens_ub,
+                )
+            )
 
             # 6) reserve budget before forwarding.
             try:
@@ -678,6 +708,7 @@ class ProxyServer:
                     reserved=reserved,
                     trace_id=trace_id,
                     proven_cost=proven_cost,
+                    billed_input_ub=in_tokens_ub,
                 )
                 reserved = False
                 return
@@ -704,6 +735,7 @@ class ProxyServer:
                 reserved=reserved,
                 trace_id=trace_id,
                 proven_cost=proven_cost,
+                billed_input_ub=in_tokens_ub,
             )
             reserved = False
 
@@ -772,6 +804,7 @@ class ProxyServer:
                 quantizations=quantizations,
                 in_bytes=in_bytes,
                 in_tokens_ub=in_tokens_ub,
+                cached_in_tokens_ub=cached_in_tokens_ub,
                 out_tokens=out_tokens,
                 reasoning_tokens=reasoning_tokens,
                 reserved_usd=reserved_usd,

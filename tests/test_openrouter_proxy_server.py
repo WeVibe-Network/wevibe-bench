@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import http.client
 import json
+import re
 import threading
 import time
 import uuid
@@ -392,6 +393,36 @@ def _non_stream_success_response(cost: float) -> UpstreamResponse:
     )
 
 
+def _non_stream_response_without_usage() -> UpstreamResponse:
+    payload = {
+        "id": "chatcmpl-fake",
+        "object": "chat.completion",
+        "model": "z-ai/glm-5.2",
+        "provider": {"slug": "fireworks"},
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+    }
+    return UpstreamResponse(
+        status=200,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        stream_lines=None,
+    )
+
+
+def _summary_log_line_for_trace(log_path: Path, trace_id: str) -> str:
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        if f'trace_id="{trace_id}"' in line and "cached_in_tokens_ub=" in line:
+            return line
+    raise AssertionError(f"no summary log line found for trace_id={trace_id}")
+
+
+def _int_field(line: str, field: str) -> int:
+    match = re.search(rf"(?:^|\s){re.escape(field)}=(\d+)", line)
+    if match is None:
+        raise AssertionError(f"field {field} not found in log line: {line}")
+    return int(match.group(1))
+
+
 def _stream_lines_with_usage(cost: float) -> list[bytes]:
     first = {
         "id": "chatcmpl-fake",
@@ -577,6 +608,82 @@ def test_budget_refusal_returns_402_without_forwarding_or_budget_mutation(tmp_pa
     assert error["code"] == "budget_exceeded"
     assert len(fake.calls) == 0
     assert after == before
+
+
+def test_proven_billed_prefix_flips_reservation_refusal_to_admit(tmp_path: Path) -> None:
+    """A settled request establishes a cached prefix priced at cache-read.
+
+    The hard cap is chosen so the second identical request would be REFUSED
+    under conservative (cache-write) pricing but is ADMITTED once the
+    proven-billed prefix is priced at cache-read rate (the opus48-smoke-19b
+    feedback-refusal shape, scaled down).
+    """
+    fake = _FakeUpstream(
+        [
+            _non_stream_success_response(cost=0.01),
+            _non_stream_success_response(cost=0.01),
+        ]
+    )
+    body = _glm_request_body(prompt="x" * 200_000)
+
+    with _running_proxy_server(
+        tmp_path,
+        fake_upstream=fake,
+        hard_cap_usd=0.03,
+        max_tokens_cap=64,
+    ) as running:
+        status_1, _, _ = _post_json(
+            running, body, token=running.run_token, trace_id="trace-first-billed"
+        )
+        status_2, _, _ = _post_json(
+            running, body, token=running.run_token, trace_id="trace-cached-repeat"
+        )
+        snapshot = running.ledger.snapshot()
+        line_1 = _summary_log_line_for_trace(running.log_path, "trace-first-billed")
+        line_2 = _summary_log_line_for_trace(running.log_path, "trace-cached-repeat")
+
+    assert status_1 == 200
+    assert status_2 == 200
+    assert len(fake.calls) == 2
+    assert snapshot["accrued"] == pytest.approx(0.02)
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+
+    in_ub_1 = _int_field(line_1, "in_tokens_ub")
+    assert _int_field(line_1, "cached_in_tokens_ub") == 0
+    assert _int_field(line_2, "cached_in_tokens_ub") == in_ub_1
+
+
+def test_retained_unproven_request_does_not_establish_cached_prefix(tmp_path: Path) -> None:
+    """Only PROVEN-billed (usage.cost-settled) requests establish the prefix."""
+    fake = _FakeUpstream(
+        [
+            _non_stream_response_without_usage(),
+            _non_stream_success_response(cost=0.01),
+            _non_stream_success_response(cost=0.01),
+        ]
+    )
+    body = _glm_request_body(prompt="y" * 50_000)
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake, max_tokens_cap=64) as running:
+        status_1, _, _ = _post_json(
+            running, body, token=running.run_token, trace_id="trace-unproven"
+        )
+        status_2, _, _ = _post_json(
+            running, body, token=running.run_token, trace_id="trace-after-unproven"
+        )
+        status_3, _, _ = _post_json(
+            running, body, token=running.run_token, trace_id="trace-after-settled"
+        )
+        line_2 = _summary_log_line_for_trace(running.log_path, "trace-after-unproven")
+        line_3 = _summary_log_line_for_trace(running.log_path, "trace-after-settled")
+
+    assert status_1 == 200
+    assert status_2 == 200
+    assert status_3 == 200
+    # Request 1 retained-unproven (no usage) => request 2 sees NO cached prefix.
+    assert _int_field(line_2, "cached_in_tokens_ub") == 0
+    # Request 2 settled with usage.cost => request 3 sees the full prefix.
+    assert _int_field(line_3, "cached_in_tokens_ub") == _int_field(line_2, "in_tokens_ub")
 
 
 def test_non_stream_usage_cost_settles_actual_and_relays_body(tmp_path: Path) -> None:
