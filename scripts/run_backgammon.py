@@ -11,6 +11,7 @@ from typing import Any
 
 from wevibe_bench.adapters.backgammon import (
     DEFAULT_MAX_STEPS_PER_ATTEMPT,
+    DEFAULT_RUN_TIMEOUT_S,
     BackgammonCellResult,
     BackgammonRunner,
 )
@@ -165,7 +166,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-output-tokens", type=int, default=None)
     parser.add_argument("--max-steps-per-attempt", type=int, default=DEFAULT_MAX_STEPS_PER_ATTEMPT)
     parser.add_argument("--output-price-per-1m", type=float, default=None)
-    parser.add_argument("--run-timeout", type=int, default=1800)
+    parser.add_argument("--run-timeout", type=int, default=DEFAULT_RUN_TIMEOUT_S)
     parser.add_argument(
         "--completion-grace",
         type=int,

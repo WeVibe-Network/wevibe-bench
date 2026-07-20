@@ -86,6 +86,14 @@ _BUDGET_STOP_REASONS = {"cost_limit", "cost_reservation_refused", "max_steps_per
 # CLI driver defaults to this constant.
 DEFAULT_MAX_STEPS_PER_ATTEMPT = 100
 
+# Canonical per-attempt wall-clock timeout (guard, NOT a scoring signal).
+# Evidence for 5400: smoke 19d observed ~3060s wall on a healthy 68-turn Opus
+# PASS. Stage-4 at the old 1800s default killed converging near-pass runs
+# (kimi-k2.7-code: 52 turns with 26/29 gates green; mimo-v2.5-pro: 35 turns).
+# int4/fp8 pins run slower than Opus, so the canonical default carries ~1.75x
+# headroom over the slowest healthy observed wall (3060 * 1.75 ~= 5355 -> 5400).
+DEFAULT_RUN_TIMEOUT_S = 5400
+
 
 @dataclass(frozen=True)
 class _OpencodeRunStats:
@@ -137,7 +145,7 @@ class BackgammonRunner(AgentRunner):
         mock: str | None = None,
         max_attempts: int = 3,
         token_cap: int = 200000,
-        run_timeout_s: int = 1200,
+        run_timeout_s: int = DEFAULT_RUN_TIMEOUT_S,
         completion_grace_s: int = 30,
         cost_limit_usd: float | None = None,
         cost_target_usd: float | None = None,

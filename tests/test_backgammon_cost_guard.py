@@ -12,6 +12,7 @@ import pytest
 import wevibe_bench.adapters.backgammon as backgammon_mod
 from wevibe_bench.adapters.backgammon import (
     DEFAULT_MAX_STEPS_PER_ATTEMPT,
+    DEFAULT_RUN_TIMEOUT_S,
     BackgammonRunner,
     _OpencodeRunStats,
 )
@@ -226,6 +227,30 @@ def test_canonical_step_cap_is_100_and_cli_default_carries_it() -> None:
         ["--run-label", "cap-override-check", "--max-steps-per-attempt", "7"]
     )
     assert args_override.max_steps_per_attempt == 7
+
+
+def test_canonical_run_timeout_is_5400_and_cli_default_carries_it() -> None:
+    # The evidence-based wall-clock guard: smoke 19d observed ~3060s on a healthy
+    # 68-turn Opus PASS; Stage-4 kimi/mimo-pro were killed at 1800s while
+    # converging; 5400 keeps headroom for slower int4/fp8 pins.
+    assert DEFAULT_RUN_TIMEOUT_S == 5400
+
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        run_backgammon = importlib.import_module("run_backgammon")
+    finally:
+        sys.path.remove(str(scripts_dir))
+
+    parser = run_backgammon._build_arg_parser()
+    args = parser.parse_args(["--run-label", "timeout-default-check"])
+    assert args.run_timeout == DEFAULT_RUN_TIMEOUT_S
+
+    # An explicit flag still overrides the canonical default.
+    args_override = parser.parse_args(
+        ["--run-label", "timeout-override-check", "--run-timeout", "900"]
+    )
+    assert args_override.run_timeout == 900
 
 
 def test_write_worker_config_no_provider_when_options_unset(tmp_path: Path) -> None:
