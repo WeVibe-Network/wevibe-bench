@@ -93,6 +93,7 @@ class ProviderProfile:
     max_output_tokens: int
     max_reasoning_tokens: int
     authorized: bool = False
+    pin_constraints: dict[str, Any] | None = None
 
     def runnable_reason(self) -> str | None:
         """Return blocking reason or ``None`` if this profile is runnable."""
@@ -140,7 +141,7 @@ def load_openrouter_upstream_key(auth_path: str = DEFAULT_OPENCODE_AUTH_PATH) ->
 
 
 def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
-    """Return the binding default profile map for glm/mimo/opus."""
+    """Return the binding default profile map for OpenRouter roster profiles."""
     return {
         "glm": ProviderProfile(
             name="glm",
@@ -160,16 +161,82 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
         "mimo": ProviderProfile(
             name="mimo",
             model_id="xiaomi/mimo-v2.5-pro",
-            provider_object={
-                "order": ["deepinfra"],
-                "only": ["deepinfra"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            },
+            provider_object=None,
             pricing=None,
             max_output_tokens=8192,
             max_reasoning_tokens=8192,
             authorized=False,
+            pin_constraints={
+                "min_max_completion_tokens": 32768,
+                "uptime_tier": "Normal",
+                "quant_preference": ["fp8"],
+                "price_sanity_per_m": {"in": 0.435, "out": 0.87},
+                "notes": "Resolve live; prefer xiaomi or atlascloud fp8 endpoints.",
+            },
+        ),
+        "mimo25": ProviderProfile(
+            name="mimo25",
+            model_id="xiaomi/mimo-v2.5",
+            provider_object=None,
+            pricing=None,
+            max_output_tokens=8192,
+            max_reasoning_tokens=8192,
+            authorized=False,
+            pin_constraints={
+                "min_max_completion_tokens": 32768,
+                "uptime_tier": "Normal",
+                "quant_preference": ["fp8"],
+                "price_sanity_per_m": {"in": 0.105, "out": 0.28},
+                "notes": "Resolve live; prefer xiaomi or atlascloud fp8 endpoints.",
+            },
+        ),
+        "hy3": ProviderProfile(
+            name="hy3",
+            model_id="tencent/hy3",
+            provider_object=None,
+            pricing=None,
+            max_output_tokens=8192,
+            max_reasoning_tokens=8192,
+            authorized=False,
+            pin_constraints={
+                "min_max_completion_tokens": 32768,
+                "uptime_tier": "Normal",
+                "quant_preference": ["bf16", "fp8"],
+                "price_sanity_per_m": {"in": 0.14, "out": 0.58},
+                "notes": "Resolve live; prefer gmicloud or deepinfra with bf16/fp8.",
+            },
+        ),
+        "kimicode": ProviderProfile(
+            name="kimicode",
+            model_id="moonshotai/kimi-k2.7-code",
+            provider_object=None,
+            pricing=None,
+            max_output_tokens=8192,
+            max_reasoning_tokens=8192,
+            authorized=False,
+            pin_constraints={
+                "min_max_completion_tokens": 32768,
+                "uptime_tier": "Normal",
+                "quant_preference": ["fp8", "int4"],
+                "price_sanity_per_m": {"in": 0.72, "out": 3.5},
+                "notes": "Resolve live; prefer siliconflow fp8 endpoints (int4 is common elsewhere).",
+            },
+        ),
+        "ring": ProviderProfile(
+            name="ring",
+            model_id="inclusionai/ring-2.6-1t",
+            provider_object=None,
+            pricing=None,
+            max_output_tokens=8192,
+            max_reasoning_tokens=8192,
+            authorized=False,
+            pin_constraints={
+                "min_max_completion_tokens": 32768,
+                "uptime_tier": "Normal",
+                "quant_preference": ["any"],
+                "price_sanity_per_m": {"in": 0.075, "out": 0.625},
+                "notes": "Floor-anchor probe candidate; quantization unconfirmed, any Normal-tier endpoint.",
+            },
         ),
         "opus": ProviderProfile(
             name="opus",

@@ -856,7 +856,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the wevibe-bench OpenRouter proxy server")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--profile", required=True, choices=("glm", "mimo", "opus"))
+    parser.add_argument(
+        "--profile",
+        required=True,
+        choices=("glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus"),
+    )
+    parser.add_argument("--provider-order", default=None)
+    parser.add_argument("--provider-quant", default=None)
     parser.add_argument("--cap-usd", type=float, required=True)
     parser.add_argument("--target-usd", type=float, default=None)
     parser.add_argument("--port", type=int, required=True)
@@ -884,6 +890,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--target-usd must be > 0 when provided")
     if args.max_output_tokens <= 0:
         parser.error("--max-output-tokens must be > 0")
+    if args.provider_quant is not None and args.provider_order is None:
+        parser.error("--provider-quant requires --provider-order")
     if args.authorize and (
         args.pricing_input is None
         or args.pricing_input <= 0
@@ -899,6 +907,35 @@ def main(argv: list[str] | None = None) -> int:
 
     profiles = DEFAULT_PROFILES()
     selected_profile = profiles[args.profile]
+    if selected_profile.provider_object is None:
+        if args.provider_order is None or not str(args.provider_order).strip():
+            parser.error(
+                f"--profile {args.profile!r} requires --provider-order because it has no hardcoded provider pin"
+            )
+
+        provider_slug = str(args.provider_order).strip()
+        provider_object: dict[str, Any] = {
+            "order": [provider_slug],
+            "only": [provider_slug],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+        if args.provider_quant is not None:
+            quant = str(args.provider_quant).strip()
+            if not quant:
+                parser.error("--provider-quant must be non-empty when provided")
+            provider_object["quantizations"] = [quant]
+
+        selected_profile = dataclasses.replace(selected_profile, provider_object=provider_object)
+        profiles[args.profile] = selected_profile
+    else:
+        if args.provider_order is not None:
+            parser.error(
+                f"--profile {args.profile!r} has a hardcoded provider pin; --provider-order is not allowed"
+            )
+        if args.provider_quant is not None:
+            parser.error("--provider-quant requires --provider-order")
+
     if args.authorize:
         pricing: dict[str, float] = {
             "input": float(args.pricing_input),
@@ -954,6 +991,7 @@ def main(argv: list[str] | None = None) -> int:
         authorized=bool(args.authorize),
         pricing_present=bool(args.authorize),
         port=int(args.port),
+        provider=selected_profile.provider_object,
         upstream_key_fp=key_fingerprint(upstream_key),
     )
 

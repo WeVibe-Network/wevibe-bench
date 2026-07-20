@@ -57,14 +57,20 @@ def _write_auth_json(tmp_path: Path, *, key: str = "sk-or-test-main") -> Path:
     return auth_path
 
 
-def _main_argv(tmp_path: Path, auth_path: Path) -> list[str]:
+def _main_argv(
+    tmp_path: Path,
+    auth_path: Path,
+    *,
+    model: str = "openrouter/z-ai/glm-5.2",
+    profile: str = "glm",
+) -> list[str]:
     return [
         "--run-id",
         "run-main-test",
         "--model",
-        "openrouter/z-ai/glm-5.2",
+        model,
         "--profile",
-        "glm",
+        profile,
         "--cap-usd",
         "12",
         "--port",
@@ -80,6 +86,11 @@ def _main_argv(tmp_path: Path, auth_path: Path) -> list[str]:
         "--auth-path",
         str(auth_path),
     ]
+
+
+def _model_selector_for_profile(profile_name: str) -> str:
+    model_id = DEFAULT_PROFILES()[profile_name].model_id
+    return f"openrouter/{model_id}"
 
 
 def _run_main_with_fake_server(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> ProxyServer:
@@ -171,6 +182,120 @@ def test_main_authorize_requires_pricing_flags(tmp_path: Path) -> None:
         proxy_server.main(_main_argv(tmp_path, auth_path) + ["--authorize"])
 
     assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize("profile_name", ("mimo", "mimo25", "hy3", "kimicode", "ring"))
+def test_main_requires_provider_order_for_unpinned_profiles(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    profile_name: str,
+) -> None:
+    auth_path = _write_auth_json(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(
+            _main_argv(
+                tmp_path,
+                auth_path,
+                model=_model_selector_for_profile(profile_name),
+                profile=profile_name,
+            )
+        )
+
+    assert excinfo.value.code == 2
+    assert "--provider-order" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("profile_name", ("glm", "opus"))
+def test_main_rejects_provider_order_for_hardcoded_profiles(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    profile_name: str,
+) -> None:
+    auth_path = _write_auth_json(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(
+            _main_argv(
+                tmp_path,
+                auth_path,
+                model=_model_selector_for_profile(profile_name),
+                profile=profile_name,
+            )
+            + ["--provider-order", "novita"]
+        )
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "hardcoded provider pin" in err
+    assert "--provider-order" in err
+
+
+def test_main_provider_quant_requires_provider_order(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    auth_path = _write_auth_json(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(_main_argv(tmp_path, auth_path) + ["--provider-quant", "fp8"])
+
+    assert excinfo.value.code == 2
+    assert "--provider-quant requires --provider-order" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "provider_slug", "provider_quant", "expected_provider"),
+    [
+        (
+            "mimo",
+            "atlascloud",
+            None,
+            {
+                "order": ["atlascloud"],
+                "only": ["atlascloud"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            },
+        ),
+        (
+            "hy3",
+            "deepinfra",
+            "bf16",
+            {
+                "order": ["deepinfra"],
+                "only": ["deepinfra"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+                "quantizations": ["bf16"],
+            },
+        ),
+    ],
+)
+def test_main_builds_runtime_provider_pin_and_logs_proxy_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    profile_name: str,
+    provider_slug: str,
+    provider_quant: str | None,
+    expected_provider: dict[str, Any],
+) -> None:
+    auth_path = _write_auth_json(tmp_path)
+    argv = _main_argv(
+        tmp_path,
+        auth_path,
+        model=_model_selector_for_profile(profile_name),
+        profile=profile_name,
+    ) + ["--provider-order", provider_slug]
+    if provider_quant is not None:
+        argv.extend(["--provider-quant", provider_quant])
+
+    proxy = _run_main_with_fake_server(monkeypatch, argv)
+
+    selected_profile = proxy.registry.get(profile_name)
+    assert selected_profile.provider_object == expected_provider
+
+    log_text = Path(proxy.logger.log_path).read_text(encoding="utf-8")
+    expected_provider_json = json.dumps(expected_provider, ensure_ascii=False, separators=(",", ":"))
+    assert "event=\"proxy_start\"" in log_text
+    assert f"provider={expected_provider_json}" in log_text
 
 
 @dataclass

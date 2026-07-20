@@ -95,25 +95,70 @@ def test_apply_policy_injects_exact_glm_provider_object() -> None:
     }
 
 
-def test_apply_policy_injects_exact_mimo_provider_without_quantizations() -> None:
+def test_default_profiles_include_roster_candidates_with_constraints() -> None:
+    profiles = DEFAULT_PROFILES()
+
+    assert set(profiles) == {"glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus"}
+    assert profiles["glm"].model_id == "z-ai/glm-5.2"
+    assert profiles["mimo"].model_id == "xiaomi/mimo-v2.5-pro"
+    assert profiles["mimo25"].model_id == "xiaomi/mimo-v2.5"
+    assert profiles["hy3"].model_id == "tencent/hy3"
+    assert profiles["kimicode"].model_id == "moonshotai/kimi-k2.7-code"
+    assert profiles["ring"].model_id == "inclusionai/ring-2.6-1t"
+    assert profiles["opus"].model_id == "anthropic/claude-opus-4.8"
+
+    expected_constraints = {
+        "mimo": {
+            "quant_preference": ["fp8"],
+            "price_sanity_per_m": {"in": 0.435, "out": 0.87},
+        },
+        "mimo25": {
+            "quant_preference": ["fp8"],
+            "price_sanity_per_m": {"in": 0.105, "out": 0.28},
+        },
+        "hy3": {
+            "quant_preference": ["bf16", "fp8"],
+            "price_sanity_per_m": {"in": 0.14, "out": 0.58},
+        },
+        "kimicode": {
+            "quant_preference": ["fp8", "int4"],
+            "price_sanity_per_m": {"in": 0.72, "out": 3.5},
+        },
+        "ring": {
+            "quant_preference": ["any"],
+            "price_sanity_per_m": {"in": 0.075, "out": 0.625},
+        },
+    }
+
+    for profile_name, expected in expected_constraints.items():
+        profile = profiles[profile_name]
+        assert profile.provider_object is None
+        assert profile.pin_constraints is not None
+        assert profile.pin_constraints["min_max_completion_tokens"] == 32768
+        assert profile.pin_constraints["uptime_tier"] == "Normal"
+        assert profile.pin_constraints["quant_preference"] == expected["quant_preference"]
+        assert profile.pin_constraints["price_sanity_per_m"] == expected["price_sanity_per_m"]
+        assert isinstance(profile.pin_constraints["notes"], str)
+        assert profile.pin_constraints["notes"]
+
+    assert profiles["glm"].pin_constraints is None
+    assert profiles["opus"].pin_constraints is None
+
+
+def test_apply_policy_rejects_unpinned_mimo_profile_with_provider_pin_missing() -> None:
     mimo = DEFAULT_PROFILES()["mimo"]
 
-    transformed = apply_policy(
-        {
-            "model": mimo.model_id,
-            "messages": [{"role": "user", "content": "hello"}],
-        },
-        mimo,
-        max_tokens_cap=1024,
-    )
+    with pytest.raises(ProfileBlockedError) as excinfo:
+        apply_policy(
+            {
+                "model": mimo.model_id,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+            mimo,
+            max_tokens_cap=1024,
+        )
 
-    assert transformed["provider"] == {
-        "order": ["deepinfra"],
-        "only": ["deepinfra"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    }
-    assert "quantizations" not in transformed["provider"]
+    assert excinfo.value.reason == "provider_pin_missing"
 
 
 def test_opus_profile_is_blocked_for_missing_pricing() -> None:
