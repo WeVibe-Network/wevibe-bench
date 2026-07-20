@@ -17,6 +17,7 @@ def _make_runner(
     *,
     run_timeout_s: int = 1200,
     completion_grace_s: int = 2,
+    max_steps_per_attempt: int | None = None,
     progress=None,
 ) -> BackgammonRunner:
     return BackgammonRunner(
@@ -25,6 +26,7 @@ def _make_runner(
         model="openrouter/anthropic/claude-opus-4.8",
         run_timeout_s=run_timeout_s,
         completion_grace_s=completion_grace_s,
+        max_steps_per_attempt=max_steps_per_attempt,
         progress=progress,
     )
 
@@ -192,4 +194,56 @@ def test_run_timeout_still_fires_when_never_stops(tmp_path: Path) -> None:
     )
 
     assert stats.killed_reason == "run_timeout"
+    assert not any("step=worker-complete" in line for line in progress_lines)
+
+
+def test_step_cap_kill_fires_past_cap(tmp_path: Path) -> None:
+    progress_lines: list[str] = []
+    runner = _make_runner(
+        tmp_path,
+        completion_grace_s=8,
+        max_steps_per_attempt=2,
+        progress=progress_lines.append,
+    )
+    script_path = _write_fake_opencode(
+        tmp_path,
+        """
+        import json
+        import time
+
+
+        def emit(payload):
+            print(json.dumps(payload), flush=True)
+
+
+        for idx in range(3):
+            emit({"type": "step_start", "sessionID": "sess-step-cap", "part": {}})
+            emit(
+                {
+                    "type": "step_finish",
+                    "sessionID": "sess-step-cap",
+                    "part": {
+                        "reason": "tool-calls",
+                        "tokens": {"input": 4, "output": 6, "reasoning": 1},
+                    },
+                }
+            )
+        time.sleep(30)
+        """,
+    )
+
+    stats, wall = _run_script(
+        runner,
+        script_path=script_path,
+        events_path=tmp_path / "step-cap.events.jsonl",
+        run_label="step-cap",
+        phase="attempt-1",
+    )
+
+    assert wall < 15
+    assert stats.killed_reason == "max_steps_per_attempt"
+    assert any(
+        "reason=max_steps_per_attempt" in line and "max_steps_per_attempt=2" in line
+        for line in progress_lines
+    )
     assert not any("step=worker-complete" in line for line in progress_lines)

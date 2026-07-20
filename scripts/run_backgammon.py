@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from wevibe_bench.adapters.backgammon import BackgammonCellResult, BackgammonRunner
+from wevibe_bench.adapters.backgammon import (
+    DEFAULT_MAX_STEPS_PER_ATTEMPT,
+    BackgammonCellResult,
+    BackgammonRunner,
+)
 from wevibe_bench.benv import load_bench_env
 from wevibe_bench.config import RunConfig
 from wevibe_bench.lifecycle.logging_util import run_logger
@@ -159,7 +163,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cost-limit", type=float, default=None)
     parser.add_argument("--cost-target", type=float, default=None)
     parser.add_argument("--max-output-tokens", type=int, default=None)
-    parser.add_argument("--max-steps-per-attempt", type=int, default=None)
+    parser.add_argument("--max-steps-per-attempt", type=int, default=DEFAULT_MAX_STEPS_PER_ATTEMPT)
     parser.add_argument("--output-price-per-1m", type=float, default=None)
     parser.add_argument("--run-timeout", type=int, default=1800)
     parser.add_argument(

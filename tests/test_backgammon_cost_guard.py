@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import wevibe_bench.adapters.backgammon as backgammon_mod
-from wevibe_bench.adapters.backgammon import BackgammonRunner, _OpencodeRunStats
+from wevibe_bench.adapters.backgammon import (
+    DEFAULT_MAX_STEPS_PER_ATTEMPT,
+    BackgammonRunner,
+    _OpencodeRunStats,
+)
 from wevibe_bench.adapters.docker_worker import DockerCellConfig, _build_run_argv
 from wevibe_bench.config import RunConfig
 
@@ -152,7 +158,7 @@ def test_cost_limit_without_output_clamp_arms_accrued_guard_only(tmp_path: Path)
         cost_limit_usd=11.0,
         cost_target_usd=10.0,
         max_output_tokens=None,
-        max_steps_per_attempt=40,
+        max_steps_per_attempt=100,
     )
 
     assert runner._reservation_usd == 0.0
@@ -193,10 +199,33 @@ def test_reservation_arms_only_with_clamp_and_step_cap(tmp_path: Path) -> None:
         model="openrouter/anthropic/claude-opus-4.8",
         cost_limit_usd=11.0,
         max_output_tokens=8192,
-        max_steps_per_attempt=40,
+        max_steps_per_attempt=100,
     )
     assert fully_armed._one_step_worst_case_usd > 0.0
     assert fully_armed._reservation_usd > fully_armed._one_step_worst_case_usd
+
+
+def test_canonical_step_cap_is_100_and_cli_default_carries_it() -> None:
+    # The evidence-based runaway-loop guard (77-turn healthy 15-07 baseline +
+    # margin; the clamp-era 40 killed smoke 19c at turn 41 UNGRADED).
+    assert DEFAULT_MAX_STEPS_PER_ATTEMPT == 100
+
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    try:
+        run_backgammon = importlib.import_module("run_backgammon")
+    finally:
+        sys.path.remove(str(scripts_dir))
+
+    parser = run_backgammon._build_arg_parser()
+    args = parser.parse_args(["--run-label", "cap-default-check"])
+    assert args.max_steps_per_attempt == DEFAULT_MAX_STEPS_PER_ATTEMPT
+
+    # An explicit flag still overrides the canonical default.
+    args_override = parser.parse_args(
+        ["--run-label", "cap-override-check", "--max-steps-per-attempt", "7"]
+    )
+    assert args_override.max_steps_per_attempt == 7
 
 
 def test_write_worker_config_no_provider_when_options_unset(tmp_path: Path) -> None:

@@ -76,6 +76,16 @@ _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
 _RESERVATION_SAFETY_FACTOR = 1.10
 _BUDGET_STOP_REASONS = {"cost_limit", "cost_reservation_refused", "max_steps_per_attempt"}
 
+# Canonical per-attempt step cap (runaway-loop guard, NOT a budget instrument).
+# Budget enforcement is the accrued usage.cost kill plus the proxy's hard-cap
+# reservation; this cap exists only to stop a fast runaway tool-call loop.
+# Evidence for 100: the healthy 15-07 un-clamped baseline used 77 turns across a
+# full run (~25-40 per attempt; 19b initial attempt = 37), while the clamp-era
+# value of 40 killed smoke 19c at turn 41 mid-work, UNGRADED. 100 = baseline +
+# margin. Programmatic `max_steps_per_attempt=None` still means "no cap"; the
+# CLI driver defaults to this constant.
+DEFAULT_MAX_STEPS_PER_ATTEMPT = 100
+
 
 @dataclass(frozen=True)
 class _OpencodeRunStats:
