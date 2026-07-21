@@ -325,6 +325,11 @@ def apply_policy(client_body: dict[str, Any], profile: ProviderProfile, max_toke
         if profile.provider_object is None:
             raise ProfileBlockedError("provider_pin_missing")
         body["provider"] = copy.deepcopy(profile.provider_object)
+    elif profile.upstream == "opencode":
+        # Zen API accepts BARE model ids only ("big-pickle"); "opencode/<id>" is
+        # the OpenCode-config selector form and is rejected upstream with
+        # 401 "Model opencode/big-pickle is not supported" (verified 2026-07-21).
+        body["model"] = profile.model_id.removeprefix("opencode/")
 
     client_value = body.get("max_tokens")
     if isinstance(client_value, int) and client_value > 0:

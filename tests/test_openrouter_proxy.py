@@ -207,6 +207,38 @@ def test_apply_policy_for_zen_profile_skips_provider_injection() -> None:
     assert transformed["max_tokens"] == 2048
 
 
+def test_apply_policy_rewrites_zen_model_to_bare_id() -> None:
+    # Zen rejects the "opencode/<id>" selector form upstream (401 "not supported");
+    # the upstream body must carry the bare Zen model id (verified 2026-07-21).
+    bigpickle = DEFAULT_PROFILES()["bigpickle"]
+
+    transformed = apply_policy(
+        {
+            "model": "opencode/big-pickle",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        bigpickle,
+        max_tokens_cap=1024,
+    )
+
+    assert transformed["model"] == "big-pickle"
+
+
+def test_apply_policy_keeps_openrouter_model_selector_unchanged() -> None:
+    glm = DEFAULT_PROFILES()["glm"]
+
+    transformed = apply_policy(
+        {
+            "model": glm.model_id,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        glm,
+        max_tokens_cap=1024,
+    )
+
+    assert transformed["model"] == glm.model_id
+
+
 def test_apply_policy_rejects_unpinned_mimo_profile_with_provider_pin_missing() -> None:
     mimo = DEFAULT_PROFILES()["mimo"]
 

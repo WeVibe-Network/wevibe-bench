@@ -618,6 +618,11 @@ class ProxyServer:
             upstream_headers = {
                 "Authorization": f"Bearer {self.upstream_key}",
                 "Content-Type": "application/json",
+                # Cloudflare in front of opencode.ai bans urllib's default
+                # "Python-urllib/x.y" UA signature (error 1010 -> HTTP 403,
+                # verified 2026-07-21); any explicit UA passes. Harmless for
+                # OpenRouter, required for Zen — one path (R-13).
+                "User-Agent": "wevibe-bench-proxy/1.0",
             }
             for header_name in ("HTTP-Referer", "X-Title"):
                 header_value = handler.headers.get(header_name)

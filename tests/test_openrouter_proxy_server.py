@@ -1151,6 +1151,10 @@ def test_upstream_target_is_opencode_zen_for_bigpickle(tmp_path: Path) -> None:
     assert len(fake.calls) == 1
     assert fake.calls[0].url == OPENCODE_ZEN_UPSTREAM_URL
     assert "provider" not in fake.calls[0].body_json
+    # Zen requires the bare model id upstream (401 on "opencode/<id>", verified 2026-07-21).
+    assert fake.calls[0].body_json["model"] == "big-pickle"
+    # Cloudflare bans urllib's default UA signature (error 1010 -> 403); explicit UA required.
+    assert fake.calls[0].headers["User-Agent"] == "wevibe-bench-proxy/1.0"
 
 
 def test_logfile_contains_fingerprints_and_status_without_secrets_or_prompt(tmp_path: Path) -> None:
