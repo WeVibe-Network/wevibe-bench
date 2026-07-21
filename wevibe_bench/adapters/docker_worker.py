@@ -380,6 +380,13 @@ def _build_run_argv(
         )
 
     if memory_mode == "on":
+        host_token = Path("~/.wevibe/mcp-session-token").expanduser()
+        if not host_token.is_file():
+            raise FileNotFoundError(
+                "memory_mode='on' requires host token ~/.wevibe/mcp-session-token; "
+                "start the wevibe-mcp clone or run bench preflight to mint it"
+            )
+
         run_cmd.extend(
             [
                 "-e",
@@ -388,6 +395,10 @@ def _build_run_argv(
                 f"WEVIBE_RECALL_MODE={config.recall_mode}",
                 "-e",
                 f"WEVIBE_HUB_URL={config.hub_url}",
+                # Vendored wevibe plugin hardcodes ~/.wevibe/mcp-session-token and
+                # the clone API is bearer-gated; mount that token only, read-only.
+                "-v",
+                f"{host_token}:{config.home_dir}/.wevibe/mcp-session-token:ro",
             ]
         )
 

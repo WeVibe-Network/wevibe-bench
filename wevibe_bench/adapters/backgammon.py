@@ -386,6 +386,7 @@ class BackgammonRunner(AgentRunner):
                 f"PROGRESS run_label={run_label} step=worker-isolation isolation=docker "
                 f"image={WORKER_IMAGE} memory_mode={self.memory_mode} container={container_name}"
             )
+            self._init_worktree_git(worktree=worktree)
             cell_config = DockerCellConfig(
                 worktree=worktree,
                 memory_mode=self.memory_mode,
@@ -742,6 +743,42 @@ class BackgammonRunner(AgentRunner):
             "PROGRESS step=worker-permission-config external_directory=deny "
             "oracle_bash_deny=active skip_permissions_removed=true"
         )
+
+    def _init_worktree_git(self, *, worktree: Path) -> None:
+        # opencode resolves the session worktree by walking up from --dir /work
+        # looking for .git; with no .git at/above the bind-mount root it falls
+        # back to "/", so the wevibe plugin reads /.wevibe/org.json (absent)
+        # and the session stays DORMANT. git-init the seeded worktree so the
+        # plugin resolves worktree=/work and reads /work/.wevibe/org.json.
+        subprocess.run(
+            ["git", "init"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "bench@wevibe.local"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "wevibe-bench"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "bench cell seed"],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self._progress(f"PROGRESS step=worktree-git-init path={worktree}")
 
     def _prepare_memory_mode(self, *, worktree: Path) -> bool:
 

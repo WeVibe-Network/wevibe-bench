@@ -331,7 +331,30 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(tmp_pa
             assert forbidden not in on_env
 
         mounts_on = _inspect_mounts(on_cell.container_name)
-        _assert_mounts_are_only_worktree(mounts_on, worktree_on)
+        assert mounts_on, "container must expose at least one mount"
+        token_destination = "/home/worker/.wevibe/mcp-session-token"
+        destinations_on = {str(mount.get("Destination", "")) for mount in mounts_on}
+        assert destinations_on == {"/work", token_destination}
+
+        expected_worktree_source = os.path.realpath(str(worktree_on.resolve()))
+        expected_token_source = os.path.realpath(str(Path("~/.wevibe/mcp-session-token").expanduser()))
+        source_paths_on = {
+            os.path.realpath(str(Path(str(mount.get("Source", ""))).resolve()))
+            for mount in mounts_on
+            if mount.get("Source")
+        }
+        assert source_paths_on == {expected_worktree_source, expected_token_source}
+        assert os.path.realpath(str(HOST_GOLDEN_PATH)) not in source_paths_on
+
+        token_mount = next(
+            mount for mount in mounts_on if str(mount.get("Destination", "")) == token_destination
+        )
+        assert os.path.realpath(str(Path(str(token_mount.get("Source", ""))).resolve())) == expected_token_source
+        if "RW" in token_mount:
+            assert token_mount["RW"] is False
+        if "Mode" in token_mount and token_mount["Mode"] is not None:
+            assert "ro" in str(token_mount["Mode"])
+
         for mount in mounts_on:
             source_text = str(mount.get("Source", "")).lower()
             assert "keystore" not in source_text
@@ -512,6 +535,26 @@ def test_run_argv_makes_home_and_tmp_writable_tmpfs_mode_1777() -> None:
     assert "--read-only" in argv
     # A bare (non-writable) tmpfs for HOME must NOT be present.
     assert not _contains_pair(argv, "--tmpfs", cfg.home_dir)
+
+
+def test_run_argv_memory_mode_on_requires_host_token_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    cfg = DockerCellConfig(
+        worktree=tmp_path / "argv-memory-on-check",
+        memory_mode="on",
+        container_name="wevibe-bench-cell-memory-on-check",
+        proxy_base_url=TEST_PROXY_BASE_URL,
+        proxy_token=TEST_PROXY_TOKEN,
+    )
+
+    with pytest.raises(FileNotFoundError, match=r"~/.wevibe/mcp-session-token"):
+        _build_run_argv(config=cfg, worktree=cfg.worktree, uid=501, gid=20, memory_mode="on")
 
 
 def test_run_argv_redirects_xdg_state_into_writable_home_and_keeps_baked_config() -> None:
