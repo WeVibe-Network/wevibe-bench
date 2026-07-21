@@ -81,7 +81,7 @@ Walter-gated ON smoke (not yet run).
 Validation contract remains: **spike OFF cell → ON smoke → cutover → full ladder**.
 
 Current state: OFF isolation spike and cutover are implemented; live ON smoke is intentionally deferred (Walter-gated);
-full/scored ladder is blocked pending explicit Walter roster confirmation.
+the old "full/scored ladder blocked pending roster confirmation" line is superseded by Walter GO 21-07-26 (Stage-7 execution + crash recovery now tracked in `docs/BENCHMARK-STATE.md`).
 
 ## 8. One-path rule (R-13)
 Docker is the ONLY worker path. If Docker is unavailable, the adapter raises a clear error and stops (no silent

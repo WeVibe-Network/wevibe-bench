@@ -66,6 +66,22 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
 - Checkpoint/resume path: `runs/backgammon-scored-ladder/scored-ladder-checkpoint.json`; caps enforced via `wevibe_bench.stage_ledger`
   (Stage-7 $40, global $115).
 
+### 2B. Stage-7 crash recovery (Option B, 21-07-26)
+- Walter GO (21-07-26) authorized the full Stage-7 scored ladder (superseding the prior passability-first gate).
+  Run `20260721T195407Z` then crashed 34 minutes in after Cell 1 completed as a valid 3-attempt capability FAIL and
+  self-extraction committed one org-0 memory (`cid 547b5c0b711fcbdfa8fc7cd8055d30e640a116a062ea2815804d4ef7aed947fd`, delivery YES).
+  Crash cause: `scripts/backgammon_scored_ladder.py` cast `int("FAIL")` on the all-attempts-fail path (harness defect in `67052cd`);
+  no scored-ladder checkpoint was written before crash assembly, and Cells 2–5 never started.
+- Pinned continuation command (verbatim): `PYTHONPATH=. python3 scripts/backgammon_scored_ladder.py --rung-params runs/qualification/stage7-rung-params.json --import-cell runs/backgammon-scored-ladder/cell1-recovery-20260721T195407Z.json --start-cell 2 --resume`
+- `--import-cell` is a machine-validated recovery contract: it validates digests/run-ID/manifest/model/roster plus live presence
+  of the preserved Cell-1 memory in the pool, imports Cell 1 with `imported: true` provenance, and refuses drift/tampering;
+  this continues from Cell 2 with no rerun/rebill of Cell 1 (`--dry-run` appends a zero-cost validation pass that skips the live pool probe).
+- Disclosure: the final Stage-7 benchmark spans harness commits (`67052cd` crash run → post-crash patch commit); Walter explicitly
+  accepted this continuity model for Option B.
+- Spend disclosure: Stage-7 = `$7.54 / $40` = `$6.17` (completed Cell 1) + `$1.37` (crash-adjacent committed-unproven residue,
+  unattributed; never reassigned to another cell). Global ≈ `$19.62 / $115`.
+- Detail: `wevibe-meta/workspace/reports/21-07-26-1315-stage7-ladder-crash-fail-stats.md`.
+
 ## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
 - Plugin re-injects ALL approved memories EVERY turn + across compaction (`wevibe-plugin.ts:1349` transform →
   `:1412-1447` inject-all-eligible → `:1503` compaction). Per-session dedup gates ATTRIBUTION only, not injection.
@@ -146,6 +162,7 @@ verbose output, not injection volume. "all-11=bloat" UNSUPPORTED. mgr-verified v
   proven to pass all conformance+backend+frontend gates from a clean export.
 - **Exact passability gate (LOCKED):**
   > "Before the conditional GLM-5.2/MiMo-V2.5-Pro roster unlocks, Opus-4.8 at HIGH reasoning must pass ONE clean recall-OFF Docker smoke of the repaired benchmark under a genuinely hard cumulative paid ceiling of $12 (operational target lower). PASS = conformed + all host-oracle gates green + cheat-clean, from a clean checkout, before another paid smoke."
+- **Superseded 21-07-26:** Walter GO authorized Stage-7 scored roster execution without waiting for this passability gate; active path is §2B.
 
 ## 7. NEXT BUILD STEP (the plan)
 **Docker Architecture A is IMPLEMENTED** — `wevibe-bench-worker:v1` image, Docker layer module
@@ -155,21 +172,19 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - Current status: the Opus-4.8 HIGH passability smoke already ran on 15-07 and FAILED at $11.8035 on four
   now-repaired gates under problems-only feedback (report `15-07-26-1019-opus48-high-passability-smoke.md`), which
   motivated Option A (§6A).
-- Next unlock requirement: the repaired instrument now needs a fresh clean Opus-4.8 HIGH recall-OFF Docker
-  passability smoke PASS (exact gate in §6A) before any scored roster work can proceed.
+- **Superseded gate (historical):** the §6A Opus passability-PASS unlock requirement was superseded by Walter's
+  21-07-26 Stage-7 GO; scored execution started, then entered Option-B recovery (§2B).
 - **Then Tier-2** (separate): to show lift on STRONG models, introduce novel/non-pre-trainable rule twists that
   ONLY the memories reveal — else lift only shows on weak models + obscure integration traps (by design).
 
 ## 8. OPEN DECISIONS / FORKS
-- **Roster remains BLOCKED-BY-PASSABILITY:** before any scored roster/full ladder, the repaired benchmark must first
-  clear a fresh clean Opus-4.8 HIGH recall-OFF Docker passability smoke PASS under the hard $12 ceiling (§6A);
-  Walter roster confirmation is still required after that.
+- **Superseded 21-07-26:** the prior BLOCKED-BY-PASSABILITY gate is closed by Walter GO; Stage-7 scored roster
+  execution is authorized and currently in Option-B recovery (§2B).
 - **Provider-routing mechanism status:** the prior "harness provider-routing UNPROVEN" gap is now closed by the
   host-side proxy enforcement path (policy injection + persistent budget ledger). This closure does NOT authorize
   scored runs by itself.
-- **Opus provider-pin DECISION GATE (OPEN):** Opus paid smoke remains BLOCKED until Walter supplies an explicit
-  OpenRouter provider pin for Opus and one live verification run is executed. The proxy policy already requires
-  this field; current Opus profile is `provider_object=None` and therefore blocked.
+- **Opus provider-pin gate resolved-by-execution (21-07-26):** Stage-7 run `20260721T195407Z` executed with
+  proxy-injected Opus provider pin (`only:["anthropic"]`), so this prior OPEN gate is stale for Stage-7 continuation.
 - The prior Opus-4.8 HIGH passability smoke already ran (15-07) and failed on four now-repaired gates, motivating
   Option A (`15-07-26-1019-opus48-high-passability-smoke.md`).
 - Finish minimax rung 13-14? Low marginal value; needs extractor override (confounds self-extraction) or skip-flag.
@@ -179,7 +194,8 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
-- qdrant org-0 pool = **0 memories** (`org-0` wiped 15-07; corpus must remain 0 until an authorized run).
+- qdrant `org_wevibe-org-0_memories` = **1 preserved memory** from Stage-7 Cell 1 self-extraction
+  (`cid 547b5c0b711fcbdfa8fc7cd8055d30e640a116a062ea2815804d4ef7aed947fd`; preserved, not wiped).
 - :4550 clone was left running (pid changes across restarts — re-check). hub :4440, chain, qdrant :6333 up from
   the 14-07 clean wipe. Ollama :11434 (nomic-embed-text:v1.5) — MUST stay up for recall+dedup embeddings.
 - Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).

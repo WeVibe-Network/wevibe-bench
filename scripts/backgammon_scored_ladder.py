@@ -22,6 +22,7 @@ Per cell this driver owns:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,9 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +46,7 @@ from wevibe_bench.config import (
     backgammon_ladder_roster_fingerprint,
     backgammon_scored_ladder_roster,
 )
+from wevibe_bench.lifecycle import qdrant_probe
 
 
 STAGE_NUMBER = 7
@@ -79,6 +84,34 @@ OPTIONAL_RUNG_PARAM_FIELDS = (
     "expected_upstream_model",
 )
 
+IMPORT_SCHEMA_VERSION = 1
+QDRANT_DEFAULT_URL = "http://127.0.0.1:6333"
+_IMPORT_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_IMPORT_RUN_ID_SUFFIX_RE = re.compile(r"^\d{8}T\d{6}Z$")
+_IMPORT_REQUIRED_FIELDS = {
+    "schema_version",
+    "run_number",
+    "run_id",
+    "scorecard_path",
+    "detail_path",
+    "cell_log_path",
+    "proxy_log_path",
+    "proxy_checkpoint_path",
+    "scorecard_sha256",
+    "detail_sha256",
+    "memory",
+    "accrued_usd",
+    "committed_unproven_usd",
+    "note",
+}
+_IMPORT_MEMORY_REQUIRED_FIELDS = {
+    "org_id",
+    "submission_hash",
+    "memory_fp",
+    "approve_status",
+    "delivery",
+}
+
 
 class LadderAbort(RuntimeError):
     """Raised to abort the ladder with a structured escalation payload."""
@@ -87,6 +120,14 @@ class LadderAbort(RuntimeError):
         super().__init__(reason)
         self.reason = reason
         self.detail = dict(detail or {})
+
+
+class CellRunUnexpectedError(RuntimeError):
+    """Raised when a per-cell run crashes unexpectedly after starting execution."""
+
+    def __init__(self, message: str, entry: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.entry = dict(entry)
 
 
 def _utc_iso() -> str:
@@ -375,6 +416,445 @@ def _upsert_entry(checkpoint: dict[str, Any], entry: dict[str, Any]) -> None:
     cells.append(entry)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_import_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = _repo_root() / path
+    return path.resolve()
+
+
+def _require_object(name: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{name} must be a JSON object")
+    return value
+
+
+def _require_exact_fields(name: str, payload: dict[str, Any], required: set[str]) -> None:
+    keys = set(payload)
+    missing = sorted(required - keys)
+    unknown = sorted(keys - required)
+    if missing or unknown:
+        bits: list[str] = []
+        if missing:
+            bits.append(f"missing={missing}")
+        if unknown:
+            bits.append(f"unknown={unknown}")
+        raise RuntimeError(f"{name} has invalid fields ({'; '.join(bits)})")
+
+
+def _require_nonempty_string(name: str, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"{name} must be a non-empty string")
+    return value
+
+
+def _require_number(name: str, value: Any) -> float:
+    if isinstance(value, bool):
+        raise RuntimeError(f"{name} must be numeric")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be numeric") from exc
+
+
+def _require_digest(name: str, value: Any) -> str:
+    raw = _require_nonempty_string(name, value).strip()
+    if not _IMPORT_DIGEST_RE.fullmatch(raw):
+        raise RuntimeError(f"{name} must be 64 hex characters")
+    return raw.lower()
+
+
+def _load_import_cell_payload(path: Path) -> dict[str, Any]:
+    payload = _load_json(path)
+    if payload is None:
+        raise RuntimeError(f"import cell file not found: {path}")
+    _require_exact_fields("import-cell", payload, _IMPORT_REQUIRED_FIELDS)
+
+    schema_version_raw = payload.get("schema_version")
+    if isinstance(schema_version_raw, bool):
+        raise RuntimeError("import-cell schema_version must be integer 1")
+    try:
+        schema_version = int(schema_version_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("import-cell schema_version must be integer 1") from exc
+    if schema_version != IMPORT_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"import-cell schema_version must be {IMPORT_SCHEMA_VERSION}; got {schema_version}"
+        )
+
+    run_number_raw = payload.get("run_number")
+    if isinstance(run_number_raw, bool):
+        raise RuntimeError("import-cell run_number must be an integer >= 1")
+    try:
+        run_number = int(run_number_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("import-cell run_number must be an integer >= 1") from exc
+    if run_number < 1:
+        raise RuntimeError("import-cell run_number must be an integer >= 1")
+
+    memory = _require_object("import-cell.memory", payload.get("memory"))
+    _require_exact_fields("import-cell.memory", memory, _IMPORT_MEMORY_REQUIRED_FIELDS)
+
+    normalized = dict(payload)
+    normalized["schema_version"] = schema_version
+    normalized["run_number"] = run_number
+    normalized["run_id"] = _require_nonempty_string("import-cell.run_id", payload.get("run_id")).strip()
+    normalized["scorecard_path"] = _require_nonempty_string(
+        "import-cell.scorecard_path", payload.get("scorecard_path")
+    )
+    normalized["detail_path"] = _require_nonempty_string(
+        "import-cell.detail_path", payload.get("detail_path")
+    )
+    normalized["cell_log_path"] = _require_nonempty_string(
+        "import-cell.cell_log_path", payload.get("cell_log_path")
+    )
+    normalized["proxy_log_path"] = _require_nonempty_string(
+        "import-cell.proxy_log_path", payload.get("proxy_log_path")
+    )
+    normalized["proxy_checkpoint_path"] = _require_nonempty_string(
+        "import-cell.proxy_checkpoint_path", payload.get("proxy_checkpoint_path")
+    )
+    normalized["scorecard_sha256"] = _require_digest(
+        "import-cell.scorecard_sha256", payload.get("scorecard_sha256")
+    )
+    normalized["detail_sha256"] = _require_digest(
+        "import-cell.detail_sha256", payload.get("detail_sha256")
+    )
+    normalized["accrued_usd"] = _require_number("import-cell.accrued_usd", payload.get("accrued_usd"))
+    normalized["committed_unproven_usd"] = _require_number(
+        "import-cell.committed_unproven_usd", payload.get("committed_unproven_usd")
+    )
+    normalized["note"] = _require_nonempty_string("import-cell.note", payload.get("note"))
+
+    normalized_memory = dict(memory)
+    normalized_memory["org_id"] = _require_nonempty_string(
+        "import-cell.memory.org_id", memory.get("org_id")
+    ).strip()
+    normalized_memory["submission_hash"] = _require_digest(
+        "import-cell.memory.submission_hash", memory.get("submission_hash")
+    )
+    normalized_memory["memory_fp"] = _require_nonempty_string(
+        "import-cell.memory.memory_fp", memory.get("memory_fp")
+    ).strip()
+    normalized_memory["approve_status"] = _require_nonempty_string(
+        "import-cell.memory.approve_status", memory.get("approve_status")
+    ).strip()
+    normalized_memory["delivery"] = _require_nonempty_string(
+        "import-cell.memory.delivery", memory.get("delivery")
+    ).strip()
+    normalized["memory"] = normalized_memory
+    return normalized
+
+
+def _probe_pool_memory(org_id: str, submission_hash: str) -> dict[str, Any]:
+    collection = f"org_{org_id}_memories"
+    qdrant_url = (
+        os.environ.get("WEVIBE_BENCH_QDRANT_URL", QDRANT_DEFAULT_URL).strip() or QDRANT_DEFAULT_URL
+    )
+    encoded_collection = urllib.parse.quote(collection, safe="")
+    url = f"{qdrant_url.rstrip('/')}/collections/{encoded_collection}/points/scroll"
+    body = {
+        "filter": {"must": [{"key": "cid", "match": {"value": submission_hash}}]},
+        "limit": 1,
+        "with_payload": True,
+        "with_vectors": False,
+    }
+    request = urllib.request.Request(
+        url=url,
+        data=json.dumps(body).encode("utf-8"),
+        method="POST",
+    )
+    request.add_header("Content-Type", "application/json")
+    api_key = qdrant_probe._qdrant_api_key()
+    if api_key:
+        request.add_header("api-key", api_key)
+
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            status = int(response.getcode() or 0)
+            payload_bytes = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except OSError:
+            detail = ""
+        raise RuntimeError(
+            f"qdrant pool probe failed status={exc.code} collection={collection} detail={detail}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"qdrant pool probe unreachable for collection={collection} url={url}"
+        ) from exc
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"qdrant pool probe returned invalid JSON for collection={collection}") from exc
+
+    if status != 200 or not isinstance(payload, dict):
+        raise RuntimeError(
+            f"qdrant pool probe bad response status={status} collection={collection} payload={payload}"
+        )
+
+    result = payload.get("result") if isinstance(payload, dict) else None
+    points = result.get("points") if isinstance(result, dict) else None
+    if not isinstance(points, list):
+        raise RuntimeError(
+            f"qdrant pool probe missing points array collection={collection} payload={payload}"
+        )
+    if not points:
+        return {"collection": collection, "found": False, "cid": None}
+
+    point = points[0] if isinstance(points[0], dict) else {}
+    point_payload = point.get("payload") if isinstance(point, dict) else None
+    cid = point_payload.get("cid") if isinstance(point_payload, dict) else None
+    return {
+        "collection": collection,
+        "found": True,
+        "cid": str(cid) if cid is not None else None,
+    }
+
+
+def _build_import_entry(
+    *,
+    import_source: Path,
+    checkpoint: dict[str, Any],
+    plan: list[dict[str, Any]],
+    manifest: dict[str, Any],
+    dry_run: bool,
+    trace: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = _load_import_cell_payload(import_source)
+    run_number = int(payload["run_number"])
+    run_id = str(payload["run_id"])
+
+    plan_cell = next((c for c in plan if int(c["run_number"]) == run_number), None)
+    if plan_cell is None:
+        raise RuntimeError(f"import-cell run_number {run_number} is not in the current ladder plan")
+
+    for existing in _checkpoint_cells(checkpoint):
+        if int(existing.get("run_number", -1)) == run_number:
+            raise RuntimeError(f"import-cell refused: checkpoint already has run_number={run_number}")
+
+    allocation = manifest.get("cell_allocation")
+    if not isinstance(allocation, list):
+        raise RuntimeError("frozen manifest missing cell_allocation for import validation")
+    manifest_cell = next(
+        (
+            cell
+            for cell in allocation
+            if isinstance(cell, dict) and int(cell.get("run_number", -1)) == run_number
+        ),
+        None,
+    )
+    if manifest_cell is None:
+        raise RuntimeError(
+            f"import-cell run_number {run_number} not found in frozen manifest cell_allocation"
+        )
+
+    for key in ("model", "memory_mode", "phase", "role", "rung_index"):
+        if str(manifest_cell.get(key)) != str(plan_cell.get(key)):
+            raise RuntimeError(
+                "frozen manifest cell allocation drifted from plan for run_number "
+                f"{run_number} on field {key!r}"
+            )
+
+    expected_model = str(manifest_cell["model"])
+    expected_memory_mode = str(manifest_cell["memory_mode"])
+    expected_phase = str(manifest_cell["phase"])
+    expected_role = str(manifest_cell["role"])
+    expected_rung_index = int(manifest_cell["rung_index"])
+    expected_run_label = f"stage7-run{run_number}-{_slugify_model(expected_model)}"
+    expected_prefix = f"{expected_run_label}-"
+    if not run_id.startswith(expected_prefix):
+        raise RuntimeError(
+            f"import-cell run_id mismatch: expected prefix {expected_prefix!r}, got {run_id!r}"
+        )
+    suffix = run_id[len(expected_prefix) :]
+    if not _IMPORT_RUN_ID_SUFFIX_RE.fullmatch(suffix):
+        raise RuntimeError(
+            f"import-cell run_id timestamp suffix must be YYYYMMDDTHHMMSSZ; got {suffix!r}"
+        )
+
+    scorecard_path = _resolve_import_path(str(payload["scorecard_path"]))
+    detail_path = _resolve_import_path(str(payload["detail_path"]))
+    cell_log_path = _resolve_import_path(str(payload["cell_log_path"]))
+    proxy_log_path = _resolve_import_path(str(payload["proxy_log_path"]))
+    proxy_checkpoint_path = _resolve_import_path(str(payload["proxy_checkpoint_path"]))
+    for name, artifact_path in (
+        ("scorecard_path", scorecard_path),
+        ("detail_path", detail_path),
+        ("cell_log_path", cell_log_path),
+        ("proxy_log_path", proxy_log_path),
+        ("proxy_checkpoint_path", proxy_checkpoint_path),
+    ):
+        if not artifact_path.is_file():
+            raise RuntimeError(f"import-cell {name} is not a file: {artifact_path}")
+
+    scorecard_digest = _sha256_file(scorecard_path)
+    detail_digest = _sha256_file(detail_path)
+    if scorecard_digest != str(payload["scorecard_sha256"]):
+        raise RuntimeError(
+            "import-cell scorecard digest mismatch: "
+            f"expected {payload['scorecard_sha256']}, got {scorecard_digest}"
+        )
+    if detail_digest != str(payload["detail_sha256"]):
+        raise RuntimeError(
+            f"import-cell detail digest mismatch: expected {payload['detail_sha256']}, got {detail_digest}"
+        )
+
+    scorecard = _load_json(scorecard_path)
+    detail = _load_json(detail_path)
+    if scorecard is None or detail is None:
+        raise RuntimeError("import-cell scorecard/detail artifacts could not be loaded")
+
+    scorecard_cells = scorecard.get("cells")
+    detail_cells = detail.get("cells")
+    if not isinstance(scorecard_cells, list) or len(scorecard_cells) != 1:
+        raise RuntimeError("import-cell scorecard must contain exactly one cell")
+    if not isinstance(detail_cells, list) or len(detail_cells) != 1:
+        raise RuntimeError("import-cell detail must contain exactly one cell")
+    scorecard_cell = _require_object("import-cell.scorecard.cells[0]", scorecard_cells[0])
+    detail_cell = _require_object("import-cell.detail.cells[0]", detail_cells[0])
+
+    scorecard_model = str(scorecard_cell.get("model") or "")
+    if scorecard_model != expected_model:
+        raise RuntimeError(
+            f"import-cell scorecard model mismatch: expected {expected_model!r}, got {scorecard_model!r}"
+        )
+
+    condition = str(scorecard_cell.get("condition") or "").strip().lower()
+    condition_map = {"off": "off", "on": "on"}
+    scorecard_memory_mode = condition_map.get(condition)
+    if scorecard_memory_mode != expected_memory_mode:
+        raise RuntimeError(
+            "import-cell memory mode mismatch: "
+            f"expected {expected_memory_mode!r}, scorecard condition={condition!r}"
+        )
+
+    detail_memory_mode = str(detail_cell.get("memory_mode") or "").strip().lower()
+    if detail_memory_mode != expected_memory_mode:
+        raise RuntimeError(
+            "import-cell detail memory_mode mismatch: "
+            f"expected {expected_memory_mode!r}, got {detail_memory_mode!r}"
+        )
+
+    scorecard_manifest = _require_object("import-cell.scorecard.manifest", scorecard.get("manifest"))
+    scorecard_config = _require_object("import-cell.scorecard.manifest.config", scorecard_manifest.get("config"))
+    config_run_label = str(scorecard_config.get("run_label") or "")
+    if config_run_label != expected_run_label:
+        raise RuntimeError(
+            "import-cell scorecard run_label mismatch: "
+            f"expected {expected_run_label!r}, got {config_run_label!r}"
+        )
+
+    model_ladder = scorecard_config.get("model_ladder")
+    if not isinstance(model_ladder, list) or [str(v) for v in model_ladder] != [expected_model]:
+        raise RuntimeError(
+            "import-cell scorecard manifest.config.model_ladder mismatch: "
+            f"expected [{expected_model!r}], got {model_ladder!r}"
+        )
+
+    stats = _extract_stats(scorecard, detail)
+
+    proxy_log_text = _read_text_or_empty(proxy_log_path)
+    cell_log_text = _read_text_or_empty(cell_log_path)
+
+    assertions: dict[str, Any] = {}
+    rung_params = manifest.get("rung_params") if isinstance(manifest.get("rung_params"), dict) else {}
+    expected_upstream = None
+    if isinstance(rung_params, dict):
+        model_params = rung_params.get(expected_model)
+        if isinstance(model_params, dict) and model_params.get("expected_upstream_model"):
+            expected_upstream = str(model_params["expected_upstream_model"])
+    if expected_upstream:
+        assertions["identity"] = _scan_identity(proxy_log_text, expected_upstream)
+    if expected_memory_mode == "on":
+        assertions["delivery"] = _scan_delivery(proxy_log_text, cell_log_text)
+
+    anomalies = _detect_anomalies(proxy_log_text, cell_log_text, stats)
+
+    memory = _require_object("import-cell.memory", payload.get("memory"))
+    org_id = str(memory["org_id"])
+    submission_hash = str(memory["submission_hash"])
+    probe_mode = "live"
+    probe_result: dict[str, Any]
+    if dry_run:
+        probe_mode = "skipped_dry_run"
+        probe_result = {
+            "collection": f"org_{org_id}_memories",
+            "found": None,
+            "cid": None,
+        }
+    else:
+        probe_result = _probe_pool_memory(org_id, submission_hash)
+        if not probe_result.get("found"):
+            raise RuntimeError(
+                "import-cell pool probe missing preserved memory: "
+                f"collection={probe_result.get('collection')} submission_hash={submission_hash}"
+            )
+        observed_cid = str(probe_result.get("cid") or "")
+        if observed_cid != submission_hash:
+            raise RuntimeError(
+                "import-cell pool probe cid mismatch: "
+                f"expected {submission_hash}, got {observed_cid}"
+            )
+
+    entry = {
+        "rung_index": expected_rung_index,
+        "model": expected_model,
+        "run_number": run_number,
+        "rep": 1,
+        "phase": CELL_PHASE,
+        "memory_mode": expected_memory_mode,
+        "role": expected_role,
+        "status": "ok",
+        "run_id": run_id,
+        "run_label": expected_run_label,
+        "dur_s": round(float(stats.get("wall_seconds") or 0.0), 3),
+        "scorecard": str(scorecard_path),
+        "detail": str(detail_path),
+        "cell_log": str(cell_log_path),
+        "proxy_log": str(proxy_log_path),
+        "proxy_checkpoint": str(proxy_checkpoint_path),
+        "accrued_usd": payload["accrued_usd"],
+        "committed_unproven_usd": payload["committed_unproven_usd"],
+        "stats": stats,
+        "anomalies": anomalies,
+        "assertions": assertions,
+        "completed_at": _utc_iso(),
+        "trace": trace,
+        "imported": True,
+        "import_source": str(import_source),
+        "import_digests": {
+            "scorecard_sha256": scorecard_digest,
+            "detail_sha256": detail_digest,
+        },
+        "import_note": str(payload["note"]),
+    }
+    context = {
+        "run_number": run_number,
+        "run_id": run_id,
+        "phase": expected_phase,
+        "probe_mode": probe_mode,
+        "probe_collection": str(probe_result.get("collection") or ""),
+        "probe_found": probe_result.get("found"),
+        "scorecard": str(scorecard_path),
+        "detail": str(detail_path),
+        "proxy_log": str(proxy_log_path),
+    }
+    return entry, context
+
+
 # ---------------------------------------------------------------------------
 # Artifacts / stats
 
@@ -392,6 +872,30 @@ def _newest_artifact(ladder_runs_dir: Path, run_label: str, suffix: str, not_bef
             {"pattern": str(ladder_runs_dir / pattern), "not_before": not_before},
         )
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _attempts_numeric(value: Any) -> int | None:
+    """Return integer attempts when representable; sentinels/non-numeric map to None."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            try:
+                numeric = float(stripped)
+            except ValueError:
+                return None
+            return int(numeric) if numeric.is_integer() else None
+    return None
 
 
 def _extract_stats(scorecard: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
@@ -419,9 +923,7 @@ def _extract_stats(scorecard: dict[str, Any], detail: dict[str, Any]) -> dict[st
         "verdict": "PASS" if bool(sc.get("resolved")) else "FAIL",
         "scored": bool(sc.get("scored")),
         "conformed": bool(dc.get("conformed")),
-        "attempts_to_green": (
-            int(dc["attempts_to_green"]) if dc.get("attempts_to_green") is not None else None
-        ),
+        "attempts_to_green": dc.get("attempts_to_green"),
         "failed_gates": [str(g) for g in failed_gates],
         "max_attempts": max_attempts if max_attempts is not None else MAX_ATTEMPTS,
         "total_tokens": float(sc.get("total_tokens") or 0.0),
@@ -482,8 +984,9 @@ def _classify(stats: dict[str, Any]) -> str:
     a non-conformed FAIL = FLOOR.
     """
 
+    attempts_numeric = _attempts_numeric(stats.get("attempts_to_green"))
     if stats["verdict"] == "PASS":
-        if stats.get("attempts_to_green") == 1:
+        if attempts_numeric == 1:
             return "CEILING"
         return "BRACKET"
     if stats.get("conformed"):
@@ -499,15 +1002,18 @@ def _evaluate_triggers(
     recorded_class: str | None,
 ) -> list[str]:
     fired: list[str] = []
+    attempts_numeric = _attempts_numeric(stats.get("attempts_to_green"))
+    max_attempts_numeric = _attempts_numeric(stats.get("max_attempts"))
+    if max_attempts_numeric is None:
+        max_attempts_numeric = MAX_ATTEMPTS
 
     # T1 — gate margin <= 1.
-    attempts = stats.get("attempts_to_green")
     if stats["verdict"] == "FAIL" and len(stats.get("failed_gates") or []) == 1:
         fired.append("T1")
     elif (
         stats["verdict"] == "PASS"
-        and attempts is not None
-        and int(attempts) == int(stats.get("max_attempts") or MAX_ATTEMPTS)
+        and attempts_numeric is not None
+        and attempts_numeric == max_attempts_numeric
     ):
         fired.append("T1")
 
@@ -518,10 +1024,12 @@ def _evaluate_triggers(
             delta = abs(float(stats.get("total_tokens") or 0.0) - off_tokens) / off_tokens
             if delta < TOKEN_DELTA_FRAGILE:
                 fired.append("T2")
-        if "T2" not in fired and (
-            stats.get("attempts_to_green") is not None
-            and off_stats.get("attempts_to_green") is not None
-            and int(stats["attempts_to_green"]) == int(off_stats["attempts_to_green"])
+        off_attempts_numeric = _attempts_numeric(off_stats.get("attempts_to_green"))
+        if (
+            "T2" not in fired
+            and attempts_numeric is not None
+            and off_attempts_numeric is not None
+            and attempts_numeric == off_attempts_numeric
         ):
             fired.append("T2")
 
@@ -558,6 +1066,7 @@ def _summarize_cell(cell: dict[str, Any], entries: list[dict[str, Any]]) -> dict
     verdicts = [str(s.get("verdict")) for s in stats_list]
     classes = [_classify(s) for s in stats_list]
     triggers = entries[0].get("triggers") if entries else []
+    imported_entries = [entry for entry in entries if bool(entry.get("imported"))]
     return {
         "rung_index": int(cell["rung_index"]),
         "model": str(cell["model"]),
@@ -578,6 +1087,22 @@ def _summarize_cell(cell: dict[str, Any], entries: list[dict[str, Any]]) -> dict
         "assertions": [e.get("assertions") for e in entries],
         "run_ids": [e.get("run_id") for e in entries],
         "scorecards": [e.get("scorecard") for e in entries],
+        "imported": bool(imported_entries),
+        "import_sources": [
+            str(source)
+            for source in (entry.get("import_source") for entry in imported_entries)
+            if isinstance(source, str) and source
+        ],
+        "import_digests": [
+            digests
+            for digests in (entry.get("import_digests") for entry in imported_entries)
+            if isinstance(digests, dict)
+        ],
+        "import_notes": [
+            str(note)
+            for note in (entry.get("import_note") for entry in imported_entries)
+            if isinstance(note, str) and note
+        ],
     }
 
 # ---------------------------------------------------------------------------
@@ -741,6 +1266,97 @@ def _build_inner_cmd(
     return cmd
 
 
+def _build_error_entry(
+    *,
+    cell: dict[str, Any],
+    rep: int,
+    trace: str,
+    error: Exception,
+    run_id: str | None = None,
+    run_label: str | None = None,
+    scorecard: str | None = None,
+    detail: str | None = None,
+    cell_log: str | None = None,
+    proxy_log: str | None = None,
+    proxy_checkpoint: str | None = None,
+    accrued_usd: Any = None,
+    committed_unproven_usd: Any = None,
+    stats: dict[str, Any] | None = None,
+    anomalies: dict[str, Any] | None = None,
+    assertions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "rung_index": int(cell["rung_index"]),
+        "model": str(cell["model"]),
+        "run_number": int(cell["run_number"]),
+        "rep": int(rep),
+        "phase": CELL_PHASE,
+        "memory_mode": str(cell["memory_mode"]),
+        "role": str(cell["role"]),
+        "status": "error",
+        "run_id": run_id,
+        "run_label": run_label,
+        "scorecard": scorecard,
+        "detail": detail,
+        "cell_log": cell_log,
+        "proxy_log": proxy_log,
+        "proxy_checkpoint": proxy_checkpoint,
+        "accrued_usd": accrued_usd,
+        "committed_unproven_usd": committed_unproven_usd,
+        "error": str(error),
+        "completed_at": _utc_iso(),
+        "trace": trace,
+    }
+    if isinstance(stats, dict):
+        entry["stats"] = stats
+    if isinstance(anomalies, dict):
+        entry["anomalies"] = anomalies
+    if isinstance(assertions, dict):
+        entry["assertions"] = assertions
+    return entry
+
+
+def _build_error_entry_from_existing(
+    *,
+    cell: dict[str, Any],
+    rep: int,
+    trace: str,
+    error: Exception,
+    entry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = entry if isinstance(entry, dict) else {}
+    run_id = payload.get("run_id")
+    run_label = payload.get("run_label")
+    scorecard = payload.get("scorecard")
+    detail = payload.get("detail")
+    cell_log = payload.get("cell_log")
+    proxy_log = payload.get("proxy_log")
+    proxy_checkpoint = payload.get("proxy_checkpoint")
+    return _build_error_entry(
+        cell=cell,
+        rep=rep,
+        trace=trace,
+        error=error,
+        run_id=str(run_id) if run_id is not None else None,
+        run_label=str(run_label) if run_label is not None else None,
+        scorecard=str(scorecard) if scorecard is not None else None,
+        detail=str(detail) if detail is not None else None,
+        cell_log=str(cell_log) if cell_log is not None else None,
+        proxy_log=str(proxy_log) if proxy_log is not None else None,
+        proxy_checkpoint=str(proxy_checkpoint) if proxy_checkpoint is not None else None,
+        accrued_usd=payload.get("accrued_usd"),
+        committed_unproven_usd=payload.get("committed_unproven_usd"),
+        stats=payload.get("stats") if isinstance(payload.get("stats"), dict) else None,
+        anomalies=payload.get("anomalies") if isinstance(payload.get("anomalies"), dict) else None,
+        assertions=payload.get("assertions") if isinstance(payload.get("assertions"), dict) else None,
+    )
+
+
+def _persist_error_entry(checkpoint: dict[str, Any], checkpoint_path: Path, entry: dict[str, Any]) -> None:
+    _upsert_entry(checkpoint, entry)
+    _save_json_atomic(checkpoint_path, checkpoint)
+
+
 def _run_inner_tee(cmd: list[str], cell_log: Path) -> int:
     """Run the inner ladder, teeing stdout+stderr to the cell log.
 
@@ -810,167 +1426,210 @@ def _run_cell_rep(
             line += f" {extra}"
         _emit(logfile_path, line)
 
-    cap_usd = float(params["cap_usd"])
-    progress("ledger-check", f"cap_usd={cap_usd:.4f}")
-    if not _ledger_check(cap_usd):
-        raise LadderAbort("ledger_refused", {"run_id": run_id, "cap_usd": cap_usd})
+    proxy_log: Path | None = None
+    proxy_checkpoint: Path | None = None
+    cell_log: Path | None = None
+    scorecard_path: Path | None = None
+    detail_path: Path | None = None
+    accrued: Any = None
+    committed: Any = None
+    stats: dict[str, Any] | None = None
+    anomalies: dict[str, Any] | None = None
+    assertions: dict[str, Any] | None = None
 
-    prebudget_path = runs_dir / f"{run_id}-prebudget.json"
-    _save_json_atomic(
-        prebudget_path,
-        {
-            "schema_version": 1,
-            "run_id": run_id,
-            "accrued_actual_usd": 0.0,
-            "committed_unproven_usd": cap_usd,
-        },
-    )
-    if not _ledger_record(prebudget_path):
-        raise LadderAbort("ledger_record_refused", {"run_id": run_id})
-
-    clone_offset = clone_log.stat().st_size if clone_log.is_file() else 0
-
-    model_slug_for_proxy = model.removeprefix("openrouter/")
-    proxy_cmd, proxy_log, proxy_checkpoint, token_file = _build_proxy_cmd(
-        run_id=run_id,
-        model_slug=model_slug_for_proxy,
-        params=params,
-        port=int(args.proxy_port),
-        proxy_dir=proxy_dir,
-        stamp=stamp,
-    )
-    progress("proxy-start", f"port={args.proxy_port} run_id={run_id}")
-    proxy_proc = _start_proxy(proxy_cmd, runs_dir / "proxy-console.log")
     try:
-        deadline = time.monotonic() + PROXY_START_TIMEOUT_S
-        while not _port_listening(int(args.proxy_port)):
-            if proxy_proc.poll() is not None or time.monotonic() > deadline:
-                raise LadderAbort(
-                    "proxy_start_failed",
-                    {"run_id": run_id, "exit_code": proxy_proc.poll(), "log": str(proxy_log)},
-                )
-            time.sleep(1.0)
-        time.sleep(2.0)
+        cap_usd = float(params["cap_usd"])
+        progress("ledger-check", f"cap_usd={cap_usd:.4f}")
+        if not _ledger_check(cap_usd):
+            raise LadderAbort("ledger_refused", {"run_id": run_id, "cap_usd": cap_usd})
 
-        extra_session_flags = _build_session_extra_flags(params, token_file, int(args.proxy_port))
-        inner_cmd = _build_inner_cmd(
+        prebudget_path = runs_dir / f"{run_id}-prebudget.json"
+        _save_json_atomic(
+            prebudget_path,
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "accrued_actual_usd": 0.0,
+                "committed_unproven_usd": cap_usd,
+            },
+        )
+        if not _ledger_record(prebudget_path):
+            raise LadderAbort("ledger_record_refused", {"run_id": run_id})
+
+        clone_offset = clone_log.stat().st_size if clone_log.is_file() else 0
+
+        model_slug_for_proxy = model.removeprefix("openrouter/")
+        proxy_cmd, proxy_log, proxy_checkpoint, token_file = _build_proxy_cmd(
+            run_id=run_id,
+            model_slug=model_slug_for_proxy,
+            params=params,
+            port=int(args.proxy_port),
+            proxy_dir=proxy_dir,
+            stamp=stamp,
+        )
+        progress("proxy-start", f"port={args.proxy_port} run_id={run_id}")
+        proxy_proc = _start_proxy(proxy_cmd, runs_dir / "proxy-console.log")
+        try:
+            deadline = time.monotonic() + PROXY_START_TIMEOUT_S
+            while not _port_listening(int(args.proxy_port)):
+                if proxy_proc.poll() is not None or time.monotonic() > deadline:
+                    raise LadderAbort(
+                        "proxy_start_failed",
+                        {"run_id": run_id, "exit_code": proxy_proc.poll(), "log": str(proxy_log)},
+                    )
+                time.sleep(1.0)
+            time.sleep(2.0)
+
+            extra_session_flags = _build_session_extra_flags(params, token_file, int(args.proxy_port))
+            inner_cmd = _build_inner_cmd(
+                cell=cell,
+                rep=rep,
+                run_label=run_label,
+                extra_session_flags=extra_session_flags,
+                ladder_runs_dir=ladder_runs_dir,
+                org_id=str(args.org_id),
+            )
+            cell_log = runs_dir / f"{stamp}-{run_label}-cell.log"
+            progress("cell-start", f"cell_log={cell_log}")
+            started = time.perf_counter()
+            inner_rc = _run_inner_tee(inner_cmd, cell_log)
+            dur_s = time.perf_counter() - started
+        finally:
+            _stop_proxy(proxy_proc)
+
+        if proxy_checkpoint.is_file():
+            if not _ledger_record(proxy_checkpoint):
+                progress("ledger-post-record-refused", f"checkpoint={proxy_checkpoint}")
+        else:
+            progress("ledger-post-record-skipped", "proxy_checkpoint_missing=1")
+
+        if inner_rc != 0:
+            raise LadderAbort(
+                "inner_failed",
+                {"run_id": run_id, "exit_code": inner_rc, "cell_log": str(cell_log)},
+            )
+
+        scorecard_path = _newest_artifact(
+            ladder_runs_dir,
+            run_label,
+            "scorecard.json",
+            started_wall := (time.time() - dur_s),
+        )
+        detail_path = _newest_artifact(ladder_runs_dir, run_label, "backgammon-detail.json", started_wall)
+        scorecard = _load_json(scorecard_path) or {}
+        detail = _load_json(detail_path) or {}
+        stats = _extract_stats(scorecard, detail)
+
+        proxy_log_text = _read_text_or_empty(proxy_log)
+        cell_log_text = _read_text_or_empty(cell_log)
+
+        assertions = {}
+        expected_upstream = params.get("expected_upstream_model")
+        if expected_upstream:
+            identity = _scan_identity(proxy_log_text, str(expected_upstream))
+            assertions["identity"] = identity
+            progress(
+                "identity-check",
+                f"ok={identity['ok']} mismatch={identity['mismatch']} confirmed={identity['confirmed_response_count']}",
+            )
+            if not identity["ok"]:
+                raise LadderAbort(
+                    "identity_mismatch" if identity["mismatch"] else "identity_unverified",
+                    {"run_id": run_id, "identity": identity, "proxy_log": str(proxy_log)},
+                )
+
+        if str(cell["memory_mode"]) == "on":
+            clone_slice = ""
+            if clone_log.is_file():
+                with clone_log.open("r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(clone_offset)
+                    clone_slice = fh.read()
+            delivery = _scan_delivery(clone_slice, cell_log_text)
+            assertions["delivery"] = delivery
+            progress(
+                "delivery-check",
+                f"ok={delivery['ok']} recall_200={len(delivery['recall_200_traces'])} "
+                f"env_injection={delivery['recall_env_injection_container']}",
+            )
+            if not delivery["ok"]:
+                raise LadderAbort(
+                    "delivery_unproven",
+                    {"run_id": run_id, "delivery": delivery, "clone_log": str(clone_log)},
+                )
+
+        anomalies = _detect_anomalies(proxy_log_text, cell_log_text, stats)
+
+        proxy_cp = _load_json(proxy_checkpoint) if proxy_checkpoint.is_file() else None
+        if isinstance(proxy_cp, dict):
+            accrued = proxy_cp.get("accrued_actual_usd")
+            committed = proxy_cp.get("committed_unproven_usd")
+
+        progress(
+            "ok",
+            f"verdict={stats['verdict']} tokens={stats['total_tokens']:.0f} "
+            f"cost={float(accrued or 0.0):.4f} dur_s={dur_s:.1f}",
+        )
+
+        return {
+            "rung_index": int(cell["rung_index"]),
+            "model": model,
+            "run_number": run_number,
+            "rep": int(rep),
+            "phase": CELL_PHASE,
+            "memory_mode": str(cell["memory_mode"]),
+            "role": str(cell["role"]),
+            "status": "ok",
+            "run_id": run_id,
+            "run_label": run_label,
+            "dur_s": round(dur_s, 3),
+            "scorecard": str(scorecard_path),
+            "detail": str(detail_path),
+            "cell_log": str(cell_log),
+            "proxy_log": str(proxy_log),
+            "proxy_checkpoint": str(proxy_checkpoint),
+            "accrued_usd": accrued,
+            "committed_unproven_usd": committed,
+            "stats": stats,
+            "anomalies": anomalies,
+            "assertions": assertions,
+            "completed_at": _utc_iso(),
+            "trace": trace,
+        }
+    except LadderAbort:
+        raise
+    except Exception as exc:
+        error_entry = _build_error_entry(
             cell=cell,
             rep=rep,
+            trace=trace,
+            error=exc,
+            run_id=run_id,
             run_label=run_label,
-            extra_session_flags=extra_session_flags,
-            ladder_runs_dir=ladder_runs_dir,
-            org_id=str(args.org_id),
+            scorecard=str(scorecard_path) if scorecard_path is not None else None,
+            detail=str(detail_path) if detail_path is not None else None,
+            cell_log=str(cell_log) if cell_log is not None else None,
+            proxy_log=str(proxy_log) if proxy_log is not None else None,
+            proxy_checkpoint=str(proxy_checkpoint) if proxy_checkpoint is not None else None,
+            accrued_usd=accrued,
+            committed_unproven_usd=committed,
+            stats=stats,
+            anomalies=anomalies,
+            assertions=assertions,
         )
-        cell_log = runs_dir / f"{stamp}-{run_label}-cell.log"
-        progress("cell-start", f"cell_log={cell_log}")
-        started = time.perf_counter()
-        inner_rc = _run_inner_tee(inner_cmd, cell_log)
-        dur_s = time.perf_counter() - started
-    finally:
-        _stop_proxy(proxy_proc)
-
-    if proxy_checkpoint.is_file():
-        if not _ledger_record(proxy_checkpoint):
-            progress("ledger-post-record-refused", f"checkpoint={proxy_checkpoint}")
-    else:
-        progress("ledger-post-record-skipped", "proxy_checkpoint_missing=1")
-
-    if inner_rc != 0:
-        raise LadderAbort(
-            "inner_failed",
-            {"run_id": run_id, "exit_code": inner_rc, "cell_log": str(cell_log)},
-        )
-
-    scorecard_path = _newest_artifact(ladder_runs_dir, run_label, "scorecard.json", started_wall := (time.time() - dur_s))
-    detail_path = _newest_artifact(ladder_runs_dir, run_label, "backgammon-detail.json", started_wall)
-    scorecard = _load_json(scorecard_path) or {}
-    detail = _load_json(detail_path) or {}
-    stats = _extract_stats(scorecard, detail)
-
-    proxy_log_text = _read_text_or_empty(proxy_log)
-    cell_log_text = _read_text_or_empty(cell_log)
-
-    assertions: dict[str, Any] = {}
-    expected_upstream = params.get("expected_upstream_model")
-    if expected_upstream:
-        identity = _scan_identity(proxy_log_text, str(expected_upstream))
-        assertions["identity"] = identity
-        progress(
-            "identity-check",
-            f"ok={identity['ok']} mismatch={identity['mismatch']} confirmed={identity['confirmed_response_count']}",
-        )
-        if not identity["ok"]:
-            raise LadderAbort(
-                "identity_mismatch" if identity["mismatch"] else "identity_unverified",
-                {"run_id": run_id, "identity": identity, "proxy_log": str(proxy_log)},
-            )
-
-    if str(cell["memory_mode"]) == "on":
-        clone_slice = ""
-        if clone_log.is_file():
-            with clone_log.open("r", encoding="utf-8", errors="replace") as fh:
-                fh.seek(clone_offset)
-                clone_slice = fh.read()
-        delivery = _scan_delivery(clone_slice, cell_log_text)
-        assertions["delivery"] = delivery
-        progress(
-            "delivery-check",
-            f"ok={delivery['ok']} recall_200={len(delivery['recall_200_traces'])} "
-            f"env_injection={delivery['recall_env_injection_container']}",
-        )
-        if not delivery["ok"]:
-            raise LadderAbort(
-                "delivery_unproven",
-                {"run_id": run_id, "delivery": delivery, "clone_log": str(clone_log)},
-            )
-
-    anomalies = _detect_anomalies(proxy_log_text, cell_log_text, stats)
-
-    accrued = None
-    committed = None
-    proxy_cp = _load_json(proxy_checkpoint) if proxy_checkpoint.is_file() else None
-    if isinstance(proxy_cp, dict):
-        accrued = proxy_cp.get("accrued_actual_usd")
-        committed = proxy_cp.get("committed_unproven_usd")
-
-    progress(
-        "ok",
-        f"verdict={stats['verdict']} tokens={stats['total_tokens']:.0f} "
-        f"cost={float(accrued or 0.0):.4f} dur_s={dur_s:.1f}",
-    )
-
-    return {
-        "rung_index": int(cell["rung_index"]),
-        "model": model,
-        "run_number": run_number,
-        "rep": int(rep),
-        "phase": CELL_PHASE,
-        "memory_mode": str(cell["memory_mode"]),
-        "role": str(cell["role"]),
-        "status": "ok",
-        "run_id": run_id,
-        "run_label": run_label,
-        "dur_s": round(dur_s, 3),
-        "scorecard": str(scorecard_path),
-        "detail": str(detail_path),
-        "cell_log": str(cell_log),
-        "proxy_log": str(proxy_log),
-        "proxy_checkpoint": str(proxy_checkpoint),
-        "accrued_usd": accrued,
-        "committed_unproven_usd": committed,
-        "stats": stats,
-        "anomalies": anomalies,
-        "assertions": assertions,
-        "completed_at": _utc_iso(),
-        "trace": trace,
-    }
+        raise CellRunUnexpectedError(str(exc), error_entry) from exc
 
 # ---------------------------------------------------------------------------
 # Driver
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Stage-7 scored backgammon ladder driver (roster A).")
+    parser = argparse.ArgumentParser(
+        description="Stage-7 scored backgammon ladder driver (roster A).",
+        epilog=(
+            "Import recovery note: --resume already skips imported status=ok cells; "
+            "--start-cell 2 is belt-and-suspenders for the known Cell-1 crash recovery."
+        ),
+    )
     parser.add_argument("--resume", action="store_true", help="Skip cells/reps already marked ok in the checkpoint.")
     parser.add_argument("--runs-dir", default=str(_default_runs_dir()), help="Outer driver runs directory (checkpoint/manifest/logs/summary).")
     parser.add_argument("--ladder-runs-dir", default=str(_default_ladder_runs_dir()), help="--runs-dir passed to scripts/backgammon_ladder.py (scorecards/details live here).")
@@ -978,6 +1637,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clone-log", default=str(_repo_root() / DEFAULT_CLONE_LOG), help="Recall clone logfile for ON-cell delivery assertion.")
     parser.add_argument("--proxy-port", type=int, default=DEFAULT_PROXY_PORT)
     parser.add_argument("--org-id", default=DEFAULT_ORG_ID)
+    parser.add_argument(
+        "--import-cell",
+        default=None,
+        help="Strict recovery import JSON for one pre-existing cell artifact set.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the planned cells and exit 0 (no ledger/proxy/spend).")
     parser.add_argument("--start-cell", type=int, default=None, help="Optional run number to force start at.")
     return parser
@@ -1072,7 +1736,11 @@ def _off_stats_for_rung(plan: list[dict[str, Any]], checkpoint: dict[str, Any], 
     stats_list = [e["stats"] for e in entries if isinstance(e.get("stats"), dict)]
     if not stats_list:
         return None
-    attempts = [s.get("attempts_to_green") for s in stats_list if s.get("attempts_to_green") is not None]
+    attempts = [
+        numeric
+        for s in stats_list
+        if (numeric := _attempts_numeric(s.get("attempts_to_green"))) is not None
+    ]
     return {
         "total_tokens": _median([float(s.get("total_tokens") or 0.0) for s in stats_list]),
         "attempts_to_green": int(_median([float(a) for a in attempts])) if attempts else None,
@@ -1106,7 +1774,7 @@ def main() -> int:
         f"cells={json.dumps([{k: cell[k] for k in ('rung_index', 'model', 'role', 'run_number', 'memory_mode', 'phase')} for cell in plan], separators=(',', ':'))}"
     )
 
-    if args.dry_run:
+    if args.dry_run and not args.import_cell:
         _append_log_line(logfile_path, plan_line)
         for cell in selected:
             print(json.dumps(cell, sort_keys=True), flush=True)
@@ -1116,32 +1784,95 @@ def main() -> int:
         )
         return 0
 
-    if not args.rung_params:
+    rung_params: dict[str, dict[str, Any]] | None = None
+    if args.rung_params:
+        rung_params = _load_rung_params(
+            Path(str(args.rung_params)).expanduser(),
+            backgammon_scored_ladder_roster(),
+        )
+    elif not args.dry_run:
         parser.error("--rung-params is required for a real run")
-    rung_params = _load_rung_params(Path(str(args.rung_params)).expanduser(), backgammon_scored_ladder_roster())
 
     _emit(logfile_path, plan_line)
 
     checkpoint_path = runs_dir / CHECKPOINT_NAME
     checkpoint = _load_checkpoint(checkpoint_path)
     manifest_path = runs_dir / MANIFEST_NAME
-    current_manifest = _build_manifest(plan, rung_params, trace)
     existing_manifest = _load_json(manifest_path)
-    if existing_manifest is not None:
-        _validate_manifest_or_fail(existing=existing_manifest, current=current_manifest)
-    else:
+
+    current_manifest: dict[str, Any]
+    if existing_manifest is None:
+        if args.import_cell:
+            raise RuntimeError(
+                f"cannot import cell without a frozen manifest at {manifest_path}"
+            )
+        if rung_params is None:
+            raise RuntimeError(
+                "cannot build scored-ladder manifest without --rung-params"
+            )
+        current_manifest = _build_manifest(plan, rung_params, trace)
         if _checkpoint_cells(checkpoint):
             raise RuntimeError(
                 f"cannot resume: found an existing checkpoint in {runs_dir} but no run manifest "
                 f"({MANIFEST_NAME}). Start a fresh run in a new --runs-dir."
             )
         _save_json_atomic(manifest_path, current_manifest)
+    else:
+        if rung_params is not None:
+            current_manifest = _build_manifest(plan, rung_params, trace)
+            _validate_manifest_or_fail(existing=existing_manifest, current=current_manifest)
+        else:
+            current_manifest = existing_manifest
+
     _emit(
         logfile_path,
         f"[{_utc_iso()}] MANIFEST trace={trace} schema={current_manifest['schema_version']} "
         f"fingerprint={current_manifest['config_fingerprint']} total_cells={current_manifest['total_cells']} "
         f"path={manifest_path}",
     )
+
+    if args.import_cell:
+        import_source = Path(str(args.import_cell)).expanduser().resolve()
+        imported_entry, import_context = _build_import_entry(
+            import_source=import_source,
+            checkpoint=checkpoint,
+            plan=plan,
+            manifest=current_manifest,
+            dry_run=bool(args.dry_run),
+            trace=trace,
+        )
+        _emit(
+            logfile_path,
+            f"[{_utc_iso()}] IMPORT trace={trace} run={import_context['run_number']} "
+            f"run_id={import_context['run_id']} status=validated probe={import_context['probe_mode']} "
+            f"source={import_source}",
+        )
+        if not args.dry_run:
+            _upsert_entry(checkpoint, imported_entry)
+            _save_json_atomic(checkpoint_path, checkpoint)
+            _emit(
+                logfile_path,
+                f"[{_utc_iso()}] IMPORT trace={trace} run={import_context['run_number']} status=checkpointed "
+                f"checkpoint={checkpoint_path} probe_collection={import_context['probe_collection']}",
+            )
+        else:
+            _emit(
+                logfile_path,
+                f"[{_utc_iso()}] IMPORT trace={trace} run={import_context['run_number']} "
+                "checkpoint_write=0 dry_run=1 pool_probe=skipped",
+            )
+
+    if args.dry_run:
+        for cell in selected:
+            print(json.dumps(cell, sort_keys=True), flush=True)
+        _emit(
+            logfile_path,
+            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)}",
+        )
+        return 0
+
+    if rung_params is None:
+        raise RuntimeError("--rung-params is required for a real run")
 
     # Plan-level budget projection: refuse to START if the remaining base cells'
     # caps cannot fit under the stage/global caps (stop BEFORE overrunning).
@@ -1178,27 +1909,48 @@ def main() -> int:
                     f"run={run_number} rep=1 mode={cell['memory_mode']} phase=ok resume_skip=1",
                 )
             else:
-                entry = _run_cell_rep(
-                    cell=cell, rep=1, params=params, args=args, trace=trace, logfile_path=logfile_path,
-                )
-                executed += 1
-                rep1 = entry
+                entry: dict[str, Any] | None = None
+                try:
+                    entry = _run_cell_rep(
+                        cell=cell, rep=1, params=params, args=args, trace=trace, logfile_path=logfile_path,
+                    )
+                    executed += 1
+                    rep1 = entry
 
-                # Variance triggers: evaluated ONCE, immediately after the N=1 run.
-                triggers: list[str] = []
-                if str(cell["role"]) == "measure":
-                    off_stats = (
-                        _off_stats_for_rung(plan, checkpoint, int(cell["rung_index"]))
-                        if str(cell["memory_mode"]) == "on"
-                        else None
+                    # Variance triggers: evaluated ONCE, immediately after the N=1 run.
+                    triggers: list[str] = []
+                    if str(cell["role"]) == "measure":
+                        off_stats = (
+                            _off_stats_for_rung(plan, checkpoint, int(cell["rung_index"]))
+                            if str(cell["memory_mode"]) == "on"
+                            else None
+                        )
+                        triggers = _evaluate_triggers(
+                            stats=entry["stats"],
+                            off_stats=off_stats,
+                            anomalies=entry["anomalies"],
+                            recorded_class=cell.get("recorded_class"),
+                        )
+                    entry["triggers"] = triggers
+                except LadderAbort:
+                    raise
+                except CellRunUnexpectedError as exc:
+                    _persist_error_entry(checkpoint, checkpoint_path, exc.entry)
+                    raise
+                except Exception as exc:
+                    _persist_error_entry(
+                        checkpoint,
+                        checkpoint_path,
+                        _build_error_entry_from_existing(
+                            cell=cell,
+                            rep=1,
+                            trace=trace,
+                            error=exc,
+                            entry=entry,
+                        ),
                     )
-                    triggers = _evaluate_triggers(
-                        stats=entry["stats"],
-                        off_stats=off_stats,
-                        anomalies=entry["anomalies"],
-                        recorded_class=cell.get("recorded_class"),
-                    )
-                entry["triggers"] = triggers
+                    raise
+
                 _upsert_entry(checkpoint, entry)
                 _save_json_atomic(checkpoint_path, checkpoint)
                 if triggers:
@@ -1214,10 +1966,30 @@ def main() -> int:
                 if args.resume and prior is not None and str(prior.get("status") or "") == "ok":
                     skipped += 1
                     continue
-                entry = _run_cell_rep(
-                    cell=cell, rep=rep, params=params, args=args, trace=trace, logfile_path=logfile_path,
-                )
-                executed += 1
+                entry = None
+                try:
+                    entry = _run_cell_rep(
+                        cell=cell, rep=rep, params=params, args=args, trace=trace, logfile_path=logfile_path,
+                    )
+                    executed += 1
+                except LadderAbort:
+                    raise
+                except CellRunUnexpectedError as exc:
+                    _persist_error_entry(checkpoint, checkpoint_path, exc.entry)
+                    raise
+                except Exception as exc:
+                    _persist_error_entry(
+                        checkpoint,
+                        checkpoint_path,
+                        _build_error_entry_from_existing(
+                            cell=cell,
+                            rep=rep,
+                            trace=trace,
+                            error=exc,
+                            entry=entry,
+                        ),
+                    )
+                    raise
                 _upsert_entry(checkpoint, entry)
                 _save_json_atomic(checkpoint_path, checkpoint)
 

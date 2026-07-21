@@ -229,24 +229,16 @@ byte-verification is intentionally deferred because it cannot be done zero-cost.
 Known OpenCode 1.18.1 post-completion exit hangs are handled by the driver's
 bounded `--completion-grace` termination path documented above.
 
-### Later (paid) smoke — DO NOT RUN in setup; Walter-gated
-After a clean wipe (`make redeploy` from `wevibe-meta` + clear `/tmp` bench keystores): start `:4550`, run ONE
-GLM-5.2 OFF cell in Docker, let the host oracle score it, extract one memory, verify accepted storage + retrieval
-through the real transport, then wipe again.
+### Later (paid) smoke — status update (21-07-26)
+The prior 15-07 passability-first gate text is now historical. Walter GO 21-07-26 authorized the full Stage-7 scored ladder
+(Opus SOURCE OFF+self-extract → kimi OFF/ON → big-pickle OFF/ON), superseding the earlier "Opus passability PASS before scored roster" block.
 
-**Prerequisite gate (Option A, 15-07-26):** before the conditional GLM-5.2/MiMo-V2.5-Pro roster unlocks,
-Opus-4.8 at HIGH reasoning must first PASS one clean recall-OFF Docker smoke of the repaired benchmark under a hard
-cumulative paid ceiling of $12. The prior Opus-4.8 HIGH passability smoke already ran and FAILED at $11.8035 on four
-now-repaired gates (`15-07-26-1019-opus48-high-passability-smoke.md`), so the repaired instrument awaits a fresh
-clean PASS before any scored roster/candidate work.
+Execution happened and crashed: run `20260721T195407Z` completed Cell 1 as a valid 3-attempt capability FAIL, committed one org-0 memory,
+then the harness crashed on `int("FAIL")`. Recovery path is Option B (preserve Cell 1 + memory, patch harness, continue from Cell 2 without
+rerunning/rebilling Cell 1). Use the pinned continuation path in `docs/BENCHMARK-STATE.md §2B`.
 
-**Provider-pinning/roster is separate and still blocked:** provider-routing enforcement now exists via the host-side
-proxy, and all three pins are live-verified transport+eligibility GREEN (Novita/DeepInfra/Anthropic, 15-07-26). Real-transport
-passability is PROVEN at both the direct-HTTP and Docker worker→host-proxy layers. Candidate/scored authorization
-nonetheless remains blocked pending the repaired-instrument Opus passability smoke (the prior HIGH smoke FAILED the oracle)
-and Walter's explicit run authorization. (Live GLM/MiMo/Opus PRICING and the Opus provider pin `anthropic` are now supplied/verified.)
-
-**This is the paid validation smoke; requires Walter roster confirmation; NOT part of build/verify.**
+**$12 ceiling facts remain unchanged:** paid-cell hard ceiling enforcement is still `min(configured cap, $12)` with cumulative Stage-7/global
+ledger enforcement. This remains paid execution (Walter-authorized), not routine setup/build verification.
 
 ## THE HARD RULE
 

@@ -1,9 +1,8 @@
-# WeVibe Benchmark — Model Roster (CONDITIONAL)
+# WeVibe Benchmark — Model Roster (CONDITIONAL, historical pre-21-07-26)
 
-**Status:** BLOCKED-BY-PASSABILITY — **NOT authorized to run.** This roster becomes the primary
-progressive-learning roster **only if** the Opus-4.8 passability smoke works. The current verified smoke
-result is **FAIL** (report `15-07-26-1019-opus48-high-passability-smoke.md`), so **candidate runs remain
-forbidden** and this document is a captured proposal, not a Go.
+**Status (superseded 21-07-26):** the BLOCKED-BY-PASSABILITY state below is historical only. Walter GO authorized
+the Stage-7 scored roster as executed: Opus SOURCE (OFF, self-extract) → kimi OFF/ON → big-pickle OFF/ON (no mimo rung).
+Keep this file as pre-GO context; active run/recovery state lives in `docs/BENCHMARK-STATE.md`.
 
 **Snapshot caveat (READ FIRST):** every pricing, availability, provider-slug, uptime, parameter-support,
 quantization, output-cap, and TTFT claim below is a **July-15-2026 snapshot** and **MUST be
@@ -24,8 +23,8 @@ runtime-sourced at launch (never baked); the provider pins are now the SoT in `w
 proxy — the proxy handled every call correctly; it correctly 400-rejected opencode's auxiliary `google/gemini-3.1-flash-image`
 call under the single-model pin). Full scored cells must configure opencode to use ONLY the pinned model (or the driver
 must tolerate the aux 400, which it did — the main call succeeded). This is a benchmark-cell config item, NOT a transport defect.
-**STILL BLOCKING scored runs (unchanged):** transport passability ≠ benchmark authorization — the Opus HIGH oracle smoke
-FAILED (report 1019), and Walter's explicit scored-run authorization + the benchmark-instrument question remain open.
+**Superseded 21-07-26:** this former scored-run block is historical; Stage-7 scored execution was explicitly authorized
+and started (see `docs/BENCHMARK-STATE.md` Stage-7 crash recovery subsection).
 
 
 **Scope:** benchmark roster / measurement integrity ONLY. This does NOT alter locked network-wide memory
@@ -34,7 +33,9 @@ design or any locked DECISIONS. It sits alongside `BENCHMARK-STATE.md`, `RUNBOOK
 
 ---
 
-## 1. The passability block (why this roster is not authorized)
+## 1. Historical passability block (superseded 21-07-26)
+
+Superseded pointer: this section records the pre-GO block rationale only; it is not the current run gate.
 
 Walter's roster is **CONDITIONAL**: it is the primary progressive-learning roster **iff** the Opus-4.8
 passability smoke works. It does not.
@@ -53,10 +54,10 @@ passability smoke works. It does not.
   repaired into a requirements-to-implementation benchmark (report
   `15-07-26-1057-benchmark-optionA-repair-LEDGER.md`), with full requirement↔gate mapping in
   `docs/CONTRACT-TRACEABILITY.md`.
-- **Unblocking requirement remains:** a fresh clean Opus-4.8 HIGH recall-OFF Docker passability smoke must PASS on
-  the repaired instrument under the hard $12 cumulative ceiling before any scored/candidate roster run.
-- **Still separate + blocked:** provider-routing enforcement now exists via the host-side proxy, but no candidate is
-  authorized; corpus remains 0 until all remaining gates clear (§3).
+- **Historical unblocking requirement (superseded 21-07-26):** a fresh clean Opus-4.8 HIGH recall-OFF Docker
+  passability smoke PASS was previously required before scored/candidate roster runs.
+- **Historical separate block (superseded 21-07-26):** provider-routing enforcement existed but candidate authorization
+  remained blocked in this pre-GO state.
 
 ---
 
@@ -97,7 +98,7 @@ control** via the host-side proxy (see §3).
 
 ---
 
-## 3. Hard prerequisites before ANY scored run
+## 3. Hard prerequisites before ANY scored run (historical pre-GO snapshot)
 
 1. **Provider-routing enforcement mechanism = CLOSED-BY-PROXY.** The host-side
    OpenRouter proxy now hard-injects per-request provider policy, clamps
