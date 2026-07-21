@@ -17,6 +17,11 @@ from typing import Any
 
 
 OPENROUTER_UPSTREAM_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENCODE_ZEN_UPSTREAM_URL = "https://opencode.ai/zen/v1/chat/completions"
+UPSTREAM_CHAT_COMPLETIONS_URLS = {
+    "openrouter": OPENROUTER_UPSTREAM_URL,
+    "opencode": OPENCODE_ZEN_UPSTREAM_URL,
+}
 DEFAULT_OPENCODE_AUTH_PATH = "~/.local/share/opencode/auth.json"
 PROTECTED_BODY_FIELDS = ("provider",)
 ABSOLUTE_MAX_USD = 12.0
@@ -92,12 +97,13 @@ class ProviderProfile:
     pricing: dict[str, float] | None
     max_output_tokens: int
     max_reasoning_tokens: int
+    upstream: str = "openrouter"
     authorized: bool = False
     pin_constraints: dict[str, Any] | None = None
 
     def runnable_reason(self) -> str | None:
         """Return blocking reason or ``None`` if this profile is runnable."""
-        if self.provider_object is None:
+        if self.upstream == "openrouter" and self.provider_object is None:
             return "provider_pin_missing"
         if self.pricing is None:
             return "pricing_missing"
@@ -113,8 +119,12 @@ def normalize_model_selector(sel: str) -> str:
     return sel
 
 
-def load_openrouter_upstream_key(auth_path: str = DEFAULT_OPENCODE_AUTH_PATH) -> str:
-    """Load OpenRouter upstream key from one canonical OpenCode auth source (no fallback, R-13)."""
+def load_upstream_key(provider_id: str, auth_path: str = DEFAULT_OPENCODE_AUTH_PATH) -> str:
+    """Load upstream key from one canonical OpenCode auth source (no fallback, R-13)."""
+
+    provider = str(provider_id).strip()
+    if not provider:
+        raise CredentialError("upstream provider id must be non-empty")
 
     expanded_path = os.path.expanduser(auth_path)
     if not os.path.exists(expanded_path):
@@ -129,13 +139,17 @@ def load_openrouter_upstream_key(auth_path: str = DEFAULT_OPENCODE_AUTH_PATH) ->
     if not isinstance(data, dict):
         raise CredentialError(f"invalid opencode auth.json object: {auth_path}")
 
-    openrouter_entry = data.get("openrouter")
-    if not isinstance(openrouter_entry, dict):
-        raise CredentialError(f"opencode auth.json missing object at key 'openrouter': {auth_path}")
+    provider_entry = data.get(provider)
+    if not isinstance(provider_entry, dict):
+        if provider == "opencode":
+            raise CredentialError(
+                f"no 'opencode' entry in {auth_path} — run `opencode /connect` → OpenCode Zen"
+            )
+        raise CredentialError(f"opencode auth.json missing object at key '{provider}': {auth_path}")
 
-    key = openrouter_entry.get("key")
+    key = provider_entry.get("key")
     if not isinstance(key, str) or not key.strip():
-        raise CredentialError(f"opencode auth.json openrouter.key must be non-empty: {auth_path}")
+        raise CredentialError(f"opencode auth.json {provider}.key must be non-empty: {auth_path}")
 
     return key.strip()
 
@@ -252,6 +266,17 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             max_reasoning_tokens=8192,
             authorized=False,
         ),
+        "bigpickle": ProviderProfile(
+            name="bigpickle",
+            model_id="opencode/big-pickle",
+            provider_object=None,
+            pricing=None,
+            max_output_tokens=8192,
+            max_reasoning_tokens=8192,
+            upstream="opencode",
+            authorized=False,
+            pin_constraints=None,
+        ),
     }
 
 
@@ -281,15 +306,12 @@ def apply_policy(client_body: dict[str, Any], profile: ProviderProfile, max_toke
     """Apply hard policy shaping (R-13 one-path) without mutating caller input.
 
     Rejects protected field injection, enforces model/profile match, injects the
-    provider object, and clamps ``max_tokens`` conservatively.
+    OpenRouter provider object when needed, and clamps ``max_tokens`` conservatively.
     """
 
     for field in PROTECTED_BODY_FIELDS:
         if field in client_body:
             raise ProtectedFieldError(reason=field)
-
-    if profile.provider_object is None:
-        raise ProfileBlockedError("provider_pin_missing")
 
     model = normalize_model_selector(client_body.get("model", ""))
     if model != profile.model_id:
@@ -299,7 +321,10 @@ def apply_policy(client_body: dict[str, Any], profile: ProviderProfile, max_toke
         )
 
     body = copy.deepcopy(client_body)
-    body["provider"] = copy.deepcopy(profile.provider_object)
+    if profile.upstream == "openrouter":
+        if profile.provider_object is None:
+            raise ProfileBlockedError("provider_pin_missing")
+        body["provider"] = copy.deepcopy(profile.provider_object)
 
     client_value = body.get("max_tokens")
     if isinstance(client_value, int) and client_value > 0:
@@ -587,6 +612,7 @@ __all__ = [
     "FEE_RATE",
     "FLAT_FEE_USD",
     "ModelMismatchError",
+    "OPENCODE_ZEN_UPSTREAM_URL",
     "OPENROUTER_UPSTREAM_URL",
     "PER_MESSAGE_OVERHEAD_TOKENS",
     "PROTECTED_BODY_FIELDS",
@@ -598,11 +624,12 @@ __all__ = [
     "ProxyError",
     "ProxyLogger",
     "RESERVATION_SAFETY_FACTOR",
+    "UPSTREAM_CHAT_COMPLETIONS_URLS",
     "UnknownModelError",
     "apply_policy",
     "input_token_upper_bound",
     "key_fingerprint",
-    "load_openrouter_upstream_key",
+    "load_upstream_key",
     "normalize_model_selector",
     "worst_case_usd",
 ]

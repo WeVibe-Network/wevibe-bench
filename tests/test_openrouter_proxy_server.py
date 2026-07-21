@@ -18,9 +18,11 @@ import wevibe_bench.adapters.openrouter_proxy_server as proxy_server
 from wevibe_bench.adapters.openrouter_proxy import (
     BudgetLedger,
     DEFAULT_PROFILES,
+    OPENCODE_ZEN_UPSTREAM_URL,
     OPENROUTER_UPSTREAM_URL,
     ProfileRegistry,
     ProxyLogger,
+    UPSTREAM_CHAT_COMPLETIONS_URLS,
     key_fingerprint,
 )
 from wevibe_bench.adapters.openrouter_proxy_server import ProxyServer, UpstreamResponse, make_server
@@ -48,10 +50,18 @@ class _MainTestServer:
         self.closed = True
 
 
-def _write_auth_json(tmp_path: Path, *, key: str = "sk-or-test-main") -> Path:
+def _write_auth_json(
+    tmp_path: Path,
+    *,
+    key: str = "sk-or-test-main",
+    opencode_key: str | None = None,
+) -> Path:
     auth_path = tmp_path / f"auth-{uuid.uuid4().hex}.json"
+    payload: dict[str, Any] = {"openrouter": {"type": "api", "key": key}}
+    if opencode_key is not None:
+        payload["opencode"] = {"type": "api", "key": opencode_key}
     auth_path.write_text(
-        json.dumps({"openrouter": {"type": "api", "key": key}}),
+        json.dumps(payload),
         encoding="utf-8",
     )
     return auth_path
@@ -89,7 +99,10 @@ def _main_argv(
 
 
 def _model_selector_for_profile(profile_name: str) -> str:
-    model_id = DEFAULT_PROFILES()[profile_name].model_id
+    profile = DEFAULT_PROFILES()[profile_name]
+    model_id = profile.model_id
+    if profile.upstream != "openrouter":
+        return model_id
     return f"openrouter/{model_id}"
 
 
@@ -123,6 +136,30 @@ def test_main_sources_upstream_key_from_auth_json(monkeypatch: pytest.MonkeyPatc
     proxy = _run_main_with_fake_server(monkeypatch, _main_argv(tmp_path, auth_path))
 
     assert proxy.upstream_key == "sk-or-test-main-valid"
+    assert proxy.upstream_url == OPENROUTER_UPSTREAM_URL
+
+
+def test_main_bigpickle_sources_opencode_key_and_zen_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_path = _write_auth_json(
+        tmp_path,
+        key="sk-or-test-main-openrouter",
+        opencode_key="sk-zen-test-main-valid",
+    )
+    proxy = _run_main_with_fake_server(
+        monkeypatch,
+        _main_argv(
+            tmp_path,
+            auth_path,
+            model=_model_selector_for_profile("bigpickle"),
+            profile="bigpickle",
+        ),
+    )
+
+    assert proxy.upstream_key == "sk-zen-test-main-valid"
+    assert proxy.upstream_url == OPENCODE_ZEN_UPSTREAM_URL
 
 
 def test_main_errors_when_auth_json_path_missing(tmp_path: Path) -> None:
@@ -184,6 +221,69 @@ def test_main_authorize_requires_pricing_flags(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
+def test_main_authorize_accepts_zero_pricing_for_bigpickle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auth_path = _write_auth_json(tmp_path, opencode_key="sk-zen-zero-pricing")
+    argv = _main_argv(
+        tmp_path,
+        auth_path,
+        model=_model_selector_for_profile("bigpickle"),
+        profile="bigpickle",
+    ) + [
+        "--authorize",
+        "--pricing-input",
+        "0",
+        "--pricing-output",
+        "0",
+    ]
+
+    proxy = _run_main_with_fake_server(monkeypatch, argv)
+    selected_profile = proxy.registry.get("bigpickle")
+
+    assert selected_profile.authorized is True
+    assert selected_profile.pricing == {
+        "input": pytest.approx(0.0),
+        "output": pytest.approx(0.0),
+    }
+    assert selected_profile.runnable_reason() is None
+
+
+@pytest.mark.parametrize(
+    ("pricing_flag", "pricing_value"),
+    [
+        ("--pricing-input", "-0.1"),
+        ("--pricing-output", "-0.1"),
+    ],
+)
+def test_main_authorize_rejects_negative_pricing_for_bigpickle(
+    tmp_path: Path,
+    pricing_flag: str,
+    pricing_value: str,
+) -> None:
+    auth_path = _write_auth_json(tmp_path, opencode_key="sk-zen-negative-pricing")
+    argv = _main_argv(
+        tmp_path,
+        auth_path,
+        model=_model_selector_for_profile("bigpickle"),
+        profile="bigpickle",
+    ) + [
+        "--authorize",
+        "--pricing-input",
+        "0",
+        "--pricing-output",
+        "0",
+        pricing_flag,
+        pricing_value,
+    ]
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(argv)
+
+    assert excinfo.value.code == 2
+
+
 @pytest.mark.parametrize("profile_name", ("mimo", "mimo25", "hy3", "kimicode", "ring"))
 def test_main_requires_provider_order_for_unpinned_profiles(
     tmp_path: Path,
@@ -239,6 +339,38 @@ def test_main_provider_quant_requires_provider_order(tmp_path: Path, capsys: pyt
 
     assert excinfo.value.code == 2
     assert "--provider-quant requires --provider-order" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_flag"),
+    [
+        (["--provider-order", "novita"], "--provider-order"),
+        (["--provider-quant", "fp8"], "--provider-quant"),
+    ],
+)
+def test_main_rejects_provider_pin_flags_for_zen_profiles(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    extra_args: list[str],
+    expected_flag: str,
+) -> None:
+    auth_path = _write_auth_json(tmp_path, opencode_key="sk-zen-provider-pin")
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(
+            _main_argv(
+                tmp_path,
+                auth_path,
+                model=_model_selector_for_profile("bigpickle"),
+                profile="bigpickle",
+            )
+            + extra_args
+        )
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert expected_flag in err
+    assert "incompatible" in err
 
 
 @pytest.mark.parametrize(
@@ -340,6 +472,7 @@ class _RunningProxy:
     port: int
     run_token: str
     upstream_key: str
+    upstream_url: str
     max_tokens_cap: int
     glm_profile_provider_object: dict[str, Any]
     ledger: BudgetLedger
@@ -377,6 +510,7 @@ def _running_proxy_server(
 
     registry = ProfileRegistry(profiles)
     profile = registry.get(profile_name)
+    upstream_url = UPSTREAM_CHAT_COMPLETIONS_URLS[profile.upstream]
 
     checkpoint_path = tmp_path / f"ledger-{uuid.uuid4().hex}.json"
     log_path = tmp_path / f"proxy-{uuid.uuid4().hex}.log"
@@ -400,6 +534,7 @@ def _running_proxy_server(
         run_token=run_token,
         logger=logger,
         max_tokens_cap=int(max_tokens_cap),
+        upstream_url=upstream_url,
         upstream_transport=fake_upstream,
     )
 
@@ -414,6 +549,7 @@ def _running_proxy_server(
             port=int(port),
             run_token=run_token,
             upstream_key=upstream_key,
+            upstream_url=upstream_url,
             max_tokens_cap=int(max_tokens_cap),
             glm_profile_provider_object=glm_provider_object,
             ledger=ledger,
@@ -980,8 +1116,41 @@ def test_upstream_target_is_openrouter_constant_only(tmp_path: Path) -> None:
         status, _, _ = _post_json(running, _glm_request_body(), token=running.run_token)
 
     assert status == 200
+    assert running.upstream_url == OPENROUTER_UPSTREAM_URL
     assert len(fake.calls) == 1
     assert all(call.url == OPENROUTER_UPSTREAM_URL for call in fake.calls)
+
+
+def test_upstream_target_is_opencode_zen_for_bigpickle(tmp_path: Path) -> None:
+    fake = _FakeUpstream([_non_stream_success_response(cost=0.0)])
+    profiles = DEFAULT_PROFILES()
+    profiles["bigpickle"] = dataclasses.replace(
+        profiles["bigpickle"],
+        pricing={"input": 0.0, "output": 0.0},
+        authorized=True,
+    )
+
+    with _running_proxy_server(
+        tmp_path,
+        fake_upstream=fake,
+        profile_name="bigpickle",
+        profiles_override=profiles,
+    ) as running:
+        status, _, _ = _post_json(
+            running,
+            {
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "hello zen"}],
+                "max_tokens": 32,
+            },
+            token=running.run_token,
+        )
+
+    assert status == 200
+    assert running.upstream_url == OPENCODE_ZEN_UPSTREAM_URL
+    assert len(fake.calls) == 1
+    assert fake.calls[0].url == OPENCODE_ZEN_UPSTREAM_URL
+    assert "provider" not in fake.calls[0].body_json
 
 
 def test_logfile_contains_fingerprints_and_status_without_secrets_or_prompt(tmp_path: Path) -> None:

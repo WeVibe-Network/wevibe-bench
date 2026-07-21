@@ -47,6 +47,15 @@ _CANDIDATE_SPECS: tuple[dict[str, Any], ...] = (
     {"slug": "tencent/hy3", "recommend": "RESERVE"},
     {"slug": "moonshotai/kimi-k2.7-code", "recommend": "RESERVE"},
     {"slug": "inclusionai/ring-2.6-1t", "recommend": "FLOOR-ANCHOR-PROBE"},
+    {
+        "slug": "opencode/big-pickle",
+        "recommend": "FLOOR-ANCHOR-PROBE",
+        "context": None,
+        "max_out": 8192,
+        "price_in": 0.0,
+        "price_out": 0.0,
+        "notes": "Smoke-only lowest rung (Walter-pinned 2026-07-21); NO stage-4 OFF-spike; OpenCode Zen free/free pricing.",
+    },
 )
 
 _CANDIDATE_SLUGS = {spec["slug"] for spec in _CANDIDATE_SPECS}
@@ -553,6 +562,9 @@ def build_snapshot(evidence_dir: Path, trace_id: str) -> tuple[dict[str, Any], l
         slug = spec["slug"]
         candidate = _new_candidate(spec)
         notes: list[str] = []
+        spec_note = _strip_string(spec.get("notes"))
+        if spec_note is not None:
+            notes.append(spec_note)
 
         stage2 = latest.get((2, slug))
         stage3 = latest.get((3, slug))

@@ -62,14 +62,20 @@ BACKGAMMON_REQUIREMENTS: tuple[str, ...] = (
     "Run on PORT 8002 and fail with a clear message if the port is taken.",
 )
 
-# Source: OpenRouter pricing cards (USD per 1M tokens), e.g.
-# https://openrouter.ai/anthropic/claude-opus-4.8 (snapshot used in bench guard reports).
+# Source: published provider pricing cards (USD per 1M tokens), e.g.
+# - https://openrouter.ai/anthropic/claude-opus-4.8 (snapshot used in bench guard reports)
+# - https://opencode.ai/docs/zen-models (Zen free/free row for big-pickle)
+# Walter-pinned: keep the free/free big-pickle row at truthful zero pricing.
 _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
     "anthropic/claude-opus-4.8": {
         "input": 5.0,
         "output": 25.0,
         "cache_read": 0.5,
         "cache_write": 6.25,
+    },
+    "opencode/big-pickle": {
+        "input": 0.0,
+        "output": 0.0,
     }
 }
 
@@ -228,6 +234,9 @@ class BackgammonRunner(AgentRunner):
                 model=self.model,
                 explicit_output_price_per_1m=self.output_price_per_1m,
             )
+            # Free/free rows intentionally resolve to zero reservation/headroom.
+            # In that case cost_limit_usd enforcement remains the accrued `part.cost`
+            # boundary from _cost_limit_exceeded + proxy hard cap.
             cache_write_price_per_1m = self._resolve_cache_write_price_per_1m(
                 model=self.model,
                 fallback_price_per_1m=self._effective_output_price_per_1m,
@@ -1232,7 +1241,10 @@ class BackgammonRunner(AgentRunner):
 
     @classmethod
     def _pricing_row_for_model(cls, model: str) -> dict[str, float] | None:
-        return _MODEL_PRICING_USD_PER_1M.get(cls._model_id_from_selector(model))
+        selector = str(model)
+        return _MODEL_PRICING_USD_PER_1M.get(selector) or _MODEL_PRICING_USD_PER_1M.get(
+            cls._model_id_from_selector(selector)
+        )
 
     @classmethod
     def _resolve_output_price_per_1m(

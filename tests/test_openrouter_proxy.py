@@ -11,46 +11,49 @@ from wevibe_bench.adapters.openrouter_proxy import (
     BudgetExceededError,
     BudgetLedger,
     CredentialError,
+    OPENCODE_ZEN_UPSTREAM_URL,
     ModelMismatchError,
+    OPENROUTER_UPSTREAM_URL,
     PolicyMismatchError,
     ProfileBlockedError,
     ProtectedFieldError,
     ProxyLogger,
+    UPSTREAM_CHAT_COMPLETIONS_URLS,
     DEFAULT_PROFILES,
     apply_policy,
     input_token_upper_bound,
     key_fingerprint,
-    load_openrouter_upstream_key,
+    load_upstream_key,
     worst_case_usd,
 )
 
 
-def test_load_openrouter_upstream_key_returns_stripped_key(tmp_path: Path) -> None:
+def test_load_upstream_key_returns_stripped_openrouter_key(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
         json.dumps({"openrouter": {"type": "api", "key": "   sk-or-test-key   "}}),
         encoding="utf-8",
     )
 
-    assert load_openrouter_upstream_key(str(auth_path)) == "sk-or-test-key"
+    assert load_upstream_key("openrouter", str(auth_path)) == "sk-or-test-key"
 
 
-def test_load_openrouter_upstream_key_rejects_missing_file(tmp_path: Path) -> None:
+def test_load_upstream_key_rejects_missing_file(tmp_path: Path) -> None:
     missing = tmp_path / "missing-auth.json"
 
     with pytest.raises(CredentialError, match="opencode auth.json not found"):
-        load_openrouter_upstream_key(str(missing))
+        load_upstream_key("openrouter", str(missing))
 
 
-def test_load_openrouter_upstream_key_rejects_missing_openrouter_object(tmp_path: Path) -> None:
+def test_load_upstream_key_rejects_missing_openrouter_object(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(json.dumps({"other": {"key": "sk-or-test-key"}}), encoding="utf-8")
 
     with pytest.raises(CredentialError, match="missing object at key 'openrouter'"):
-        load_openrouter_upstream_key(str(auth_path))
+        load_upstream_key("openrouter", str(auth_path))
 
 
-def test_load_openrouter_upstream_key_rejects_empty_key(tmp_path: Path) -> None:
+def test_load_upstream_key_rejects_empty_openrouter_key(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
         json.dumps({"openrouter": {"type": "api", "key": "    "}}),
@@ -58,7 +61,39 @@ def test_load_openrouter_upstream_key_rejects_empty_key(tmp_path: Path) -> None:
     )
 
     with pytest.raises(CredentialError, match="openrouter.key must be non-empty"):
-        load_openrouter_upstream_key(str(auth_path))
+        load_upstream_key("openrouter", str(auth_path))
+
+
+def test_load_upstream_key_returns_stripped_opencode_key(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps({"opencode": {"type": "api", "key": "   sk-zen-test-key   "}}),
+        encoding="utf-8",
+    )
+
+    assert load_upstream_key("opencode", str(auth_path)) == "sk-zen-test-key"
+
+
+def test_load_upstream_key_rejects_missing_opencode_entry_with_connect_guidance(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps({"openrouter": {"type": "api", "key": "sk-or-test-key"}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CredentialError, match=r"no 'opencode' entry") as excinfo:
+        load_upstream_key("opencode", str(auth_path))
+
+    assert "opencode /connect" in str(excinfo.value)
+
+
+def test_upstream_chat_completion_url_map_is_canonical() -> None:
+    assert OPENROUTER_UPSTREAM_URL == "https://openrouter.ai/api/v1/chat/completions"
+    assert OPENCODE_ZEN_UPSTREAM_URL == "https://opencode.ai/zen/v1/chat/completions"
+    assert UPSTREAM_CHAT_COMPLETIONS_URLS == {
+        "openrouter": OPENROUTER_UPSTREAM_URL,
+        "opencode": OPENCODE_ZEN_UPSTREAM_URL,
+    }
 
 
 def test_apply_policy_rejects_client_provider_override() -> None:
@@ -98,7 +133,8 @@ def test_apply_policy_injects_exact_glm_provider_object() -> None:
 def test_default_profiles_include_roster_candidates_with_constraints() -> None:
     profiles = DEFAULT_PROFILES()
 
-    assert set(profiles) == {"glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus"}
+    assert set(profiles) == {"glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus", "bigpickle"}
+    assert list(profiles.keys())[-1] == "bigpickle"
     assert profiles["glm"].model_id == "z-ai/glm-5.2"
     assert profiles["mimo"].model_id == "xiaomi/mimo-v2.5-pro"
     assert profiles["mimo25"].model_id == "xiaomi/mimo-v2.5"
@@ -106,6 +142,15 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
     assert profiles["kimicode"].model_id == "moonshotai/kimi-k2.7-code"
     assert profiles["ring"].model_id == "inclusionai/ring-2.6-1t"
     assert profiles["opus"].model_id == "anthropic/claude-opus-4.8"
+    assert profiles["bigpickle"].model_id == "opencode/big-pickle"
+    assert profiles["bigpickle"].upstream == "opencode"
+    assert profiles["bigpickle"].provider_object is None
+    assert profiles["bigpickle"].pin_constraints is None
+    assert profiles["bigpickle"].pricing is None
+    assert profiles["bigpickle"].authorized is False
+    assert profiles["bigpickle"].max_output_tokens == 8192
+    assert profiles["bigpickle"].max_reasoning_tokens == 8192
+    assert profiles["bigpickle"].runnable_reason() == "pricing_missing"
 
     expected_constraints = {
         "mimo": {
@@ -143,6 +188,23 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
 
     assert profiles["glm"].pin_constraints is None
     assert profiles["opus"].pin_constraints is None
+
+
+def test_apply_policy_for_zen_profile_skips_provider_injection() -> None:
+    bigpickle = DEFAULT_PROFILES()["bigpickle"]
+
+    transformed = apply_policy(
+        {
+            "model": "opencode/big-pickle",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 999_999,
+        },
+        bigpickle,
+        max_tokens_cap=2048,
+    )
+
+    assert "provider" not in transformed
+    assert transformed["max_tokens"] == 2048
 
 
 def test_apply_policy_rejects_unpinned_mimo_profile_with_provider_pin_missing() -> None:

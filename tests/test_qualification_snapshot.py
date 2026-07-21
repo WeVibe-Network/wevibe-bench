@@ -168,6 +168,29 @@ def test_snapshot_emits_roster_with_tolerant_evidence_ingest(tmp_path: pathlib.P
     }
     _write_json(evidence_dir / "stage3-z-ai_glm-5.2-20260720T030000Z.json", glm_stage3)
 
+    big_pickle_stage3 = {
+        "schema_version": 1,
+        "stage": 3,
+        "slug": "opencode/big-pickle",
+        "captured_at": "2026-07-20T03:20:00Z",
+        "checks": {
+            "shape": {"pass": True},
+            "streaming": {"pass": True},
+            "tools": {"pass": True},
+            "structured": {"pass": True},
+            "require-params": {"pass": True},
+        },
+        "tokens_used_total": 212,
+        "token_budget": 8000,
+        "budget_ok": True,
+        "cost_usd_total": 0.0,
+        "provider_slugs": ["opencode/zen-free"],
+        "quantizations": [],
+        "errors": [],
+        "trace": "trace-big-pickle-stage3",
+    }
+    _write_json(evidence_dir / "stage3-opencode_big-pickle-20260720T032000Z.json", big_pickle_stage3)
+
     (evidence_dir / "stage2-moonshotai_kimi-k2.7-code-20260720T031500Z.json").write_text(
         "{ not valid json",
         encoding="utf-8",
@@ -187,11 +210,13 @@ def test_snapshot_emits_roster_with_tolerant_evidence_ingest(tmp_path: pathlib.P
         "tencent/hy3",
         "moonshotai/kimi-k2.7-code",
         "inclusionai/ring-2.6-1t",
+        "opencode/big-pickle",
     ]
 
     evidence_sources = set(snapshot["evidence_sources"])
     assert str((evidence_dir / "stage2-z-ai_glm-5.2-20260720T020000Z.json").resolve()) in evidence_sources
     assert str((evidence_dir / "stage3-z-ai_glm-5.2-20260720T030000Z.json").resolve()) in evidence_sources
+    assert str((evidence_dir / "stage3-opencode_big-pickle-20260720T032000Z.json").resolve()) in evidence_sources
     assert str((evidence_dir / "stage2-tencent_hy3-20260720T023000Z.json").resolve()) in evidence_sources
     assert str((evidence_dir / "stage2-z-ai_glm-5.2-20260720T010000Z.json").resolve()) not in evidence_sources
 
@@ -248,6 +273,24 @@ def test_snapshot_emits_roster_with_tolerant_evidence_ingest(tmp_path: pathlib.P
     ring = by_slug["inclusionai/ring-2.6-1t"]
     assert ring["context"] is None
     assert ring["tool_use"] is None
+
+    big_pickle = by_slug["opencode/big-pickle"]
+    assert big_pickle["context"] is None
+    assert big_pickle["max_out"] == 8192
+    assert big_pickle["price_in"] == 0.0
+    assert big_pickle["price_out"] == 0.0
+    assert big_pickle["streaming"] is True
+    assert big_pickle["tool_use"] is True
+    assert big_pickle["providers"] == [
+        {
+            "provider_slug": "opencode/zen-free",
+            "endpoint": "opencode/zen-free",
+            "pinned_for_tests": True,
+        }
+    ]
+    assert "Smoke-only lowest rung (Walter-pinned 2026-07-21); NO stage-4 OFF-spike; OpenCode Zen free/free pricing." in str(
+        big_pickle["notes"]
+    )
 
     rendered = json.dumps(snapshot, sort_keys=True)
     assert '"token"' not in rendered

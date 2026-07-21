@@ -28,6 +28,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     DEFAULT_PROFILES,
     ModelMismatchError,
     OPENROUTER_UPSTREAM_URL,
+    UPSTREAM_CHAT_COMPLETIONS_URLS,
     ProfileBlockedError,
     ProfileRegistry,
     ProtectedFieldError,
@@ -36,7 +37,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     apply_policy,
     input_token_upper_bound,
     key_fingerprint,
-    load_openrouter_upstream_key,
+    load_upstream_key,
     normalize_model_selector,
     worst_case_usd,
 )
@@ -269,6 +270,7 @@ class ProxyServer:
         run_token: str,
         logger: ProxyLogger,
         max_tokens_cap: int,
+        upstream_url: str = OPENROUTER_UPSTREAM_URL,
         upstream_transport: UpstreamTransport = urllib_upstream_transport,
     ) -> None:
         self.registry = registry
@@ -278,6 +280,7 @@ class ProxyServer:
         self.run_token = run_token
         self.logger = logger
         self.max_tokens_cap = int(max_tokens_cap)
+        self.upstream_url = str(upstream_url)
         self.upstream_transport = upstream_transport
 
         self._ordinal_counter = itertools.count(1)
@@ -630,7 +633,7 @@ class ProxyServer:
             stream_flag = bool(transformed.get("stream"))
 
             upstream = self.upstream_transport(
-                OPENROUTER_UPSTREAM_URL,
+                self.upstream_url,
                 upstream_headers,
                 upstream_body,
                 stream_flag,
@@ -859,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profile",
         required=True,
-        choices=("glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus"),
+        choices=("glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus", "bigpickle"),
     )
     parser.add_argument("--provider-order", default=None)
     parser.add_argument("--provider-quant", default=None)
@@ -890,24 +893,29 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--target-usd must be > 0 when provided")
     if args.max_output_tokens <= 0:
         parser.error("--max-output-tokens must be > 0")
-    if args.provider_quant is not None and args.provider_order is None:
-        parser.error("--provider-quant requires --provider-order")
     if args.authorize and (
         args.pricing_input is None
-        or args.pricing_input <= 0
+        # Walter-directed truthful zero-pricing: free-tier upstreams can be 0.0.
+        or args.pricing_input < 0
         or args.pricing_output is None
-        or args.pricing_output <= 0
+        or args.pricing_output < 0
     ):
-        parser.error("--authorize requires --pricing-input and --pricing-output > 0 (live-verified)")
-
-    try:
-        upstream_key = load_openrouter_upstream_key(args.auth_path)
-    except CredentialError as exc:
-        parser.error(str(exc))
+        parser.error("--authorize requires --pricing-input and --pricing-output >= 0 (live-verified)")
 
     profiles = DEFAULT_PROFILES()
     selected_profile = profiles[args.profile]
-    if selected_profile.provider_object is None:
+    if selected_profile.upstream != "openrouter":
+        if args.provider_order is not None:
+            parser.error(
+                f"--profile {args.profile!r} uses upstream {selected_profile.upstream!r}; "
+                "--provider-order is incompatible"
+            )
+        if args.provider_quant is not None:
+            parser.error(
+                f"--profile {args.profile!r} uses upstream {selected_profile.upstream!r}; "
+                "--provider-quant is incompatible"
+            )
+    elif selected_profile.provider_object is None:
         if args.provider_order is None or not str(args.provider_order).strip():
             parser.error(
                 f"--profile {args.profile!r} requires --provider-order because it has no hardcoded provider pin"
@@ -935,6 +943,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.provider_quant is not None:
             parser.error("--provider-quant requires --provider-order")
+
+    try:
+        upstream_url = UPSTREAM_CHAT_COMPLETIONS_URLS[selected_profile.upstream]
+    except KeyError:
+        parser.error(
+            f"unknown upstream {selected_profile.upstream!r} configured for --profile {args.profile!r}"
+        )
+
+    try:
+        upstream_key = load_upstream_key(selected_profile.upstream, args.auth_path)
+    except CredentialError as exc:
+        parser.error(str(exc))
 
     if args.authorize:
         pricing: dict[str, float] = {
@@ -982,6 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
         run_token=run_token,
         logger=logger,
         max_tokens_cap=int(args.max_output_tokens),
+        upstream_url=upstream_url,
     )
     logger.event(
         event="proxy_start",
@@ -992,6 +1013,8 @@ def main(argv: list[str] | None = None) -> int:
         pricing_present=bool(args.authorize),
         port=int(args.port),
         provider=selected_profile.provider_object,
+        upstream_provider=selected_profile.upstream,
+        upstream_url=upstream_url,
         upstream_key_fp=key_fingerprint(upstream_key),
     )
 

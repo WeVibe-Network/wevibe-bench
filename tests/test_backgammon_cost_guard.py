@@ -286,11 +286,58 @@ def test_init_rejects_cost_target_at_or_above_limit(tmp_path: Path) -> None:
         )
 
 
-def test_init_rejects_missing_pricing_without_override(tmp_path: Path) -> None:
+def test_pricing_table_contains_truthful_big_pickle_zero_row() -> None:
+    assert backgammon_mod._MODEL_PRICING_USD_PER_1M["opencode/big-pickle"] == {
+        "input": 0.0,
+        "output": 0.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "model_selector",
+    [
+        "opencode/big-pickle",
+        "openrouter/opencode/big-pickle",
+    ],
+)
+def test_zero_price_model_cost_math_is_zero_and_does_not_raise(
+    tmp_path: Path,
+    model_selector: str,
+) -> None:
+    runner = _make_runner(
+        tmp_path,
+        model=model_selector,
+        cost_limit_usd=1.0,
+        max_output_tokens=8192,
+        max_steps_per_attempt=3,
+    )
+
+    assert runner._effective_output_price_per_1m == pytest.approx(0.0)
+    assert runner._cache_write_allowance_usd == pytest.approx(0.0)
+    assert runner._one_step_worst_case_usd == pytest.approx(0.0)
+    assert runner._reservation_usd == pytest.approx(0.0)
+    assert (
+        runner._refuse_invocation_by_reservation(
+            run_label="zero-price",
+            phase="initial",
+            accrued_cost_usd=0.99,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "unknown_model",
+    [
+        "openrouter/not-in-table/model-x",
+        "opencode/not-in-table",
+    ],
+)
+def test_init_rejects_missing_pricing_without_override(tmp_path: Path, unknown_model: str) -> None:
     with pytest.raises(ValueError, match="missing authoritative output pricing"):
         _make_runner(
             tmp_path,
-            model="openrouter/not-in-table/model-x",
+            model=unknown_model,
             cost_limit_usd=1.0,
             max_output_tokens=1000,
             max_steps_per_attempt=2,
