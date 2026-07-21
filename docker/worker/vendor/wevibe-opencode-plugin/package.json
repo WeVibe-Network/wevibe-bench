@@ -1,0 +1,38 @@
+{
+  "name": "wevibe-opencode-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WeVibe Network plugin bundle for OpenCode.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WeVibe-Network/wevibe-opencode-plugin.git"
+  },
+  "license": "Apache-2.0",
+  "main": "plugins/wevibe-plugin.ts",
+  "bin": {
+    "wevibe-install-opencode": "bin/install-opencode.ts"
+  },
+  "files": [
+    "bin",
+    "plugins",
+    "tui.json",
+    "tui"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "install-opencode": "tsx bin/install-opencode.ts install-opencode",
+    "uninstall-opencode": "tsx bin/install-opencode.ts uninstall-opencode"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.4.10"
+  },
+  "devDependencies": {
+    "@opentui/core": "0.4.1",
+    "@opentui/solid": "0.4.1",
+    "@types/node": "22.19.21",
+    "solid-js": "1.9.13",
+    "tsx": "^4.19.2",
+    "typescript": "6.0.3"
+  }
+}

@@ -33,12 +33,14 @@ RUN set -eux; \
 # Attempt vendored plugin wiring when docker/worker/vendor/wevibe-opencode-plugin is provided.
 # If the vendored plugin is absent, image isolation remains intact; ON-cell plugin validation is
 # handled separately by bench smoke (out of scope for this chunk).
+# NOTE: --install-links=true is REQUIRED — a plain `npm i -g <dir>` creates a SYMLINK into
+# /opt/docker-worker-context, which the cleanup step below deletes (dangling plugin path).
 COPY . /opt/docker-worker-context
 
 RUN set -eux; \
     plugin_path=""; \
     if [ -f /opt/docker-worker-context/vendor/wevibe-opencode-plugin/package.json ]; then \
-      npm i -g /opt/docker-worker-context/vendor/wevibe-opencode-plugin; \
+      npm i -g --install-links=true /opt/docker-worker-context/vendor/wevibe-opencode-plugin; \
       plugin_path="$(npm root -g)/wevibe-opencode-plugin/plugins/wevibe-plugin.ts"; \
       test -f "${plugin_path}"; \
     else \
