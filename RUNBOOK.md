@@ -44,12 +44,14 @@ The clone lives at `/Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench/scaf
 prebuilt (rebuild with `npx tsc` only if stale). Bench lifecycle points it via
 `WEVIBE_BENCH_MCP_ROOT=<repo>/scaffold/wevibe-mcp-clone` because canonical `wevibe-mcp` lacks bench `/v1/submit` + `/v1/identity/pubkeys` endpoints. Start it with the SAME env the bench lifecycle
 orchestrator uses — the identity seed MUST be the bench leader seed (`$WEVIBE_BENCH_LEADER_SEED_HEX`)
-or recall cannot decrypt the seeded corpus. FOUR non-obvious env requirements (all baked into
-`config/bench.env`; a standalone start that omits ANY of them fails):
+or recall cannot decrypt the seeded corpus. FOUR non-obvious requirements are mandatory, but
+`config/bench.env` is NOT where they come from — bench lifecycle injects them via the one-path
+(`wevibe_bench/lifecycle/orchestrator.py:_leader_admin_env` + `bring_up` -> `McpProcessManager.spawn`),
+so a standalone start must set them explicitly with the same derivations:
 - `WEVIBE_UMBRAL_SIDECAR_BIN` + `WEVIBE_GUARD_BIN` — the canonical wevibe-plugin normally injects
   both from wevibeRoot; a manual `node dist/server.js` does NOT, so `register-org` 500s with
   "WEVIBE_UMBRAL_SIDECAR_BIN environment variable is required" (epoch Umbral pubkey). This caused
-  the 2026-07-13 cell-1 ladder abort. `source config/bench.env` provides both.
+  the 2026-07-13 cell-1 ladder abort. Derive both from `WEVIBE_BENCH_WEVIBE_ROOT` as lifecycle does.
 - `WEVIBE_MCP_HTTP_ONLY=1` — without it the clone ALSO runs the stdio MCP server, which treats a
   backgrounded stdin-EOF as `stdin-end` and SHUTS DOWN. Required for any `nohup … &` start.
 - `< /dev/null` on the launch — belt-and-suspenders so the stdio path never sees an open-then-closed stdin.
@@ -63,16 +65,20 @@ or recall cannot decrypt the seeded corpus. FOUR non-obvious env requirements (a
   → recall `decrypt_failed: Umbral re-encryption Internal validation failed` / invite `no master key
   found` (the 2026-07-13 blocker). Writer and readers MUST share this path. (K_master stays leader-local;
   hub never receives K_master or epoch_sk — this is a keystore-PATH routing fix, not a crypto change.)
+Preferred one-path remains lifecycle `bring_up`; this standalone command only mirrors that lifecycle env.
 ```
-cd /Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench && set -a && source config/bench.env && set +a && \
+cd /Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench && \
+  WEVIBE_BENCH_WEVIBE_ROOT="${WEVIBE_BENCH_WEVIBE_ROOT:-$(cd .. && pwd)}" && \
+  set -a && source config/bench.env && set +a && \
+  WEVIBE_BENCH_LEADER_KEYSTORE="${WEVIBE_BENCH_LEADER_KEYSTORE:-/tmp/wevibe-bench-leader-keystore.json}" && \
 cd scaffold/wevibe-mcp-clone && \
   WEVIBE_MCP_HTTP_ONLY=1 WEVIBE_MCP_HTTP_PORT=4550 WEVIBE_HTTP_HOST=127.0.0.1 \
   WEVIBE_BENCH_ENDPOINTS=1 WEVIBE_SEED_BACKEND=env \
   WEVIBE_IDENTITY_SEED_HEX="$WEVIBE_BENCH_LEADER_SEED_HEX" \
   WEVIBE_KEYSTORE_PATH="$WEVIBE_BENCH_LEADER_KEYSTORE" \
-  WEVIBE_UMBRAL_SIDECAR_BIN="$WEVIBE_UMBRAL_SIDECAR_BIN" \
-  WEVIBE_GUARD_BIN="$WEVIBE_GUARD_BIN" \
-  WEVIBE_RECALL_MODE="$WEVIBE_RECALL_MODE" \
+  WEVIBE_UMBRAL_SIDECAR_BIN="${WEVIBE_BENCH_WEVIBE_ROOT}/wevibe-umbral/target/release/wevibe-umbral" \
+  WEVIBE_GUARD_BIN="${WEVIBE_BENCH_WEVIBE_ROOT}/wevibe-guard/target/release/wevibe-guard" \
+  WEVIBE_RECALL_MODE=test \
   WEVIBE_HUB_URL=http://127.0.0.1:4440 \
   nohup node dist/server.js < /dev/null > ../../runs/clone4550.log 2>&1 &
 ```
