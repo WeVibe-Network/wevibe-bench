@@ -709,3 +709,13 @@ def test_proxy_logger_excludes_secrets_prompts_and_rejects_forbidden_fields(tmp_
             logger.event(**{field: prompt_text})
 
     logger._handle.close()
+
+
+def test_bigpickle_profile_pins_expected_upstream_identity() -> None:
+    profiles = DEFAULT_PROFILES()
+    # Walter 21-07-26: big-pickle is served as xiaomi/mimo-v2.5; every scored
+    # cell asserts this identity. No other profile pins an expected identity.
+    assert profiles["bigpickle"].expected_upstream_model == "xiaomi/mimo-v2.5"
+    for name, profile in profiles.items():
+        if name != "bigpickle":
+            assert profile.expected_upstream_model is None

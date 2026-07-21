@@ -100,6 +100,10 @@ class ProviderProfile:
     upstream: str = "openrouter"
     authorized: bool = False
     pin_constraints: dict[str, Any] | None = None
+    # When set, every upstream response's reported ``model`` must equal this id;
+    # the proxy server trips a one-way per-run refusal switch on any mismatch
+    # (identity check for stealth/alias models, Walter 21-07-26).
+    expected_upstream_model: str | None = None
 
     def runnable_reason(self) -> str | None:
         """Return blocking reason or ``None`` if this profile is runnable."""
@@ -276,6 +280,10 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             upstream="opencode",
             authorized=False,
             pin_constraints=None,
+            # Zen serves big-pickle as xiaomi/mimo-v2.5 (unmasked 21-07-26,
+            # report 21-07-26-0735). Walter's Stage-7 lock: assert this identity
+            # on every response; on ANY swap abort the cell, never score it.
+            expected_upstream_model="xiaomi/mimo-v2.5",
         ),
     }
 

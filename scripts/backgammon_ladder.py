@@ -202,26 +202,34 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
         }
         return True, detail
 
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
-
-    if stdout:
-        print(stdout, end="" if stdout.endswith("\n") else "\n", flush=True)
-    if stderr:
-        print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr, flush=True)
-
+    # Stream the unit's output LIVE (R-31): merged stdout+stderr is relayed
+    # line-by-line to this process's stdout AND the step logfile as it is
+    # produced, so a hang-watchdog and a human tail see per-step progress
+    # during a long session instead of one buffered burst at unit end.
     with path.open("w", encoding="utf-8") as fh:
         fh.write(f"phase={phase_norm}\n")
         fh.write(f"cmd={json.dumps(cmd)}\n")
-        fh.write("=== STDOUT ===\n")
-        fh.write(stdout)
-        if stdout and not stdout.endswith("\n"):
-            fh.write("\n")
-        fh.write("=== STDERR ===\n")
-        fh.write(stderr)
-        if stderr and not stderr.endswith("\n"):
-            fh.write("\n")
+        fh.write("=== OUTPUT (stdout+stderr merged, streamed live) ===\n")
+        fh.flush()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        lines: list[str] = []
+        for line in proc.stdout:
+            lines.append(line)
+            fh.write(line)
+            fh.flush()
+            print(line, end="" if line.endswith("\n") else "\n", flush=True)
+        proc.stdout.close()
+        returncode = proc.wait()
+
+    stdout = "".join(lines)
+    stderr = ""
+    output_tail = "".join(lines[-20:]).strip()
 
     payload, parse_error = _parse_result_payload(phase_norm, stdout, stderr)
     status = ""
@@ -230,13 +238,13 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
         status = str(payload.get("status") or "").strip()
         delivery = str(payload.get("delivery") or "").strip().upper()
 
-    ok = completed.returncode == 0 and status == "ok"
+    ok = returncode == 0 and status == "ok"
     if phase_norm == "extraction":
         ok = ok and delivery == "YES"
 
     error_parts: list[str] = []
-    if completed.returncode != 0:
-        error_parts.append(f"exit={completed.returncode}")
+    if returncode != 0:
+        error_parts.append(f"exit={returncode}")
     if parse_error:
         error_parts.append(parse_error)
     if status and status != "ok":
@@ -245,15 +253,15 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
         error_parts.append(f"delivery={delivery or '<missing>'}")
     if payload is not None and payload.get("error"):
         error_parts.append(f"error={payload.get('error')}")
-    if not ok and stderr.strip():
-        error_parts.append(f"stderr={stderr.strip()}")
+    if not ok and output_tail:
+        error_parts.append(f"output_tail={output_tail}")
     if not ok and not error_parts:
         error_parts.append("unknown failure")
 
     dur_seconds = round(time.perf_counter() - started, 6)
     detail = {
         "phase": phase_norm,
-        "exit_code": completed.returncode,
+        "exit_code": returncode,
         "status": status,
         "delivery": delivery,
         "result_payload": payload,
@@ -347,6 +355,8 @@ def _upsert_unit_entry(checkpoint: dict[str, Any], unit_entry: dict[str, Any]) -
 def _requested_units(phase_arg: str) -> list[str]:
     if phase_arg == "extraction":
         return ["extraction"]
+    if phase_arg == "session":
+        return ["session"]
     return ["session", "extraction"]
 
 

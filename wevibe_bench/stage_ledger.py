@@ -26,14 +26,24 @@ SCHEMA_VERSION = 1
 CAP_REFUSAL_EXIT = 3
 EPSILON = 1e-9
 
-STAGE_KEYS: tuple[str, ...] = ("stage2", "stage3", "stage4", "stage5")
+STAGE_KEYS: tuple[str, ...] = ("stage2", "stage3", "stage4", "stage5", "stage7")
 DEFAULT_CAPS: dict[str, float] = {
     "stage2": 10.0,
     "stage3": 25.0,
     "stage4": 40.0,
     "stage5": 40.0,
+    # Stage-7 scored ladder (Walter GO 21-07-26). The roster work order defines
+    # no numeric Stage-7 cap; $40 is the pre-registered operational cap
+    # (worst-case roster-A estimate with N=3 repeats ≈ $28), under global $115.
+    "stage7": 40.0,
     "global": 115.0,
 }
+
+# Stage keys added AFTER ledger files already existed on disk. A ledger missing
+# ONLY these keys is backfilled from DEFAULT_CAPS/empty entries (deterministic
+# forward migration, persisted on the next write); any other missing key still
+# fails loudly as corruption.
+MIGRATION_BACKFILL_KEYS: tuple[str, ...] = ("stage7",)
 
 DEFAULT_LEDGER_PATH = Path("runs/qualification/stage-ledger.json")
 DEFAULT_LOG_PATH = Path("runs/qualification/stage-ledger.log")
@@ -136,6 +146,9 @@ def _load_ledger(ledger_path: Path) -> dict[str, Any]:
     caps: dict[str, float] = {}
     for cap_key in (*STAGE_KEYS, "global"):
         if cap_key not in caps_raw:
+            if cap_key in MIGRATION_BACKFILL_KEYS:
+                caps[cap_key] = float(DEFAULT_CAPS[cap_key])
+                continue
             raise ValueError(f"ledger.caps missing {cap_key}")
         caps[cap_key] = _coerce_nonnegative_float(caps_raw[cap_key], field_name=f"caps.{cap_key}")
 
@@ -476,12 +489,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     record_parser = subparsers.add_parser("record", help="Record one run budget JSON into a stage ledger")
     _add_common_paths(record_parser)
-    record_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5), required=True)
+    record_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7), required=True)
     record_parser.add_argument("--budget-json", required=True)
 
     check_parser = subparsers.add_parser("check", help="Admission check against stage/global caps")
     _add_common_paths(check_parser)
-    check_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5), required=True)
+    check_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7), required=True)
     check_parser.add_argument("--estimated-usd", type=float, default=0.0)
 
     report_parser = subparsers.add_parser("report", help="Emit stage/global totals report as JSON")

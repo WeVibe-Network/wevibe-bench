@@ -19,8 +19,12 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
   own prior runs. Self-extraction (E = session model). 3× (now problems-only) between-attempt feedback.
 
 ## 2. ARCHITECTURE / COMPONENTS (all under `wevibe-bench/`)
-- **Drivers:** `scripts/backgammon_14cell_ladder.py` (14-cell outer driver, `--resume`/`--start-cell`,
-  ESCALATE.json) → shells `scripts/backgammon_ladder.py` (per-rung, `--phase`, `--max-retries`) →
+- **Drivers:** `scripts/backgammon_scored_ladder.py` (Stage-7 scored-ladder outer driver, roster A: source
+  Opus-4.8 + measure kimi-k2.7-code/big-pickle; derives its roster from `wevibe_bench/config.py`
+  (`backgammon_scored_ladder_roster()`), writes `scored-ladder-manifest.json` (frozen roster+allocation+rung
+  params, config fingerprint, schema v2; `--resume` fails on any drift), owns per-cell stage-7 ledger
+  admission + proxy lifecycle + identity/delivery assertions + variance-policy N-logic
+  (`scored-ladder-summary.json` discloses N per cell), checkpoint per cell/rep) → shells `scripts/backgammon_ladder.py` (per-rung, `--phase`, `--max-retries`) →
   `scripts/run_backgammon.py` (single cell/session, `--memory-modes off,on`, NO extraction) →
   `wevibe_bench/adapters/backgammon.py` (spawns headless `opencode run`, feedback loop, gate run, cheat-gate).
 - **Extraction/SxE:** `scripts/backgammon_sxe.py` (extract→submit→leader_verify→commit→prove_delivery).
@@ -45,6 +49,23 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
   (`WEVIBE_KEYSTORE_PATH=$WEVIBE_BENCH_LEADER_KEYSTORE`, umbral/guard bins, `WEVIBE_MCP_HTTP_ONLY=1`, `< /dev/null`,
   `WEVIBE_RECALL_MODE=test`). org-0 self-seeds on cell 1 (genesis-fresh chain → first register-org = wevibe-org-0).
 
+### 2A. Stage-7 roster status (Walter decision, 2026-07-21)
+- `opencode/big-pickle` is a full Stage-7 MEASURE rung (resolves fork F1; supersedes the same-day smoke-only pin).
+- Canonical roster: SOURCE Opus-4.8 (OFF cell + self-extraction) → MEASURE `moonshotai/kimi-k2.7-code` (OFF+ON, session-only)
+  → MEASURE `opencode/big-pickle` (OFF+ON, session-only). `xiaomi/mimo-v2.5` is big-pickle's upstream identity only (Zen alias),
+  not a separate rung.
+- Qualification evidence: `runs/qualification/stage3-opencode-big-pickle-20260721T142452Z.smoke.log` (4/4 transport checks pass:
+  streaming/tools/structured/require-params; $0) + `runs/backgammon/20260721T143340Z-stage5-opencode-big-pickle-scorecard.json`
+  and `runs/openrouter-proxy/20260721T143337Z-stage5-opencode-big-pickle-20260721T143337Z.log` (OFF transport-clean over real Zen;
+  capability FAIL is measured capability, not a transport failure).
+- ON-cell recall delivery is asserted in-cell by `scripts/backgammon_scored_ladder.py::_scan_delivery`; failure aborts with
+  `delivery_unproven`.
+- Run forms (do not execute here; invoke from repo root with `PYTHONPATH=.`): real run requires `--rung-params` →
+  `PYTHONPATH=. python3 scripts/backgammon_scored_ladder.py --rung-params <rung-params.json> [--runs-dir ...] [--ladder-runs-dir ...] [--clone-log ...] [--proxy-port ...] [--org-id ...] [--start-cell N] [--resume]`;
+  dry-run requires no rung params → `PYTHONPATH=. python3 scripts/backgammon_scored_ladder.py --dry-run [--runs-dir ...] [--start-cell N]`.
+- Checkpoint/resume path: `runs/backgammon-scored-ladder/scored-ladder-checkpoint.json`; caps enforced via `wevibe_bench.stage_ledger`
+  (Stage-7 $40, global $115).
+
 ## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
 - Plugin re-injects ALL approved memories EVERY turn + across compaction (`wevibe-plugin.ts:1349` transform →
   `:1412-1447` inject-all-eligible → `:1503` compaction). Per-session dedup gates ATTRIBUTION only, not injection.
@@ -55,8 +76,11 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
 - Decrypt happens in the :4550 clone (seed identity), NOT the worker plugin → worker needs only HTTP to :4550.
 
 ## 4. RESULTS TO DATE
-### 4a. 13-07 N=1 ladder (T1→T4, opus-4.8→gemini→glm→minimax) — pre-integrity-fix, HISTORY
-Directional: weaker=more lift; efficiency signal. reports `13-07-26-0407/0600/0700/0750`. Superseded by 14-07.
+### 4a. 13-07 runs — T1 ONLY; the "full T1→T4 ladder / monotonic lift" claim is REFUTED
+13-07 STOPPED after T1 as instructed (no T1 ON cell; no T2/T3/T4 scorecards exist). The prior §4a mirror
+("Directional: weaker=more lift") copied a false continuance claim (added retrospectively 15-07, `293caa9`)
+with no primary artifact behind it — refutation: report `21-07-26-0845-bench-1307-ladder-claim-refutation.md`.
+The ONLY defensible prior statement is §4b's compromised 14-cell summary. reports `13-07-26-0407/0600/0700/0750`.
 ### 4b. 14-07 clean-wipe 14-cell ladder (opus-4.6×2/GLM×3/kimi-k2.7×4/minimax×5) — ran 12/14, VALID
 - Aborted at cell-12 (minimax SELF-extraction false-negatived its own valid transcript `off_task_output` 5× →
   whole-ladder abort; NO skip-past-extraction-fail flag). Cells 13-14 never ran.

@@ -295,6 +295,14 @@ class ProxyServer:
         self._proven_billed_input_ub = 0
         self._billed_ub_lock = threading.Lock()
 
+        # Upstream-identity trip switch (Walter 21-07-26): once ANY upstream
+        # response reports a model that mismatches the profile's
+        # ``expected_upstream_model``, every subsequent request in this run is
+        # refused (503 identity_mismatch) — the cell aborts live instead of
+        # accumulating unscoreable data from a silently swapped model.
+        self._identity_mismatch_observed: str | None = None
+        self._identity_lock = threading.Lock()
+
         # Fail fast on unknown profile wiring.
         self.registry.get(profile_name)
 
@@ -311,6 +319,37 @@ class ProxyServer:
         with self._billed_ub_lock:
             if int(in_tokens_ub) > self._proven_billed_input_ub:
                 self._proven_billed_input_ub = int(in_tokens_ub)
+
+    def _check_upstream_identity(self, profile: Any, model_evidence: str, trace_id: str) -> None:
+        """Trip the identity switch when the upstream-reported model mismatches.
+
+        No-op unless the profile pins ``expected_upstream_model`` and the
+        response carried a model id. The first mismatch is logged loudly with
+        expected/observed evidence; the switch is one-way for the process
+        lifetime (per-run proxy => per-run scope).
+        """
+
+        expected = getattr(profile, "expected_upstream_model", None)
+        observed = str(model_evidence or "").strip()
+        if not expected or not observed:
+            return
+        if observed == str(expected):
+            return
+        with self._identity_lock:
+            already = self._identity_mismatch_observed
+            if already is None:
+                self._identity_mismatch_observed = observed
+        if already is None:
+            self.logger.event(
+                event="identity_mismatch",
+                trace_id=trace_id,
+                expected_upstream_model=str(expected),
+                observed_upstream_model=observed,
+            )
+
+    def _identity_tripped(self) -> str | None:
+        with self._identity_lock:
+            return self._identity_mismatch_observed
 
     def build_handler_class(self) -> type[http.server.BaseHTTPRequestHandler]:
         proxy = self
@@ -527,6 +566,22 @@ class ProxyServer:
 
             # 3) profile runnable checks.
             profile = self.registry.get(self.profile_name)
+            tripped_model = self._identity_tripped()
+            if tripped_model is not None:
+                status = 503
+                error_text = f"identity_mismatch observed={tripped_model}"
+                self._send_error(
+                    handler,
+                    status=503,
+                    message=(
+                        "upstream identity mismatch previously observed for this run "
+                        f"(observed model {tripped_model!r}); refusing further requests"
+                    ),
+                    error_type="api_error",
+                    code="identity_mismatch",
+                    trace_id=trace_id,
+                )
+                return
             blocked = profile.runnable_reason()
             if blocked is not None:
                 status = 403
@@ -678,6 +733,7 @@ class ProxyServer:
                         if isinstance(payload, dict):
                             if isinstance(payload.get("model"), str):
                                 model_evidence = payload["model"]
+                                self._check_upstream_identity(profile, model_evidence, trace_id)
 
                             resp_provider = payload.get("provider")
                             if resp_provider is not None:
@@ -728,6 +784,7 @@ class ProxyServer:
             response_payload = _parse_json_object(response_body)
             if isinstance(response_payload.get("model"), str):
                 model_evidence = str(response_payload["model"])
+                self._check_upstream_identity(profile, model_evidence, trace_id)
             if "provider" in response_payload:
                 provider_slugs, quantizations = _provider_evidence(response_payload.get("provider"))
 

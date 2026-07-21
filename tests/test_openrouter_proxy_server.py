@@ -1331,3 +1331,107 @@ def test_stream_upstream_iterator_failure_retains_unproven_and_logs_no_hang(tmp_
     assert snapshot["committed_unproven"] > 0.0
     assert snapshot["outstanding_total"] == pytest.approx(0.0)
     assert len(fake.calls) == 1
+
+
+def _bigpickle_zen_response(*, model: str, cost: float = 0.0) -> UpstreamResponse:
+    payload = {
+        "id": "chatcmpl-zen",
+        "object": "chat.completion",
+        "model": model,
+        "provider": "Xiaomi",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"completion_tokens": 4, "cost": cost},
+    }
+    return UpstreamResponse(
+        status=200,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        stream_lines=None,
+    )
+
+
+def _runnable_bigpickle_profiles() -> dict[str, Any]:
+    profiles = DEFAULT_PROFILES()
+    profiles["bigpickle"] = dataclasses.replace(
+        profiles["bigpickle"],
+        pricing={"input": 0.0, "output": 0.0},
+        authorized=True,
+    )
+    return profiles
+
+
+def _bigpickle_body() -> dict[str, Any]:
+    return {
+        "model": "opencode/big-pickle",
+        "messages": [{"role": "user", "content": "hello zen"}],
+        "max_tokens": 32,
+    }
+
+
+def test_identity_match_passes_and_never_trips(tmp_path: Path) -> None:
+    fake = _FakeUpstream(
+        [
+            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
+            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
+        ]
+    )
+    with _running_proxy_server(
+        tmp_path,
+        fake_upstream=fake,
+        profile_name="bigpickle",
+        profiles_override=_runnable_bigpickle_profiles(),
+    ) as running:
+        status_1, _, _ = _post_json(running, _bigpickle_body(), token=running.run_token)
+        status_2, _, _ = _post_json(running, _bigpickle_body(), token=running.run_token)
+        log_text = running.log_path.read_text(encoding="utf-8")
+
+    assert status_1 == 200 and status_2 == 200
+    assert 'event="identity_mismatch"' not in log_text
+    assert log_text.count('model="xiaomi/mimo-v2.5"') == 2
+
+
+def test_identity_mismatch_logs_and_refuses_subsequent_requests(tmp_path: Path) -> None:
+    fake = _FakeUpstream(
+        [
+            _bigpickle_zen_response(model="somebody/else-entirely"),
+            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
+        ]
+    )
+    with _running_proxy_server(
+        tmp_path,
+        fake_upstream=fake,
+        profile_name="bigpickle",
+        profiles_override=_runnable_bigpickle_profiles(),
+    ) as running:
+        status_1, _, _ = _post_json(running, _bigpickle_body(), token=running.run_token)
+        status_2, _, payload_2 = _post_json(running, _bigpickle_body(), token=running.run_token)
+        log_text = running.log_path.read_text(encoding="utf-8")
+
+    # First response relays (already consumed) but trips the one-way switch.
+    assert status_1 == 200
+    assert status_2 == 503
+    error = _decode_json(payload_2)["error"]
+    assert error["code"] == "identity_mismatch"
+    assert 'event="identity_mismatch"' in log_text
+    assert 'expected_upstream_model="xiaomi/mimo-v2.5"' in log_text
+    assert 'observed_upstream_model="somebody/else-entirely"' in log_text
+    # The swapped model never reached upstream a second time.
+    assert len(fake.calls) == 1
+
+
+def test_identity_check_inactive_without_expected_model(tmp_path: Path) -> None:
+    # glm profile has no expected_upstream_model; a differing response model
+    # must not trip anything.
+    fake = _FakeUpstream(
+        [
+            _non_stream_success_response(cost=0.01),
+            _non_stream_success_response(cost=0.01),
+        ]
+    )
+    with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
+        status_1, _, _ = _post_json(running, _glm_request_body(), token=running.run_token)
+        status_2, _, _ = _post_json(running, _glm_request_body(), token=running.run_token)
+        log_text = running.log_path.read_text(encoding="utf-8")
+
+    assert status_1 == 200 and status_2 == 200
+    assert "identity_mismatch" not in log_text

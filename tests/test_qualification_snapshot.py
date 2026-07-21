@@ -288,7 +288,8 @@ def test_snapshot_emits_roster_with_tolerant_evidence_ingest(tmp_path: pathlib.P
             "pinned_for_tests": True,
         }
     ]
-    assert "Smoke-only lowest rung (Walter-pinned 2026-07-21); NO stage-4 OFF-spike; OpenCode Zen free/free pricing." in str(
+    assert big_pickle["recommend"] == "STAGE7-MEASURE"
+    assert "Walter 2026-07-21 decision: full Stage-7 MEASURE rung (resolves fork F1, supersedes same-day smoke-only pin); smoke-qualified via Zen alias (Stage-3 4/4 transport checks: streaming/tools/structured/require-params; Stage-5 OFF cell transport-clean on real Zen transport, where OFF capability FAIL is a measurement not a transport failure); Stage-7 harness asserts ON-cell recall delivery in-cell; OpenCode Zen free/free pricing." in str(
         big_pickle["notes"]
     )
 
