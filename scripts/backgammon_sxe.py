@@ -643,6 +643,7 @@ def main() -> int:
         "submission_hash": "",
         "approve_status": "",
         "delivery": "NO",
+        "delivery_proof": {},
         "memory_fp": "",
         "n_memories": 0,
         "memories": [],
@@ -861,6 +862,7 @@ def main() -> int:
         )
 
         committed_memories: list[dict[str, Any]] = []
+        delivery_targets: list[dict[str, str]] = []
         for index, memory in enumerate(memories, start=1):
             stage = f"submit[{index}/{len(memories)}]"
             submission_hash = proof.submit_memory(org_id, memory)
@@ -882,6 +884,12 @@ def main() -> int:
                     **fp_fields,
                 }
             )
+            delivery_targets.append(
+                {
+                    "fragment": _memory_fragment(str(memory["text"])),
+                    "cid": submission_hash,
+                }
+            )
             progress(
                 "memory commit "
                 f"idx={index}/{len(memories)} submission_hash={submission_hash} "
@@ -890,10 +898,9 @@ def main() -> int:
             )
 
         stage = "prove_delivery"
-        memory_fragments = [_memory_fragment(str(memory["text"])) for memory in memories]
-        delivery_payload = proof.prove_delivery(org_id, memory_fragments)
+        delivery_payload = proof.prove_delivery(org_id, delivery_targets)
         delivery = str(delivery_payload.get("delivery") or "NO")
-        n_memories = int(delivery_payload.get("n_memories") or len(memory_fragments))
+        n_memories = int(delivery_payload.get("n_memories") or len(delivery_targets))
         matched = bool(delivery_payload.get("matched"))
         per_memory_delivery_raw = delivery_payload.get("per_memory")
         per_memory_delivery = (
@@ -914,9 +921,18 @@ def main() -> int:
                 continue
             progress(
                 "delivery probe "
-                f"idx={index}/{len(memory_fragments)} fragment_fp={item.get('fragment_fp')} "
-                f"matched={bool(item.get('matched'))}"
+                f"idx={index}/{len(delivery_targets)} fragment_fp={item.get('fragment_fp')} "
+                f"matched={bool(item.get('matched'))} delivery_mode={item.get('delivery_mode')}"
             )
+            if str(item.get("delivery_mode") or "") == "twin_of_returned":
+                suppression = item.get("suppression") if isinstance(item.get("suppression"), dict) else {}
+                progress(
+                    "delivery twin-delivered "
+                    f"idx={index}/{len(delivery_targets)} fragment_fp={item.get('fragment_fp')} "
+                    f"cid_fp={item.get('cid')} winner_cid_fp={suppression.get('winner_cid')} "
+                    f"dropped_twin_cid_fp={suppression.get('dropped_twin_cid')} "
+                    f"score_gap={suppression.get('score_gap')}"
+                )
 
         status = "ok" if delivery == "YES" else "delivery_no"
         primary_memory = committed_memories[0] if committed_memories else {}
@@ -927,6 +943,7 @@ def main() -> int:
             "submission_hash": str(primary_memory.get("submission_hash") or ""),
             "approve_status": str(primary_memory.get("approve_status") or ""),
             "delivery": delivery,
+            "delivery_proof": delivery_payload if isinstance(delivery_payload, dict) else {},
             "memory_fp": str(primary_memory.get("memory_fp") or ""),
             "n_memories": len(committed_memories),
             "memories": [

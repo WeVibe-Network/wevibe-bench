@@ -71,7 +71,7 @@ def _write_import_fixture(
     plan = bl._build_plan()
     cell = next(item for item in plan if int(item["run_number"]) == run_number)
     expected_model = str(cell["model"])
-    run_label = f"stage7-run{run_number}-{bl._slugify_model(expected_model)}"
+    run_label = f"stage{bl.STAGE_NUMBER}-run{run_number}-{bl._slugify_model(expected_model)}"
     scorecard_model = scorecard_model or expected_model
     scorecard_condition = scorecard_condition or str(cell["memory_mode"]).upper()
     detail_memory_mode = detail_memory_mode or str(cell["memory_mode"])
@@ -313,9 +313,21 @@ def test_manifest_freeze_deterministic_and_fingerprint() -> None:
     assert m1["total_cells"] == 5
     assert len(m1["cell_allocation"]) == 5
 
-    blob = json.dumps(m1).lower()
+    comparable_for_guard = dict(bl._manifest_comparable(m1))
+    comparable_for_guard.pop("preregistration", None)
+    comparable_blob = json.dumps(comparable_for_guard).lower()
     for forbidden in ["prompt", "answer", "api_key", "secret", "password", "bearer"]:
-        assert forbidden not in blob
+        assert forbidden not in comparable_blob
+
+    prereg = m1.get("preregistration")
+    assert isinstance(prereg, dict)
+    assert prereg.get("task") == "locked backgammon prompt/CONTRACT/oracle"
+    assert prereg.get("disclosures") == [
+        "2026-07-22: twin-aware delivery probe — harness measurement fix (suppressed-as-twin-of-returned counts delivered, evidence recorded in scorecard); protocol semantics unchanged; disclosed per pre-registration integrity like the 22-07 smoke defect fixes"
+    ]
+    prereg_blob = json.dumps(prereg).lower()
+    for forbidden in ["api_key", "secret", "password", "bearer"]:
+        assert forbidden not in prereg_blob
 
 
 def test_rung_params_validation(tmp_path: pathlib.Path) -> None:
@@ -570,12 +582,49 @@ def test_scan_delivery() -> None:
     cell_log = "PROGRESS ... recall_env_injection=container ...\n"
     result = bl._scan_delivery(clone_slice, cell_log)
     assert result["ok"] and result["recall_200_traces"] == ["t1"] and result["result_counts"] == [11]
+    assert result["delivery_proof"] is None
 
     assert not bl._scan_delivery(clone_slice, "no env marker")["ok"]
     no_outcome = clone_slice.replace("phase=outcome", "phase=entry")
     assert not bl._scan_delivery(no_outcome, cell_log)["ok"]
     zero_results = clone_slice.replace("result_count=11", "result_count=0")
     assert not bl._scan_delivery(zero_results, cell_log)["ok"]
+
+
+def test_scan_delivery_surfaces_sxe_delivery_proof_payload() -> None:
+    clone_slice = (
+        "2026-07-21T00:00:00Z INFO op=http.request trace=t1 phase=entry method=POST url=/v1/recall\n"
+        "[recall] /v1/recall result_count=1\n"
+        "2026-07-21T00:00:01Z INFO op=http.request trace=t1 phase=outcome method=POST url=/v1/recall status=200 dur_ms=5\n"
+    )
+    delivery_proof = {
+        "delivery": "YES",
+        "matched": False,
+        "n_memories": 1,
+        "per_memory": [
+            {
+                "fragment_fp": "aa11bb22",
+                "cid": "cc33dd44",
+                "matched": False,
+                "delivery_mode": "twin_of_returned",
+                "suppression": {
+                    "winner_cid": "ee55ff66",
+                    "dropped_twin_cid": "cc33dd44",
+                    "score_gap": 0.0005,
+                },
+            }
+        ],
+    }
+    cell_log = (
+        "PROGRESS ... recall_env_injection=container ...\n"
+        + "BACKGAMMON_SXE_RESULT_JSON "
+        + json.dumps({"status": "ok", "delivery_proof": delivery_proof}, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    )
+
+    result = bl._scan_delivery(clone_slice, cell_log)
+    assert result["ok"] is True
+    assert result["delivery_proof"] == delivery_proof
 
 
 def test_majority_and_median() -> None:
@@ -748,7 +797,7 @@ def test_import_refuses_tampered_detail_digest(tmp_path: pathlib.Path, monkeypat
 def test_import_refuses_wrong_run_id(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
     params_path = _seed_manifest(tmp_path)
     import_path, payload, _ = _write_import_fixture(tmp_path)
-    payload["run_id"] = "stage7-run9-openrouter-anthropic-claude-opus-4-8-20260721T195407Z"
+    payload["run_id"] = f"stage{bl.STAGE_NUMBER}-run9-openrouter-anthropic-claude-opus-4-8-20260721T195407Z"
     import_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="run_id mismatch"):

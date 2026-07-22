@@ -26,7 +26,7 @@ SCHEMA_VERSION = 1
 CAP_REFUSAL_EXIT = 3
 EPSILON = 1e-9
 
-STAGE_KEYS: tuple[str, ...] = ("stage2", "stage3", "stage4", "stage5", "stage7")
+STAGE_KEYS: tuple[str, ...] = ("stage2", "stage3", "stage4", "stage5", "stage7", "stage8")
 DEFAULT_CAPS: dict[str, float] = {
     "stage2": 10.0,
     "stage3": 25.0,
@@ -36,6 +36,10 @@ DEFAULT_CAPS: dict[str, float] = {
     # no numeric Stage-7 cap; $40 is the pre-registered operational cap
     # (worst-case roster-A estimate with N=3 repeats ≈ $28), under global $115.
     "stage7": 40.0,
+    # 2026-07-22 manager ruling (Walter-disclosed): stage-8 scored-ladder
+    # envelope raised to $32.00; the $7.20 Cell-1 false start remains inside
+    # stage-8 accounting (honest history, no exclusion).
+    "stage8": 32.0,
     "global": 115.0,
 }
 
@@ -43,7 +47,7 @@ DEFAULT_CAPS: dict[str, float] = {
 # ONLY these keys is backfilled from DEFAULT_CAPS/empty entries (deterministic
 # forward migration, persisted on the next write); any other missing key still
 # fails loudly as corruption.
-MIGRATION_BACKFILL_KEYS: tuple[str, ...] = ("stage7",)
+MIGRATION_BACKFILL_KEYS: tuple[str, ...] = ("stage7", "stage8")
 
 DEFAULT_LEDGER_PATH = Path("runs/qualification/stage-ledger.json")
 DEFAULT_LOG_PATH = Path("runs/qualification/stage-ledger.log")
@@ -489,12 +493,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     record_parser = subparsers.add_parser("record", help="Record one run budget JSON into a stage ledger")
     _add_common_paths(record_parser)
-    record_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7), required=True)
+    record_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7, 8), required=True)
     record_parser.add_argument("--budget-json", required=True)
 
     check_parser = subparsers.add_parser("check", help="Admission check against stage/global caps")
     _add_common_paths(check_parser)
-    check_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7), required=True)
+    check_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7, 8), required=True)
     check_parser.add_argument("--estimated-usd", type=float, default=0.0)
 
     report_parser = subparsers.add_parser("report", help="Emit stage/global totals report as JSON")

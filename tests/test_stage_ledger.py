@@ -107,6 +107,37 @@ def test_record_and_report_sum_across_stages(tmp_path: Path, capsys) -> None:
     assert report["global"]["sum_usd"] == 6.0
 
 
+def test_report_backfills_stage8_for_legacy_ledger_shape(tmp_path: Path, capsys) -> None:
+    ledger_path = tmp_path / "stage-ledger.json"
+    log_path = tmp_path / "stage-ledger.log"
+
+    _write_stage_ledger(
+        ledger_path,
+        caps={
+            "stage2": 10.0,
+            "stage3": 25.0,
+            "stage4": 40.0,
+            "stage5": 40.0,
+            "stage7": 40.0,
+            "global": 115.0,
+        },
+        stages={
+            "stage2": [],
+            "stage3": [],
+            "stage4": [],
+            "stage5": [],
+            "stage7": [],
+        },
+    )
+
+    rc, out, _ = _invoke(["report", "--ledger", str(ledger_path), "--log", str(log_path)], capsys)
+    assert rc == 0
+    report = json.loads(out)
+    assert report["caps"]["stage8"] == 32.0
+    assert report["stages"]["stage8"]["cap_usd"] == 32.0
+    assert report["stages"]["stage8"]["sum_usd"] == 0.0
+
+
 def test_record_is_idempotent_per_run_id(tmp_path: Path, capsys) -> None:
     ledger_path = tmp_path / "stage-ledger.json"
     log_path = tmp_path / "stage-ledger.log"
@@ -288,6 +319,142 @@ def test_record_refuses_when_global_cap_exceeded(tmp_path: Path, capsys) -> None
             "3",
             "--budget-json",
             str(stage3_budget),
+            "--ledger",
+            str(ledger_path),
+            "--log",
+            str(log_path),
+        ],
+        capsys,
+    )
+    assert rc == 3
+    refusal = json.loads(out)
+    assert refusal["recorded"] is False
+    assert refusal["reason"] == "cap_exceeded"
+    assert refusal["global_remaining"] < 0
+
+
+def test_stage8_record_and_admission_respects_32_usd_cap(tmp_path: Path, capsys) -> None:
+    ledger_path = tmp_path / "stage-ledger.json"
+    log_path = tmp_path / "stage-ledger.log"
+
+    near_cap = tmp_path / "stage8-near-cap.json"
+    over_cap = tmp_path / "stage8-over-cap.json"
+    _write_budget_checkpoint(
+        near_cap,
+        run_id="stage8-near-cap",
+        accrued_actual_usd=31.0,
+        committed_unproven_usd=0.0,
+    )
+    _write_budget_checkpoint(
+        over_cap,
+        run_id="stage8-over-cap",
+        accrued_actual_usd=1.5,
+        committed_unproven_usd=0.0,
+    )
+
+    rc, _, _ = _invoke(
+        [
+            "record",
+            "--stage",
+            "8",
+            "--budget-json",
+            str(near_cap),
+            "--ledger",
+            str(ledger_path),
+            "--log",
+            str(log_path),
+        ],
+        capsys,
+    )
+    assert rc == 0
+
+    rc, out, _ = _invoke(
+        [
+            "check",
+            "--stage",
+            "8",
+            "--estimated-usd",
+            "1.0",
+            "--ledger",
+            str(ledger_path),
+            "--log",
+            str(log_path),
+        ],
+        capsys,
+    )
+    assert rc == 0
+    admitted = json.loads(out)
+    assert admitted["admitted"] is True
+    assert admitted["stage_remaining"] == 0.0
+
+    rc, out, _ = _invoke(
+        [
+            "record",
+            "--stage",
+            "8",
+            "--budget-json",
+            str(over_cap),
+            "--ledger",
+            str(ledger_path),
+            "--log",
+            str(log_path),
+        ],
+        capsys,
+    )
+    assert rc == 3
+    refusal = json.loads(out)
+    assert refusal["recorded"] is False
+    assert refusal["reason"] == "cap_exceeded"
+
+
+def test_stage8_record_refuses_when_it_would_push_global_over_115(tmp_path: Path, capsys) -> None:
+    ledger_path = tmp_path / "stage-ledger.json"
+    log_path = tmp_path / "stage-ledger.log"
+
+    _write_stage_ledger(
+        ledger_path,
+        caps={
+            "stage2": 10.0,
+            "stage3": 25.0,
+            "stage4": 40.0,
+            "stage5": 40.0,
+            "stage7": 40.0,
+            "stage8": 32.0,
+            "global": 115.0,
+        },
+        stages={
+            "stage2": [
+                {
+                    "run_id": "stage2-high-spend",
+                    "budget_json": "existing.json",
+                    "accrued_usd": 114.0,
+                    "committed_unproven_usd": 0.0,
+                    "recorded_at": "2026-07-20T00:00:00Z",
+                }
+            ],
+            "stage3": [],
+            "stage4": [],
+            "stage5": [],
+            "stage7": [],
+            "stage8": [],
+        },
+    )
+
+    stage8_budget = tmp_path / "stage8-global-overrun.json"
+    _write_budget_checkpoint(
+        stage8_budget,
+        run_id="stage8-global-overrun",
+        accrued_actual_usd=2.0,
+        committed_unproven_usd=0.0,
+    )
+
+    rc, out, _ = _invoke(
+        [
+            "record",
+            "--stage",
+            "8",
+            "--budget-json",
+            str(stage8_budget),
             "--ledger",
             str(ledger_path),
             "--log",

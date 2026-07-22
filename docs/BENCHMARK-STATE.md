@@ -74,7 +74,9 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
 - Checkpoint/resume path: `runs/backgammon-scored-ladder/scored-ladder-checkpoint.json`; caps enforced via `wevibe_bench.stage_ledger`
   (Stage-7 $40, global $115).
 
-### 2B. Stage-7 crash recovery (Option B, 21-07-26)
+### 2B. Stage-7 crash recovery (Option B, 21-07-26) — SUPERSEDED 22-07 by stage-8 fresh baseline (§2D)
+- Historical only: the Option-B continuation cells (crash-recovered ladder) are PRESERVED as evidence but NEVER
+  merged into the stage-8 scorecard (pre-registered fresh-baseline rule).
 - Walter GO (21-07-26) authorized the full Stage-7 scored ladder (superseding the prior passability-first gate).
   Run `20260721T195407Z` then crashed 34 minutes in after Cell 1 completed as a valid 3-attempt capability FAIL and
   self-extraction committed one org-0 memory (`cid 547b5c0b711fcbdfa8fc7cd8055d30e640a116a062ea2815804d4ef7aed947fd`, delivery YES).
@@ -89,7 +91,7 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
 - Spend disclosure: Stage-7 = `$20.04 / $40` (accrued `$13.23`; committed-unproven `$6.81` incl. ~$1.6 killed-smoke-run
   reservation retentions that never convert — by design, uncertainty is never released). Global = `$32.11 / $115`.
   The 22-07 canon smoke accrued `$0.00` (big-pickle free upstream; all spend was reservation-only).
-- Detail: `wevibe-meta/workspace/reports/21-07-26-1315-stage7-ladder-crash-fail-stats.md`.
+ - Detail: `wevibe-meta/workspace/reports/21-07-26-1315-stage7-ladder-crash-fail-stats.md`.
 
 ## 2C. 22-07 CANON CONFORMANCE SMOKE (2026-07-22, big-pickle $0) — PASS, gate before re-baselined run
 End-to-end smoke through the real transport after the 2026-07-22 canon (substrate events / atomic multi-memory
@@ -107,10 +109,50 @@ commit / budget-bounded attempts / one proxy meter) + stack wipe. Report:
   edit/write events; harness-limit kill scope (container teardown → process kill + procps in image `9d389f8e376b`);
   sxe type=error event skip. Plus wevibe-mcp transcript adapter retired (events-only `/v1/extract`) + sxe
   proxy-routed extraction (`WEVIBE_BENCH_EXTRACT_*`) + clone num_ctx override + R-37 need-harvest logging.
-- OPEN before full run: rung-params `expected_upstream_model` still `xiaomi/mimo-v2.5` (in-code pin `big-pickle`
+ - OPEN before full run: rung-params `expected_upstream_model` still `xiaomi/mimo-v2.5` (in-code pin `big-pickle`
   wins; params file must be re-pinned); Zen upstream 500-storms can kill an extraction (no retry — §8 carry item);
   guard flagged one committed memory (`unicode_homoglyph_injection` " override") yet commit proceeded — policy
   observation for Walter.
+
+## 2D. STAGE-8 RE-BASELINED 5-CELL RUN (2026-07-22) — COMPLETE, the current baseline
+Fresh baseline under a NEW `stage8` envelope (manager ruling, Walter-disclosed): cap $32.00 (raised from $25.00
+after the Cell-1 false start; the $7.20 false start stays inside stage8 — honest history). Stage-7 ledger history
+untouched; stage-7 cells are historical evidence only, never merged. Reports:
+`wevibe-meta/workspace/reports/22-07-26-0655-stage8-rebaselined-5cell-LEDGER.md` (running ledger) +
+`22-07-26-<time>-stage8-5cell-baseline-result.md` (consolidated) + `22-07-26-0715-stage8-envelope-wiring.md` +
+`22-07-26-0730-twin-aware-delivery-probe.md`.
+- **Pre-registration:** frozen in `runs/backgammon-scored-ladder-stage8/scored-ladder-manifest.json` (fp
+  `3910969ef0342144…`, schema v2 + preregistration block + disclosures). Harness fixes disclosed in-manifest:
+  stage8 envelope wiring; twin-aware delivery probe (harness measurement fix — a memory suppressed as
+  contested-twin-of-a-RETURNED memory counts delivered, evidence {winner/twin cid fp, score_gap} in scorecard;
+  protocol semantics unchanged; regression-tested).
+- **Run:** trace `stage8-ladder-20260722T151533Z-40ddef2054`, 15:15:33Z→18:23:16Z (3h07m), status=ok, 7 reps
+  (kimi OFF borderline T3 → N=3, disclosed; all other cells N=1). Artifacts: `runs/backgammon-scored-ladder-stage8/`
+  (checkpoint/summary/manifest/cell logs) + `runs/backgammon-stage8/` (scorecards/details/worktrees). Aborted run 1
+  (delivery_unproven on contested-twin suppression — the defect the twin-aware probe fixed) preserved at
+  `runs/backgammon-scored-ladder-stage8-aborted1/` + false start at `…-falsestart1/`.
+- **Scorecard (all transport clean, identity fps asserted, ON-cell delivery proven):**
+  run1 opus OFF/source: harness_error (D6 mid-work SIGTERM, gates never ran) FAIL, $2.158, 39.2k tok; extraction
+  6 memories committed, delivery YES 6/6 (all direct matches).
+  run2 kimi OFF: majority BUDGET_STOP (rep1 BUDGET_STOP $1.44 / rep2 harness_error SIGKILL / rep3 1 gated attempt
+  4 failed gates [G08,F10,F12,F14] then attempts_exhausted_by_budget $1.92); N=3.
+  run3 kimi ON: BUDGET_STOP, 1 gated attempt 2 failed gates [G13,F06], delivery ok (5 recalled), $1.58; N=1.
+  run4 big-pickle OFF: harness_error (D6 SIGTERM, gates never ran) FAIL, $0.
+  run5 big-pickle ON: FAIL attempt_ceiling_reached, gate trajectory 65→2→2 failed (final [F08,F12]), delivery ok
+  (5+2+2 recalled), identity 90/90 `big-pickle` echoes, $0.
+- **Lift statement:** NO defensible OFF→ON lift claim — opus OFF and big-pickle OFF baselines are unmeasured (D6
+  harness deaths); kimi OFF↔ON is budget-truncated (1 gated attempt each, 4 vs 2 failed gates) under N=1 caution.
+  Delivery/identity/transport/budget-meter assertions all GREEN.
+- **D6 anomaly (recurring, unresolved):** 3/7 reps died mid-work by EXTERNAL signal (run1/run4 SIGTERM 143,
+  rep2 SIGKILL 137; `killed=none`, no adapter/proxy/docker cause; matches stage-7 defect D6). Root-cause blocked by
+  observability gap: opencode-internal logs live in container tmpfs and are wiped by `docker rm -f`. OPEN follow-up:
+  preserve worker opencode logs to host worktree before teardown; then reproduce+diagnose.
+- **Spend (single proxy meter):** stage8 $16.76/$32.00 (accrued $13.31 = $5.83 false start + $7.48 run;
+  committed-unproven $3.45). Global $48.87/$115.
+- **Harvest observation:** need-harvest fired on all ON-cell recalls (incl. intent=debug) but
+  buildFailing/testFailing/errorStrings stayed unpopulated (worker session events are not clone-side) — populated
+  case remains suite-tested only (observation: NOT observed, structurally expected).
+
 
 ## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
 - Plugin re-injects ALL approved memories EVERY turn + across compaction (`wevibe-plugin.ts:1349` transform →
@@ -208,6 +250,12 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   ONLY the memories reveal — else lift only shows on weak models + obscure integration traps (by design).
 
 ## 8. OPEN DECISIONS / FORKS
+- **D6 mid-work worker deaths (stage-8, OPEN):** preserve worker opencode-internal logs (`~/.local/share/opencode`
+  in container) to the host worktree BEFORE `docker rm -f` teardown, then reproduce+root-cause the external
+  143/137 deaths (3/7 stage-8 reps unmeasured because of this; gates never ran). Small harness chunk.
+- **Rerun decision (Walter/manager):** whether to rerun the D6-killed reps (run1 opus OFF, run4 big-pickle OFF,
+  kimi rep2) after the observability fix — the stage-8 baseline stands as recorded (honest labels), any rerun is a
+  new disclosed run, never a merge.
 - **Superseded 21-07-26:** the prior BLOCKED-BY-PASSABILITY gate is closed by Walter GO; Stage-7 scored roster
   execution is authorized and currently in Option-B recovery (§2B).
 - **Provider-routing mechanism status:** the prior "harness provider-routing UNPROVEN" gap is now closed by the
@@ -224,11 +272,14 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
-- **22-07-22: full clean wipe ran** (RUNBOOK clean-start one-path) — the Cell-1 preserved memory `547b5c0b…fd` is
-  GONE. qdrant `org_wevibe-org-0_memories` now holds **10 memories** from the canon smoke (1 + 9, delivery-proven).
-- :4550 clone running on rebuilt dist (pid in `wevibe-bench/runs/clone4550.pid`; `WEVIBE_RECALL_MODE=test`). hub
-  :4440 (fresh instanceId `dfaa7dd2`), 9/9 containers healthy. Ollama :11434 (nomic-embed-text:v1.5) — MUST stay
-  up for recall+dedup embeddings. Worker image `wevibe-bench-worker:v1` = `9d389f8e376b` (plugin `49ec5a8` + procps).
+- **22-07-22 (post-stage8):** qdrant `org_wevibe-org-0_memories` = **6 memories** (stage-8 Cell-1 Opus
+  self-extraction, delivery-proven 6/6). hub :4440 instanceId `94184b05`; 9/9 containers healthy; Ollama :11434
+  (nomic-embed-text:v1.5) up. :4550 clone running pid 55392 (`runs/clone4550.pid`, `WEVIBE_RECALL_MODE=test`,
+  dist = clone HEAD + recorded Jul-9 seed seam + 22-07 bench-gated `suppression` response field). Worker image
+  `wevibe-bench-worker:v1` = `9d389f8e376b`. Stage ledger: **stage8 $16.76/$32.00, stage7 $20.04/$40 (frozen
+  history), global $48.87/$115**. Scored-ladder driver now STAGE_NUMBER=8; fresh runs need a FRESH outer runs-dir
+  AND fresh `--ladder-runs-dir` (the shared `runs/backgammon/ladder-checkpoint.json` will resume-skip cells off
+  13-07-era history — the stage-8 false-start failure mode).
 - Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).
 
 ## 10. ⚠ FOR-WALTER CARRY ITEM (unresolved)

@@ -61,6 +61,7 @@ def test_result_payload_construction_carries_no_plaintext_key() -> None:
     src = (SCRIPTS / "backgammon_sxe.py").read_text(encoding="utf-8")
     assert '"memory_fragment":' not in src, "memory_fragment must not be a logged/result field (R-37)"
     assert "fragment={memory_fragment" not in src, "delivery-proof log must not print the plaintext fragment (R-37)"
+    assert '"delivery_proof": delivery_payload' in src
     assert '"n_memories": len(committed_memories)' in src
     assert '"memories": [' in src
 

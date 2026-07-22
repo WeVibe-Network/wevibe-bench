@@ -1,4 +1,4 @@
-"""Stage-7 scored backgammon ladder driver (roster A).
+"""Stage-8 scored backgammon ladder driver (roster A).
 
 Runs the scored OFF/ON ladder by invoking scripts/backgammon_ladder.py once per
 cell in strict roster order, deriving the roster from wevibe_bench/config.py
@@ -8,7 +8,7 @@ session-only cells consuming that pool (no extraction below the source, so the
 pool is frozen for repeats).
 
 Per cell this driver owns:
-- stage-ledger admission (stage 7) + prebudget/post-run recording,
+- stage-ledger admission (stage 8) + prebudget/post-run recording,
 - per-cell OpenRouter proxy lifecycle (pinned profile, live pricing, hard cap),
 - upstream-identity assertion (expected_upstream_model rungs, e.g. big-pickle),
 - delivery log-assertion for memory-ON cells (clone /v1/recall 200s +
@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from wevibe_bench.adapters.backgammon import DEFAULT_ATTEMPT_HARD_CEILING
 from wevibe_bench.config import (
     BACKGAMMON_LADDER_SCHEMA_VERSION,
     LadderRung,
@@ -49,7 +50,7 @@ from wevibe_bench.config import (
 from wevibe_bench.lifecycle import qdrant_probe
 
 
-STAGE_NUMBER = 7
+STAGE_NUMBER = 8
 CELL_PHASE = "cell"
 MAX_REPS = 3
 TOKEN_DELTA_FRAGILE = 0.15  # T2 constant (manager-set, vetoable; VARIANCE-POLICY.md)
@@ -196,7 +197,7 @@ def _emit(path: Path, line: str) -> None:
 
 
 def _new_trace_id() -> str:
-    return f"stage7-ladder-{_utc_compact()}-{uuid4().hex[:10]}"
+    return f"stage{STAGE_NUMBER}-ladder-{_utc_compact()}-{uuid4().hex[:10]}"
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +262,7 @@ def _build_manifest(
     trace: str,
 ) -> dict[str, Any]:
     roster = backgammon_scored_ladder_roster()
-    return {
+    manifest = {
         "schema_version": int(BACKGAMMON_LADDER_SCHEMA_VERSION),
         "total_cells": len(cells),
         "roster": [
@@ -284,6 +285,25 @@ def _build_manifest(
         "created_at": _utc_iso(),
         "trace": trace,
     }
+    manifest["preregistration"] = {
+        "roster": "opus-4.8 SOURCE (OFF + self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> big-pickle MEASURE OFF/ON; memories flow down",
+        "task": "locked backgammon prompt/CONTRACT/oracle",
+        "feedback": "problems-only",
+        "disclosures": [
+            "2026-07-22: twin-aware delivery probe — harness measurement fix (suppressed-as-twin-of-returned counts delivered, evidence recorded in scorecard); protocol semantics unchanged; disclosed per pre-registration integrity like the 22-07 smoke defect fixes"
+        ],
+        "attempts": {
+            "policy": "budget-bounded",
+            "ceiling": int(DEFAULT_ATTEMPT_HARD_CEILING),
+        },
+        "termination_labels": ["gates_green", "attempt_ceiling_reached", "BUDGET_STOP", "harness_error"],
+        "variance_policy": "N=1 baseline; borderline -> N=3; N disclosed per cell (docs/VARIANCE-POLICY.md)",
+        "headline_metrics": ["attempts-to-green", "total tokens", "gate trajectory"],
+        "budget_meter": BINDING_BUDGET_METER,
+        "llm_judge": "none",
+        "baseline": "fresh; stage-7 cells are historical evidence only, never merged",
+    }
+    return manifest
 
 
 def _manifest_comparable(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -705,7 +725,7 @@ def _build_import_entry(
     expected_phase = str(manifest_cell["phase"])
     expected_role = str(manifest_cell["role"])
     expected_rung_index = int(manifest_cell["rung_index"])
-    expected_run_label = f"stage7-run{run_number}-{_slugify_model(expected_model)}"
+    expected_run_label = f"stage{STAGE_NUMBER}-run{run_number}-{_slugify_model(expected_model)}"
     expected_prefix = f"{expected_run_label}-"
     if not run_id.startswith(expected_prefix):
         raise RuntimeError(
@@ -1027,6 +1047,24 @@ _CLONE_OUTCOME_RE = re.compile(
     r"op=http\.request trace=(\S+) phase=outcome method=POST url=/v1/recall status=(\d+)"
 )
 _CLONE_RESULT_COUNT_RE = re.compile(r"\[recall\] /v1/recall result_count=(\d+)")
+_SXE_RESULT_PREFIX = "BACKGAMMON_SXE_RESULT_JSON "
+
+
+def _extract_sxe_delivery_proof(cell_log_text: str) -> dict[str, Any] | None:
+    for raw_line in reversed(cell_log_text.splitlines()):
+        line = raw_line.strip()
+        if not line.startswith(_SXE_RESULT_PREFIX):
+            continue
+        payload_raw = line[len(_SXE_RESULT_PREFIX) :].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        delivery_proof = payload.get("delivery_proof")
+        return delivery_proof if isinstance(delivery_proof, dict) else None
+    return None
 
 
 def _scan_delivery(clone_log_slice: str, cell_log_text: str) -> dict[str, Any]:
@@ -1037,11 +1075,13 @@ def _scan_delivery(clone_log_slice: str, cell_log_text: str) -> dict[str, Any]:
     continuous = sorted(entries & outcomes_200)
     result_counts = [int(n) for n in _CLONE_RESULT_COUNT_RE.findall(clone_log_slice)]
     injected_env = "recall_env_injection=container" in cell_log_text
+    delivery_proof = _extract_sxe_delivery_proof(cell_log_text)
     ok = bool(continuous) and any(n > 0 for n in result_counts) and injected_env
     return {
         "recall_200_traces": continuous,
         "result_counts": result_counts,
         "recall_env_injection_container": injected_env,
+        "delivery_proof": delivery_proof,
         "ok": ok,
     }
 
@@ -1524,7 +1564,7 @@ def _run_cell_rep(
     run_number = int(cell["run_number"])
     model = str(cell["model"])
     slug = _slugify_model(model)
-    run_label = f"stage7-run{run_number}-{slug}" + ("" if rep == 1 else f"-rep{rep}")
+    run_label = f"stage{STAGE_NUMBER}-run{run_number}-{slug}" + ("" if rep == 1 else f"-rep{rep}")
     stamp = _utc_compact()
     run_id = f"{run_label}-{stamp}"
 
@@ -1758,7 +1798,7 @@ def _run_cell_rep(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Stage-7 scored backgammon ladder driver (roster A).",
+        description="Stage-8 scored backgammon ladder driver (roster A).",
         epilog=(
             "Import recovery note: --resume already skips imported status=ok cells; "
             "--start-cell 2 is belt-and-suspenders for the known Cell-1 crash recovery."
