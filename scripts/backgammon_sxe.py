@@ -156,6 +156,42 @@ def _resolve_api_key() -> tuple[str, str]:
         return "", "none"
 
 
+def _resolve_extract_base_url() -> str | None:
+    value = os.environ.get("WEVIBE_BENCH_EXTRACT_BASE_URL", "").strip()
+    return value or None
+
+
+def _resolve_extract_num_ctx() -> int | None:
+    raw = os.environ.get("WEVIBE_BENCH_EXTRACT_NUM_CTX", "").strip()
+    if not raw:
+        return None
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("WEVIBE_BENCH_EXTRACT_NUM_CTX must be a positive integer") from exc
+
+    if value <= 0:
+        raise RuntimeError("WEVIBE_BENCH_EXTRACT_NUM_CTX must be a positive integer")
+    return value
+
+
+def _resolve_extract_api_key() -> tuple[str, str]:
+    token_file = os.environ.get("WEVIBE_BENCH_EXTRACT_API_KEY_FILE", "").strip()
+    if token_file:
+        token_path = Path(token_file).expanduser()
+        if not token_path.is_file():
+            raise RuntimeError(f"proxy token file not found: {token_path}")
+        try:
+            token = token_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"unable to read proxy token file: {token_path}") from exc
+        if not token:
+            raise RuntimeError(f"proxy token file empty: {token_path}")
+        return token, "proxy_token_file"
+    return _resolve_api_key()
+
+
 def _load_prompt(path: Path) -> str:
     if not path.is_file():
         raise RuntimeError(f"prompt file not found: {path}")
@@ -282,6 +318,7 @@ def _build_substrate_events(
     events_files = _event_files(session_dir)
     events: list[dict[str, Any]] = []
     seq = 0
+    skipped_error_events = 0
 
     def emit(event: dict[str, Any]) -> None:
         nonlocal seq
@@ -347,6 +384,9 @@ def _build_substrate_events(
             event_type = entry.get("type")
             if event_type in {"step_start", "step_finish"}:
                 continue
+            if event_type == "error":
+                skipped_error_events += 1
+                continue
 
             part = entry.get("part")
             if not isinstance(part, dict):
@@ -400,8 +440,9 @@ def _build_substrate_events(
             if not isinstance(state, dict):
                 raise RuntimeError(f"worker tool_use state missing object at {events_file}:{line_no}")
 
+            status_value = state.get("status")
             state_input = state.get("input")
-            if tool_name in {"edit", "write"}:
+            if tool_name in {"edit", "write"} and status_value != "error":
                 if not isinstance(state_input, dict):
                     raise RuntimeError(f"edit/write tool input missing object at {events_file}:{line_no}")
 
@@ -428,7 +469,6 @@ def _build_substrate_events(
 
             state_output = state.get("output")
             state_metadata = state.get("metadata")
-            status_value = state.get("status")
 
             tool_event: dict[str, Any] = {
                 "kind": "tool",
@@ -468,6 +508,7 @@ def _build_substrate_events(
     stats = {
         "event_count": len(events),
         "kind_counts": kind_counts,
+        "skipped_error_events": skipped_error_events,
         "total_chars": len(canonical_events_json),
         "events_sha256_first8": _sha256_first8(canonical_events_json),
     }
@@ -649,7 +690,9 @@ def main() -> int:
             f"events_files={len(events_files)} event_count={event_stats.get('event_count', len(events))} "
             f"kind_user={kind_counts.get('user', 0)} kind_assistant={kind_counts.get('assistant', 0)} "
             f"kind_reasoning={kind_counts.get('reasoning', 0)} kind_tool={kind_counts.get('tool', 0)} "
-            f"kind_edit={kind_counts.get('edit', 0)} total_chars={event_stats.get('total_chars', 0)} "
+            f"kind_edit={kind_counts.get('edit', 0)} "
+            f"skipped_error_events={event_stats.get('skipped_error_events', 0)} "
+            f"total_chars={event_stats.get('total_chars', 0)} "
             f"events_sha256_first8={event_stats.get('events_sha256_first8', 'none')}"
         )
 
@@ -721,13 +764,22 @@ def main() -> int:
         org_id = args.org_id or resolved_org_id
         progress(f"org resolve ok org_id={org_id}")
 
-        api_key, api_key_source = _resolve_api_key()
+        extract_base_url = _resolve_extract_base_url()
+        extract_num_ctx = _resolve_extract_num_ctx()
+        api_key, api_key_source = _resolve_extract_api_key()
         api_key_present = bool(api_key)
         api_key_fp = _sha256_first8(api_key) if api_key_present else "none"
         progress(
             "extract key resolved "
             f"source={api_key_source} present={api_key_present} sha256_first8={api_key_fp}"
         )
+        if extract_base_url is not None:
+            num_ctx_label = str(extract_num_ctx) if extract_num_ctx is not None else "none"
+            progress(
+                "extract transport override "
+                f"base_url={extract_base_url} num_ctx={num_ctx_label} "
+                f"key_source={api_key_source} key_fp={api_key_fp}"
+            )
 
         def _rest_factory(base_url: str) -> _PromptInjectingRest:
             return _PromptInjectingRest(McpRest(base_url, cfg, logger), e_prompt)
@@ -781,6 +833,8 @@ def main() -> int:
             project_context=project_context,
             org_id=org_id,
             provider=extract_provider,
+            base_url=extract_base_url,
+            num_ctx=extract_num_ctx,
             extract_timeout_s=args.extract_timeout,
             session_id=session_id,
         )

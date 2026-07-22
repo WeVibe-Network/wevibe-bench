@@ -243,6 +243,47 @@ class DockerCell:
     def exec_argv(self, inner_argv: list[str]) -> list[str]:
         return ["docker", "exec", "-w", "/work", self.container_name, *inner_argv]
 
+    def kill_worker_processes(self) -> None:
+        if not self.container_name:
+            return
+
+        kill_cmd = self.exec_argv(["sh", "-lc", "pkill -9 -f '[o]pencode' || true"])
+        self._progress(f"PROGRESS worker-process-kill start name={self.container_name}")
+
+        try:
+            killed = subprocess.run(
+                kill_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            self._progress(
+                f"PROGRESS worker-process-kill fail name={self.container_name} reason=docker_cli_missing"
+            )
+            raise RuntimeError("docker CLI not found in PATH") from exc
+        except Exception as exc:  # noqa: BLE001 - kill hook reports full detail upstream.
+            self._progress(
+                f"PROGRESS worker-process-kill fail name={self.container_name} reason=exception detail={exc}"
+            )
+            raise RuntimeError(
+                f"docker exec process-kill failed for name={self.container_name}: {exc}"
+            ) from exc
+
+        detail = _result_detail(killed)
+        if killed.returncode != 0:
+            self._progress(
+                f"PROGRESS worker-process-kill fail name={self.container_name} rc={killed.returncode} detail={detail}"
+            )
+            raise RuntimeError(
+                f"docker exec process-kill failed name={self.container_name} "
+                f"rc={killed.returncode} detail={detail}"
+            )
+
+        self._progress(
+            f"PROGRESS worker-process-kill done name={self.container_name} detail={detail or 'pkill-ok'}"
+        )
+
     def teardown(self) -> None:
         if not self.container_name:
             return

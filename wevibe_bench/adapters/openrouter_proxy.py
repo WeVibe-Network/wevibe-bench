@@ -442,6 +442,8 @@ class BudgetLedger:
 
         if os.path.exists(self.checkpoint_path):
             self._load_checkpoint()
+        else:
+            self._persist()
 
     def _binding(self) -> tuple[str, str, str, float]:
         return (self.run_id, self.model_id, self.profile_name, self.hard_cap)

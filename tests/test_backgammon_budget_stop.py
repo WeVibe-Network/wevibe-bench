@@ -85,7 +85,13 @@ def _write_checkpoint(path: Path, *, hard: float, accrued: float, committed: flo
     )
 
 
-def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    state: dict[str, int] = {
+        "force_kill_calls": 0,
+        "process_kill_calls": 0,
+        "container_removed": 0,
+    }
+
     class _FakeDockerCellConfig:
         def __init__(
             self,
@@ -115,7 +121,11 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> None:
             return [sys.executable, "-c", "print('fake')", *inner]
 
         def force_kill(self) -> None:
-            return None
+            state["force_kill_calls"] += 1
+            state["container_removed"] = 1
+
+        def kill_worker_processes(self) -> None:
+            state["process_kill_calls"] += 1
 
     monkeypatch.setattr(backgammon_mod, "DockerCellConfig", _FakeDockerCellConfig)
     monkeypatch.setattr(backgammon_mod, "DockerCell", _FakeDockerCell)
@@ -131,6 +141,7 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> None:
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(backgammon_mod.subprocess, "run", _run)
+    return state
 
 
 def test_run_opencode_detects_402_budget_stop_error_event(tmp_path: Path) -> None:
@@ -329,7 +340,7 @@ def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
     tmp_path: Path,
 ) -> None:
     runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
-    _patch_fake_docker(monkeypatch)
+    docker_state = _patch_fake_docker(monkeypatch)
     monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "PROMPT")
 
     gate_calls = {"count": 0}
@@ -357,7 +368,12 @@ def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
     def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
         opencode_calls["count"] += 1
         if opencode_calls["count"] == 1:
+            kill_hook = kwargs.get("kill_hook")
+            assert callable(kill_hook)
+            kill_hook()
             return _stats(session_id="sess-1", killed_reason="run_timeout", exit_code=137, cost_usd=0.4)
+        if docker_state["container_removed"]:
+            return _stats(session_id="sess-1", killed_reason=None, exit_code=1, cost_usd=0.0)
         return _stats(session_id="sess-1", killed_reason=None, exit_code=0, cost_usd=0.1)
 
     monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
@@ -372,6 +388,8 @@ def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
     assert result.verdict == "PASS"
     assert result.termination_reason == "gates_green"
     assert result.attempts_to_green == 1
+    assert docker_state["process_kill_calls"] == 1
+    assert docker_state["force_kill_calls"] == 0
 
 
 def test_non_budget_nonzero_worker_exit_classifies_as_harness_error(

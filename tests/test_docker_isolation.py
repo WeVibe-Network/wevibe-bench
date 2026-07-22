@@ -212,6 +212,82 @@ def test_docker_cell_forwards_ephemeral_proxy_token_not_host_key(
     assert run_env.get("OPENROUTER_API_KEY") != host_openrouter_key
 
 
+def test_kill_worker_processes_uses_exec_pkill_without_container_rm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    progress_lines: list[str] = []
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    container_name = "wevibe-bench-cell-process-kill"
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "process-kill-worktree",
+            memory_mode="off",
+            container_name=container_name,
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+        ),
+        progress=progress_lines.append,
+    )
+
+    cell.kill_worker_processes()
+
+    assert calls == [
+        [
+            "docker",
+            "exec",
+            "-w",
+            "/work",
+            container_name,
+            "sh",
+            "-lc",
+            "pkill -9 -f '[o]pencode' || true",
+        ]
+    ]
+    assert not any(len(argv) >= 2 and argv[0] == "docker" and argv[1] == "rm" for argv in calls)
+    assert any("worker-process-kill start" in line for line in progress_lines)
+    assert any("worker-process-kill done" in line for line in progress_lines)
+
+
+def test_force_kill_still_tears_down_with_docker_rm_f(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    progress_lines: list[str] = []
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    container_name = "wevibe-bench-cell-force-kill"
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "force-kill-worktree",
+            memory_mode="off",
+            container_name=container_name,
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+        ),
+        progress=progress_lines.append,
+    )
+
+    cell.force_kill()
+
+    assert calls == [["docker", "rm", "-f", container_name]]
+    assert any("docker-rm start" in line for line in progress_lines)
+    assert any("docker-rm done" in line for line in progress_lines)
+
+
 @REQUIRES_DOCKER
 def test_forbidden_mounts_and_oracle_paths_absent(tmp_path: Path) -> None:
     _require_worker_image()

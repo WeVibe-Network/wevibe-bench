@@ -86,9 +86,31 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
   this continues from Cell 2 with no rerun/rebill of Cell 1 (`--dry-run` appends a zero-cost validation pass that skips the live pool probe).
 - Disclosure: the final Stage-7 benchmark spans harness commits (`67052cd` crash run → post-crash patch commit); Walter explicitly
   accepted this continuity model for Option B.
-- Spend disclosure: Stage-7 = `$7.54 / $40` = `$6.17` (completed Cell 1) + `$1.37` (crash-adjacent committed-unproven residue,
-  unattributed; never reassigned to another cell). Global ≈ `$19.62 / $115`.
+- Spend disclosure: Stage-7 = `$20.04 / $40` (accrued `$13.23`; committed-unproven `$6.81` incl. ~$1.6 killed-smoke-run
+  reservation retentions that never convert — by design, uncertainty is never released). Global = `$32.11 / $115`.
+  The 22-07 canon smoke accrued `$0.00` (big-pickle free upstream; all spend was reservation-only).
 - Detail: `wevibe-meta/workspace/reports/21-07-26-1315-stage7-ladder-crash-fail-stats.md`.
+
+## 2C. 22-07 CANON CONFORMANCE SMOKE (2026-07-22, big-pickle $0) — PASS, gate before re-baselined run
+End-to-end smoke through the real transport after the 2026-07-22 canon (substrate events / atomic multi-memory
+commit / budget-bounded attempts / one proxy meter) + stack wipe. Report:
+`wevibe-meta/workspace/reports/22-07-26-0645-canon-conformance-smoke-e2e.md` (+ chunk reports 0426/0447/0507/0520/0532/0602).
+- Asserts: (a) extraction request = 256 `SubstrateEvent[]` (user 8/assistant 37/reasoning 95/tool 94/edit 22,
+  `skipped_error_events=1`) PASS; (b) failure-episode segmenter 9 episodes (1 resolved/6 unresolved/2 coincidental),
+  evidence block 7539 chars in extraction input PASS; (c) 9 insights → 9 memories committed atomically, 9/9 delivery
+  probes matched PASS; (d) fix-loop recall carries harvest fields — MECHANISM PASS (`need-harvest intent=debug` log
+  live, hub query logged) but fields legitimately empty (no build/test executions in-session) — populated case
+  suite-tested only, OPEN follow-up; (e) termination labels behave (`attempt_ceiling_reached`, single proxy budget
+  meter in budget-decision lines) PASS; (f) identity assert PASS (all ordinals echo `big-pickle`, key fp `b5ce6e5e`,
+  zero `identity_mismatch`).
+- 4 latent defects found + fixed by the smoke (all suite-green): proxy checkpoint init persist; sxe errored
+  edit/write events; harness-limit kill scope (container teardown → process kill + procps in image `9d389f8e376b`);
+  sxe type=error event skip. Plus wevibe-mcp transcript adapter retired (events-only `/v1/extract`) + sxe
+  proxy-routed extraction (`WEVIBE_BENCH_EXTRACT_*`) + clone num_ctx override + R-37 need-harvest logging.
+- OPEN before full run: rung-params `expected_upstream_model` still `xiaomi/mimo-v2.5` (in-code pin `big-pickle`
+  wins; params file must be re-pinned); Zen upstream 500-storms can kill an extraction (no retry — §8 carry item);
+  guard flagged one committed memory (`unicode_homoglyph_injection` " override") yet commit proceeded — policy
+  observation for Walter.
 
 ## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
 - Plugin re-injects ALL approved memories EVERY turn + across compaction (`wevibe-plugin.ts:1349` transform →
@@ -202,10 +224,11 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
-- qdrant `org_wevibe-org-0_memories` = **1 preserved memory** from Stage-7 Cell 1 self-extraction
-  (`cid 547b5c0b711fcbdfa8fc7cd8055d30e640a116a062ea2815804d4ef7aed947fd`; preserved, not wiped).
-- :4550 clone was left running (pid changes across restarts — re-check). hub :4440, chain, qdrant :6333 up from
-  the 14-07 clean wipe. Ollama :11434 (nomic-embed-text:v1.5) — MUST stay up for recall+dedup embeddings.
+- **22-07-22: full clean wipe ran** (RUNBOOK clean-start one-path) — the Cell-1 preserved memory `547b5c0b…fd` is
+  GONE. qdrant `org_wevibe-org-0_memories` now holds **10 memories** from the canon smoke (1 + 9, delivery-proven).
+- :4550 clone running on rebuilt dist (pid in `wevibe-bench/runs/clone4550.pid`; `WEVIBE_RECALL_MODE=test`). hub
+  :4440 (fresh instanceId `dfaa7dd2`), 9/9 containers healthy. Ollama :11434 (nomic-embed-text:v1.5) — MUST stay
+  up for recall+dedup embeddings. Worker image `wevibe-bench-worker:v1` = `9d389f8e376b` (plugin `49ec5a8` + procps).
 - Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).
 
 ## 10. ⚠ FOR-WALTER CARRY ITEM (unresolved)

@@ -382,6 +382,7 @@ class M2Proof:
         org_id: str,
         provider: str = "openrouter",
         base_url: str | None = None,
+        num_ctx: int | None = None,
         extract_timeout_s: float = 900,
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -427,6 +428,7 @@ class M2Proof:
             provider=provider,
             api_key=hosted_api_key,
             base_url=base_url,
+            num_ctx=num_ctx,
             session_id=session_id,
         )
         self._log("info", "lifecycle.m2.extract_wait", new_trace_id(), "ok", 0, job_id=job_id, timeout_s=extract_timeout_s)
@@ -457,6 +459,7 @@ class M2Proof:
         org_id: str,
         provider: str = "openrouter",
         base_url: str | None = None,
+        num_ctx: int | None = None,
         extract_timeout_s: float = 900,
         session_id: str | None = None,
     ) -> dict[str, Any]:
@@ -468,6 +471,7 @@ class M2Proof:
             org_id=org_id,
             provider=provider,
             base_url=base_url,
+            num_ctx=num_ctx,
             extract_timeout_s=extract_timeout_s,
             session_id=session_id,
         )

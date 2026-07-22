@@ -10,6 +10,7 @@ import pytest
 from wevibe_bench.adapters.openrouter_proxy import (
     BudgetExceededError,
     BudgetLedger,
+    CHECKPOINT_SCHEMA_VERSION,
     CredentialError,
     OPENCODE_ZEN_UPSTREAM_URL,
     ModelMismatchError,
@@ -603,6 +604,47 @@ def test_budget_ledger_threaded_burst_never_exceeds_cap(tmp_path: Path) -> None:
     assert snapshot["outstanding_total"] == pytest.approx(len(granted) * amount)
     total_committed = snapshot["accrued"] + snapshot["committed_unproven"] + snapshot["outstanding_total"]
     assert total_committed <= snapshot["hard_cap"] + 1e-12
+
+
+def test_budget_ledger_init_persists_zero_checkpoint_and_round_trip(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "ledger-init.json"
+    assert not checkpoint.exists()
+
+    BudgetLedger(
+        run_id="run-init",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=0.5,
+        checkpoint_path=str(checkpoint),
+    )
+
+    assert checkpoint.is_file()
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == CHECKPOINT_SCHEMA_VERSION
+    assert payload["run_id"] == "run-init"
+    assert payload["model_id"] == "z-ai/glm-5.2"
+    assert payload["profile_name"] == "glm"
+    assert payload["hard_cap_usd"] == pytest.approx(0.5)
+    assert payload["accrued_actual_usd"] == pytest.approx(0.0)
+    assert payload["committed_unproven_usd"] == pytest.approx(0.0)
+    assert payload["outstanding"] == {}
+    assert isinstance(payload["updated_at"], str)
+    assert payload["updated_at"]
+
+    resumed = BudgetLedger(
+        run_id="run-init",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=0.5,
+        checkpoint_path=str(checkpoint),
+    )
+
+    snapshot = resumed.snapshot()
+    assert snapshot["accrued"] == pytest.approx(0.0)
+    assert snapshot["committed_unproven"] == pytest.approx(0.0)
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+    assert snapshot["remaining"] == pytest.approx(0.5)
+    assert snapshot["hard_cap"] == pytest.approx(0.5)
 
 
 def test_budget_ledger_checkpoint_resume_restores_spend(tmp_path: Path) -> None:

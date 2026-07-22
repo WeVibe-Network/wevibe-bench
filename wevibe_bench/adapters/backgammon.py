@@ -485,7 +485,7 @@ class BackgammonRunner(AgentRunner):
                         phase="initial",
                         fallback_session_id=None,
                         prior_cost_usd=cell_cost_usd,
-                        kill_hook=active_cell.force_kill,
+                        kill_hook=active_cell.kill_worker_processes,
                     )
                     attempt_costs_usd[1] = first_run.cost_usd
                     observed_attempt_costs.append(first_run.cost_usd)
@@ -675,7 +675,7 @@ class BackgammonRunner(AgentRunner):
                         phase=f"feedback-{attempt}",
                         fallback_session_id=session_id,
                         prior_cost_usd=cell_cost_usd,
-                        kill_hook=active_cell.force_kill,
+                        kill_hook=active_cell.kill_worker_processes,
                     )
                     attempt_costs_usd[next_attempt] = feedback_run.cost_usd
                     observed_attempt_costs.append(feedback_run.cost_usd)

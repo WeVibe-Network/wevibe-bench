@@ -11,7 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends git ca-certificates; \
+    apt-get install -y --no-install-recommends git ca-certificates procps; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

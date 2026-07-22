@@ -10,9 +10,11 @@ No paid model, no network, no docker.
 
 from __future__ import annotations
 
+import argparse
 import json
 import pathlib
 import sys
+from typing import Any
 
 import pytest
 
@@ -295,9 +297,199 @@ def test_build_substrate_events_maps_user_assistant_reasoning_tool_and_edit(tmp_
             "tool": 2,
             "edit": 2,
         },
+        "skipped_error_events": 0,
         "total_chars": len(canonical_events),
         "events_sha256_first8": sx._sha256_first8(canonical_events),
     }
+
+
+def test_build_substrate_events_skips_worker_type_error_events_and_counts_them(
+    tmp_path: pathlib.Path,
+) -> None:
+    user_sidecar = tmp_path / "worktree.user-events.jsonl"
+    worker_events = tmp_path / "worktree.events.jsonl"
+
+    user_sidecar.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": 1_700_000_001_000,
+                "attempt": 1,
+                "text": "run extraction",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    worker_events.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "text",
+                        "timestamp": 1_700_000_001_100,
+                        "part": {
+                            "text": "assistant output",
+                            "time": {"start": 1_700_000_001_101},
+                        },
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    {
+                        "type": "error",
+                        "timestamp": 1_700_000_001_150,
+                        "sessionID": "session-error",
+                        "error": {
+                            "name": "APIError",
+                            "data": {"provider": "openrouter", "status": 400},
+                        },
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    {
+                        "type": "tool_use",
+                        "timestamp": 1_700_000_001_200,
+                        "part": {
+                            "tool": "bash",
+                            "time": {"start": 1_700_000_001_201},
+                            "state": {
+                                "status": "completed",
+                                "input": {"command": "npm test"},
+                                "output": "ok",
+                                "metadata": {"exit": 0},
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events, stats, _ = sx._build_substrate_events(session_dir=tmp_path)
+
+    assert [event["kind"] for event in events] == ["user", "assistant", "tool"]
+    assert stats["skipped_error_events"] == 1
+    assert stats["kind_counts"] == {
+        "user": 1,
+        "assistant": 1,
+        "reasoning": 0,
+        "tool": 1,
+        "edit": 0,
+    }
+
+
+def test_errored_write_missing_filepath_uses_generic_tool_event_and_nonerror_stays_strict(
+    tmp_path: pathlib.Path,
+) -> None:
+    error_text = (
+        "The write tool was called with invalid arguments: "
+        "SchemaError(Missing key in arguments: filePath)"
+    )
+
+    errored_dir = tmp_path / "errored-write"
+    errored_dir.mkdir(parents=True, exist_ok=True)
+    (errored_dir / "worktree.user-events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": 1_700_000_010_000,
+                "attempt": 1,
+                "text": "trigger write",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (errored_dir / "worktree.events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "tool_use",
+                "timestamp": 1_700_000_010_100,
+                "part": {
+                    "tool": "write",
+                    "time": {"start": 1_700_000_010_101},
+                    "state": {
+                        "status": "error",
+                        "input": {},
+                        "output": None,
+                        "error": error_text,
+                    },
+                },
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events, _, _ = sx._build_substrate_events(session_dir=errored_dir)
+    assert [event["kind"] for event in events] == ["user", "tool"]
+    assert events[1] == {
+        "kind": "tool",
+        "time": 1_700_000_010_101,
+        "seq": 1,
+        "name": "write",
+        "input": "{}",
+        "output": None,
+        "exit": None,
+        "status": "error",
+        "error": error_text,
+    }
+
+    strict_dir = tmp_path / "strict-write"
+    strict_dir.mkdir(parents=True, exist_ok=True)
+    (strict_dir / "worktree.user-events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": 1_700_000_020_000,
+                "attempt": 1,
+                "text": "trigger strict write",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (strict_dir / "worktree.events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "tool_use",
+                "timestamp": 1_700_000_020_100,
+                "part": {
+                    "tool": "write",
+                    "time": {"start": 1_700_000_020_101},
+                    "state": {
+                        "status": "completed",
+                        "input": {},
+                        "output": "never emitted",
+                    },
+                },
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="edit/write tool missing filePath"):
+        sx._build_substrate_events(session_dir=strict_dir)
 
 
 def test_build_substrate_events_requires_user_sidecar_for_each_events_file(tmp_path: pathlib.Path) -> None:
@@ -317,3 +509,227 @@ def test_build_substrate_events_requires_user_sidecar_for_each_events_file(tmp_p
 
     with pytest.raises(RuntimeError, match="missing user sidecar for worker events file"):
         sx._build_substrate_events(session_dir=tmp_path)
+
+
+def _run_main_capture_extract_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    *,
+    env: dict[str, str | None],
+) -> tuple[int, dict[str, Any], list[str]]:
+    for key in (
+        "WEVIBE_BENCH_EXTRACT_BASE_URL",
+        "WEVIBE_BENCH_EXTRACT_API_KEY_FILE",
+        "WEVIBE_BENCH_EXTRACT_NUM_CTX",
+        "WEVIBE_BENCH_API_KEY",
+        "OPENROUTER_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+    run_label = "fixture-run"
+    source_mode = "off"
+    runs_dir = tmp_path / "runs"
+    (runs_dir / run_label / source_mode).mkdir(parents=True, exist_ok=True)
+
+    args = argparse.Namespace(
+        run_label=run_label,
+        source_mode=source_mode,
+        org_id=sx.DEFAULT_ORG_ID,
+        session_model="openrouter/opencode/big-pickle",
+        extract_model=None,
+        extract_timeout=60,
+        runs_dir=str(runs_dir),
+    )
+
+    class _FakeParser:
+        def parse_args(self) -> argparse.Namespace:
+            return args
+
+    monkeypatch.setattr(sx, "_build_arg_parser", lambda: _FakeParser())
+    monkeypatch.setattr(sx, "load_bench_env", lambda: None)
+
+    log_lines: list[str] = []
+
+    class _FakeLogger:
+        logfile_path = str(tmp_path / "fixture.log")
+
+        def info(self, message: str) -> None:
+            log_lines.append(message)
+
+    logger = _FakeLogger()
+    monkeypatch.setattr(sx, "run_logger", lambda *_args, **_kwargs: logger)
+
+    monkeypatch.setattr(sx, "_load_prompt", lambda _path: "fixture prompt")
+    monkeypatch.setattr(
+        sx,
+        "_build_substrate_events",
+        lambda *, session_dir: (
+            [{"kind": "user", "time": 1, "seq": 0, "text": "hello"}],
+            {
+                "event_count": 1,
+                "kind_counts": {
+                    "user": 1,
+                    "assistant": 0,
+                    "reasoning": 0,
+                    "tool": 0,
+                    "edit": 0,
+                },
+                "total_chars": 5,
+                "events_sha256_first8": "deadbeef",
+            },
+            [session_dir / "worktree.events.jsonl"],
+        ),
+    )
+    monkeypatch.setattr(sx, "_session_id_counts_from_events", lambda _session_dir: {"session-1": 1})
+    monkeypatch.setattr(
+        sx,
+        "_session_id_from_events",
+        lambda _session_dir, *, session_counts=None: "session-1",
+    )
+    monkeypatch.setattr(sx, "_load_identity", lambda _name: object())
+    monkeypatch.setattr(sx, "preflight", lambda **_kwargs: None)
+    monkeypatch.setattr(sx, "_required_env", lambda _name: "wallet")
+
+    class _FakeInstance:
+        def __init__(self, port: int, pid: int) -> None:
+            self.port = port
+            self.pid = pid
+
+    class _FakeProcman:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def stop(self, _instance: _FakeInstance) -> None:
+            return None
+
+    class _FakeOrchestrator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.org_id = sx.DEFAULT_ORG_ID
+
+        def run_m1(self) -> dict[str, str]:
+            return {"org_id": sx.DEFAULT_ORG_ID}
+
+    monkeypatch.setattr(sx, "McpProcessManager", _FakeProcman)
+    monkeypatch.setattr(sx, "LifecycleOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(
+        sx,
+        "_bring_up_for_resume",
+        lambda **_kwargs: (_FakeInstance(4550, 1001), _FakeInstance(4551, 1002), True),
+    )
+
+    captured_extract_kwargs: dict[str, Any] = {}
+
+    class _FakeProof:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def memory_fragment(text: str) -> str:
+            return " ".join(text.split())[:64]
+
+        def produce_memories(self, **kwargs: Any) -> list[dict[str, Any]]:
+            captured_extract_kwargs.update(kwargs)
+            return [
+                {
+                    "text": "fixture memory",
+                    "keywords": ["backgammon", "typescript"],
+                    "stack_hint": ["node"],
+                    "memory_type": "memory",
+                }
+            ]
+
+        def submit_memory(self, _org_id: str, _memory: dict[str, Any]) -> str:
+            return "submission-1"
+
+        def leader_verify_and_commit(
+            self,
+            _org_id: str,
+            submission_hash: str,
+            _keywords: list[str],
+        ) -> dict[str, Any]:
+            return {
+                "commit_status": {
+                    "submissions": [
+                        {
+                            "submission_hash": submission_hash,
+                            "status": "committed",
+                        }
+                    ]
+                }
+            }
+
+        def prove_delivery(self, _org_id: str, memory_fragments: list[str]) -> dict[str, Any]:
+            return {
+                "delivery": "YES",
+                "n_memories": len(memory_fragments),
+                "matched": True,
+                "per_memory": [
+                    {
+                        "fragment_fp": "abc12345",
+                        "matched": True,
+                    }
+                    for _fragment in memory_fragments
+                ],
+            }
+
+    monkeypatch.setattr(sx, "M2Proof", _FakeProof)
+
+    exit_code = sx.main()
+    return exit_code, captured_extract_kwargs, log_lines
+
+
+def test_extract_override_env_forwards_proxy_base_url_num_ctx_and_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    proxy_token = "proxy-token-override"
+    token_file = tmp_path / "proxy.token"
+    token_file.write_text(proxy_token + "\n", encoding="utf-8")
+
+    exit_code, extract_kwargs, log_lines = _run_main_capture_extract_call(
+        monkeypatch,
+        tmp_path,
+        env={
+            "OPENROUTER_API_KEY": "openrouter-direct-key",
+            "WEVIBE_BENCH_EXTRACT_BASE_URL": "http://127.0.0.1:8789/api/v1",
+            "WEVIBE_BENCH_EXTRACT_API_KEY_FILE": str(token_file),
+            "WEVIBE_BENCH_EXTRACT_NUM_CTX": "131072",
+        },
+    )
+
+    assert exit_code == 0
+    assert extract_kwargs["base_url"] == "http://127.0.0.1:8789/api/v1"
+    assert extract_kwargs["num_ctx"] == 131072
+    assert extract_kwargs["api_key"] == proxy_token
+    assert extract_kwargs["provider"] == "openrouter"
+
+    expected_line = (
+        "extract transport override "
+        "base_url=http://127.0.0.1:8789/api/v1 "
+        "num_ctx=131072 "
+        f"key_source=proxy_token_file key_fp={sx._sha256_first8(proxy_token)}"
+    )
+    assert any(expected_line in line for line in log_lines)
+
+
+def test_extract_override_unset_keeps_direct_openrouter_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    direct_key = "openrouter-direct-key"
+    exit_code, extract_kwargs, log_lines = _run_main_capture_extract_call(
+        monkeypatch,
+        tmp_path,
+        env={"OPENROUTER_API_KEY": direct_key},
+    )
+
+    assert exit_code == 0
+    assert extract_kwargs["base_url"] is None
+    assert extract_kwargs["num_ctx"] is None
+    assert extract_kwargs["api_key"] == direct_key
+    assert not any("extract transport override " in line for line in log_lines)
