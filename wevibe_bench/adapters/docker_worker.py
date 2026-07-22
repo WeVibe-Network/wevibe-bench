@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Callable
 
@@ -147,6 +148,7 @@ class DockerCellConfig:
     proxy_token: str | None = None
     home_dir: str = "/home/worker"
     output_token_max: int | None = None
+    worker_logs_dir: Path | None = None
 
 
 class DockerCell:
@@ -241,7 +243,7 @@ class DockerCell:
         return self
 
     def exec_argv(self, inner_argv: list[str]) -> list[str]:
-        return ["docker", "exec", "-w", "/work", self.container_name, *inner_argv]
+        return ["docker", "exec", "-i", "-w", "/work", self.container_name, *inner_argv]
 
     def kill_worker_processes(self) -> None:
         if not self.container_name:
@@ -288,6 +290,8 @@ class DockerCell:
         if not self.container_name:
             return
 
+        self._capture_worker_logs_pre_teardown()
+
         self._progress(f"PROGRESS docker-rm start name={self.container_name}")
 
         try:
@@ -321,6 +325,226 @@ class DockerCell:
             )
 
         self.container_id = None
+
+    def _capture_worker_logs_pre_teardown(self) -> None:
+        if self.config.worker_logs_dir is None:
+            self._progress(
+                "INFO op=worker_logs.capture step=skip path=none bytes=0 "
+                "status=skipped reason=worker_logs_dir_none"
+            )
+            return
+
+        destination = Path(self.config.worker_logs_dir).expanduser().resolve()
+        inspect_path = destination / "container-inspect.json"
+        docker_logs_path = destination / "container-docker.log"
+        opencode_path = destination / "opencode"
+
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise.
+            reason = self._capture_reason(f"destination_mkdir_failed detail={exc}")
+            self._log_worker_capture(
+                step="inspect",
+                path=inspect_path,
+                bytes_count=0,
+                status="failed",
+                reason=reason,
+            )
+            self._log_worker_capture(
+                step="docker_logs",
+                path=docker_logs_path,
+                bytes_count=0,
+                status="failed",
+                reason=reason,
+            )
+            self._log_worker_capture(
+                step="cp",
+                path=opencode_path,
+                bytes_count=0,
+                status="failed",
+                reason=reason,
+            )
+            return
+
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", self.container_name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if inspected.returncode != 0:
+                self._log_worker_capture(
+                    step="inspect",
+                    path=inspect_path,
+                    bytes_count=0,
+                    status="failed",
+                    reason=f"rc={inspected.returncode} detail={_result_detail(inspected)}",
+                )
+            else:
+                inspect_path.write_text(inspected.stdout or "", encoding="utf-8")
+                self._log_worker_capture(
+                    step="inspect",
+                    path=inspect_path,
+                    bytes_count=self._path_bytes(inspect_path),
+                    status="ok",
+                    reason="none",
+                )
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise.
+            self._log_worker_capture(
+                step="inspect",
+                path=inspect_path,
+                bytes_count=0,
+                status="failed",
+                reason=f"exception detail={exc}",
+            )
+
+        try:
+            docker_logs = subprocess.run(
+                ["docker", "logs", "--timestamps", self.container_name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            docker_logs_path.write_text(docker_logs.stdout or "", encoding="utf-8")
+            bytes_count = self._path_bytes(docker_logs_path)
+            if docker_logs.returncode != 0:
+                self._log_worker_capture(
+                    step="docker_logs",
+                    path=docker_logs_path,
+                    bytes_count=bytes_count,
+                    status="failed",
+                    reason=f"rc={docker_logs.returncode} detail={_result_detail(docker_logs)}",
+                )
+            else:
+                self._log_worker_capture(
+                    step="docker_logs",
+                    path=docker_logs_path,
+                    bytes_count=bytes_count,
+                    status="ok",
+                    reason="none",
+                )
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise.
+            self._log_worker_capture(
+                step="docker_logs",
+                path=docker_logs_path,
+                bytes_count=0,
+                status="failed",
+                reason=f"exception detail={exc}",
+            )
+
+        try:
+            opencode_path.mkdir(parents=True, exist_ok=True)
+
+            staging_host_path = Path(self.config.worktree).expanduser().resolve() / ".wevibe-worker-log-export"
+            try:
+                shutil.rmtree(staging_host_path)
+            except FileNotFoundError:
+                pass
+
+            staged = subprocess.run(
+                self.exec_argv(
+                    [
+                        "sh",
+                        "-lc",
+                        (
+                            "mkdir -p /work/.wevibe-worker-log-export/opencode "
+                            f"&& cp -a {self.config.home_dir}/.local/share/opencode/. "
+                            "/work/.wevibe-worker-log-export/opencode/"
+                        ),
+                    ]
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if staged.returncode != 0:
+                self._log_worker_capture(
+                    step="cp",
+                    path=opencode_path,
+                    bytes_count=self._path_bytes(opencode_path),
+                    status="failed",
+                    reason=f"stage_rc={staged.returncode} detail={_result_detail(staged)}",
+                )
+            else:
+                copied = subprocess.run(
+                    [
+                        "docker",
+                        "cp",
+                        f"{self.container_name}:/work/.wevibe-worker-log-export/opencode/.",
+                        str(opencode_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if copied.returncode != 0:
+                    self._log_worker_capture(
+                        step="cp",
+                        path=opencode_path,
+                        bytes_count=self._path_bytes(opencode_path),
+                        status="failed",
+                        reason=f"rc={copied.returncode} detail={_result_detail(copied)}",
+                    )
+                else:
+                    self._log_worker_capture(
+                        step="cp",
+                        path=opencode_path,
+                        bytes_count=self._path_bytes(opencode_path),
+                        status="ok",
+                        reason="none",
+                    )
+
+            try:
+                shutil.rmtree(staging_host_path)
+            except FileNotFoundError:
+                pass
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise.
+            self._log_worker_capture(
+                step="cp",
+                path=opencode_path,
+                bytes_count=0,
+                status="failed",
+                reason=f"exception detail={exc}",
+            )
+
+    def _log_worker_capture(
+        self,
+        *,
+        step: str,
+        path: Path,
+        bytes_count: int,
+        status: str,
+        reason: str,
+    ) -> None:
+        self._progress(
+            "PROGRESS op=worker_logs.capture "
+            f"step={step} path={path} bytes={max(0, int(bytes_count))} "
+            f"status={status} reason={self._capture_reason(reason)}"
+        )
+
+    @staticmethod
+    def _capture_reason(reason: str) -> str:
+        normalized = " ".join(str(reason).split())
+        if not normalized:
+            return "none"
+        if len(normalized) > 512:
+            return f"{normalized[:509]}..."
+        return normalized
+
+    @staticmethod
+    def _path_bytes(path: Path) -> int:
+        candidate = Path(path)
+        if not candidate.exists():
+            return 0
+        if candidate.is_file():
+            return max(0, int(candidate.stat().st_size))
+        total = 0
+        for child in candidate.rglob("*"):
+            if child.is_file():
+                total += max(0, int(child.stat().st_size))
+        return total
 
     def force_kill(self) -> None:
         self.teardown()

@@ -256,12 +256,75 @@ def _build_plan(rungs: tuple[LadderRung, ...] | None = None) -> list[dict[str, A
     return cells
 
 
+def _parse_only_reps(raw: str, *, valid_runs: set[int]) -> dict[int, list[int]]:
+    tokens = [token.strip() for token in str(raw).split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise RuntimeError("--only-reps token is malformed (expected RUN:REP)")
+
+    selected: dict[int, set[int]] = {}
+    for token in tokens:
+        parts = token.split(":")
+        if len(parts) != 2:
+            raise RuntimeError(f"--only-reps token is malformed: {token!r} (expected RUN:REP)")
+        run_text, rep_text = parts
+        try:
+            run_number = int(run_text)
+            rep = int(rep_text)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"--only-reps token is malformed: {token!r} (expected RUN:REP)"
+            ) from exc
+
+        if run_number not in valid_runs:
+            raise RuntimeError(
+                f"--only-reps run_number {run_number} is not in the stage-{STAGE_NUMBER} plan"
+            )
+        if rep < 1:
+            raise RuntimeError("--only-reps rep must be >= 1")
+        if rep > MAX_REPS:
+            raise RuntimeError(f"--only-reps rep must be <= {MAX_REPS}")
+
+        selected.setdefault(run_number, set()).add(rep)
+
+    return {
+        run_number: sorted(reps)
+        for run_number, reps in sorted(selected.items(), key=lambda item: item[0])
+    }
+
+
+def _parse_run_number_csv(raw: str, *, flag: str, valid_runs: set[int]) -> list[int]:
+    tokens = [token.strip() for token in str(raw).split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise RuntimeError(f"{flag} token is malformed (expected run number)")
+
+    run_numbers: list[int] = []
+    seen: set[int] = set()
+    for token in tokens:
+        try:
+            run_number = int(token)
+        except ValueError as exc:
+            raise RuntimeError(f"{flag} token is malformed: {token!r} (expected run number)") from exc
+        if run_number not in valid_runs:
+            raise RuntimeError(f"{flag} run_number {run_number} is not in the stage-{STAGE_NUMBER} plan")
+        if run_number not in seen:
+            run_numbers.append(run_number)
+            seen.add(run_number)
+    return sorted(run_numbers)
+
+
 def _build_manifest(
     cells: list[dict[str, Any]],
     rung_params: dict[str, dict[str, Any]],
     trace: str,
+    extra_disclosures: list[str] | None = None,
 ) -> dict[str, Any]:
     roster = backgammon_scored_ladder_roster()
+    disclosures = [
+        "2026-07-22: twin-aware delivery probe — harness measurement fix (suppressed-as-twin-of-returned counts delivered, evidence recorded in scorecard); protocol semantics unchanged; disclosed per pre-registration integrity like the 22-07 smoke defect fixes"
+    ]
+    if extra_disclosures:
+        disclosures.extend(str(disclosure) for disclosure in extra_disclosures)
+
     manifest = {
         "schema_version": int(BACKGAMMON_LADDER_SCHEMA_VERSION),
         "total_cells": len(cells),
@@ -289,9 +352,7 @@ def _build_manifest(
         "roster": "opus-4.8 SOURCE (OFF + self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> big-pickle MEASURE OFF/ON; memories flow down",
         "task": "locked backgammon prompt/CONTRACT/oracle",
         "feedback": "problems-only",
-        "disclosures": [
-            "2026-07-22: twin-aware delivery probe — harness measurement fix (suppressed-as-twin-of-returned counts delivered, evidence recorded in scorecard); protocol semantics unchanged; disclosed per pre-registration integrity like the 22-07 smoke defect fixes"
-        ],
+        "disclosures": disclosures,
         "attempts": {
             "policy": "budget-bounded",
             "ceiling": int(DEFAULT_ATTEMPT_HARD_CEILING),
@@ -1818,6 +1879,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the planned cells and exit 0 (no ledger/proxy/spend).")
     parser.add_argument("--start-cell", type=int, default=None, help="Optional run number to force start at.")
+    parser.add_argument(
+        "--only-reps",
+        default=None,
+        help='Restrict execution to explicit RUN:REP pairs (example: "1:1,2:2,4:1").',
+    )
+    parser.add_argument(
+        "--session-only-runs",
+        default=None,
+        help="Comma-separated run numbers forced to phase=session before selection and manifest freeze.",
+    )
+    parser.add_argument(
+        "--extra-disclosure",
+        action="append",
+        default=[],
+        help="Append preregistration disclosure text to the manifest (repeatable).",
+    )
     return parser
 
 
@@ -1924,10 +2001,37 @@ def _off_stats_for_rung(plan: list[dict[str, Any]], checkpoint: dict[str, Any], 
 def main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
+    if args.only_reps and args.start_cell is not None:
+        parser.error("--only-reps cannot be combined with --start-cell")
     if args.start_cell is not None and int(args.start_cell) < 1:
         parser.error("--start-cell must be >= 1")
 
     plan = _build_plan()
+    valid_runs = {int(cell["run_number"]) for cell in plan}
+
+    only_reps: dict[int, list[int]] | None = None
+    if args.only_reps:
+        try:
+            only_reps = _parse_only_reps(str(args.only_reps), valid_runs=valid_runs)
+        except RuntimeError as exc:
+            parser.error(str(exc))
+
+    session_only_runs: list[int] = []
+    if args.session_only_runs:
+        try:
+            session_only_runs = _parse_run_number_csv(
+                str(args.session_only_runs),
+                flag="--session-only-runs",
+                valid_runs=valid_runs,
+            )
+        except RuntimeError as exc:
+            parser.error(str(exc))
+    if session_only_runs:
+        session_only_set = set(session_only_runs)
+        for cell in plan:
+            if int(cell["run_number"]) in session_only_set:
+                cell["phase"] = "session"
+
     trace = _new_trace_id()
 
     runs_dir = Path(str(args.runs_dir)).expanduser().resolve()
@@ -1935,17 +2039,45 @@ def main() -> int:
     logfile_path = runs_dir / f"{_utc_compact()}.log"
     print(str(logfile_path), flush=True)
 
-    selected = [
-        cell
-        for cell in plan
-        if args.start_cell is None or int(cell["run_number"]) >= int(args.start_cell)
-    ]
+    if only_reps is None:
+        selected = [
+            cell
+            for cell in plan
+            if args.start_cell is None or int(cell["run_number"]) >= int(args.start_cell)
+        ]
+    else:
+        selected = [cell for cell in plan if int(cell["run_number"]) in only_reps]
     if not selected:
         raise RuntimeError("no cells selected to run")
+
+    selected_reps_payload: list[dict[str, Any]] = []
+    selected_reps_total = 0
+    for cell in selected:
+        run_number = int(cell["run_number"])
+        reps = [1] if only_reps is None else list(only_reps[run_number])
+        selected_reps_total += len(reps)
+        selected_reps_payload.append(
+            {
+                "run_number": run_number,
+                "model": str(cell["model"]),
+                "memory_mode": str(cell["memory_mode"]),
+                "phase": str(cell["phase"]),
+                "reps": reps,
+            }
+        )
 
     plan_line = (
         f"[{_utc_iso()}] PLAN trace={trace} total_cells={len(plan)} selected_cells={len(selected)} "
         f"cells={json.dumps([{k: cell[k] for k in ('rung_index', 'model', 'role', 'run_number', 'memory_mode', 'phase')} for cell in plan], separators=(',', ':'))}"
+    )
+    plan_reps_line = (
+        f"[{_utc_iso()}] PLAN-REPS trace={trace} selected_reps={selected_reps_total} "
+        f"cells={json.dumps(selected_reps_payload, separators=(',', ':'))}"
+    )
+    session_only_line = (
+        f"[{_utc_iso()}] PLAN-SESSION-ONLY trace={trace} runs={json.dumps(session_only_runs, separators=(',', ':'))}"
+        if session_only_runs
+        else None
     )
 
     rung_params: dict[str, dict[str, Any]] | None = None
@@ -1957,17 +2089,32 @@ def main() -> int:
     elif not args.dry_run:
         parser.error("--rung-params is required for a real run")
 
-    if args.dry_run and not args.import_cell:
-        _append_log_line(logfile_path, plan_line)
+    def _print_dry_run_rows() -> None:
         for cell in selected:
-            print(json.dumps(_dry_run_cell_payload(cell, rung_params), sort_keys=True), flush=True)
+            reps = [1] if only_reps is None else only_reps[int(cell["run_number"])]
+            for rep in reps:
+                payload = _dry_run_cell_payload(cell, rung_params)
+                if only_reps is not None:
+                    payload["rep"] = int(rep)
+                print(json.dumps(payload, sort_keys=True), flush=True)
+
+    if args.dry_run and not args.import_cell and rung_params is None:
+        _append_log_line(logfile_path, plan_line)
+        _append_log_line(logfile_path, plan_reps_line)
+        if session_only_line is not None:
+            _append_log_line(logfile_path, session_only_line)
+        _print_dry_run_rows()
         _append_log_line(
             logfile_path,
-            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)}",
+            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)} "
+            f"planned_reps={selected_reps_total}",
         )
         return 0
 
     _emit(logfile_path, plan_line)
+    _emit(logfile_path, plan_reps_line)
+    if session_only_line is not None:
+        _emit(logfile_path, session_only_line)
 
     checkpoint_path = runs_dir / CHECKPOINT_NAME
     checkpoint = _load_checkpoint(checkpoint_path)
@@ -1984,7 +2131,12 @@ def main() -> int:
             raise RuntimeError(
                 "cannot build scored-ladder manifest without --rung-params"
             )
-        current_manifest = _build_manifest(plan, rung_params, trace)
+        current_manifest = _build_manifest(
+            plan,
+            rung_params,
+            trace,
+            extra_disclosures=list(args.extra_disclosure or []),
+        )
         if _checkpoint_cells(checkpoint):
             raise RuntimeError(
                 f"cannot resume: found an existing checkpoint in {runs_dir} but no run manifest "
@@ -1993,7 +2145,12 @@ def main() -> int:
         _save_json_atomic(manifest_path, current_manifest)
     else:
         if rung_params is not None:
-            current_manifest = _build_manifest(plan, rung_params, trace)
+            current_manifest = _build_manifest(
+                plan,
+                rung_params,
+                trace,
+                extra_disclosures=list(args.extra_disclosure or []),
+            )
             _validate_manifest_or_fail(existing=existing_manifest, current=current_manifest)
         else:
             current_manifest = existing_manifest
@@ -2037,25 +2194,34 @@ def main() -> int:
             )
 
     if args.dry_run:
-        for cell in selected:
-            print(json.dumps(_dry_run_cell_payload(cell, rung_params), sort_keys=True), flush=True)
+        _print_dry_run_rows()
         _emit(
             logfile_path,
-            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)}",
+            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)} "
+            f"planned_reps={selected_reps_total}",
         )
         return 0
 
     if rung_params is None:
         raise RuntimeError("--rung-params is required for a real run")
 
-    # Plan-level budget projection: refuse to START if the remaining base cells'
+    # Plan-level budget projection: refuse to START if the selected reps'
     # caps cannot fit under the stage/global caps (stop BEFORE overrunning).
     projected = 0.0
-    for cell in selected:
-        prior = _find_entry(checkpoint, int(cell["run_number"]), 1)
-        if args.resume and prior is not None and str(prior.get("status") or "") == "ok":
-            continue
-        projected += float(rung_params[str(cell["model"])]["cap_usd"])
+    if only_reps is None:
+        for cell in selected:
+            prior = _find_entry(checkpoint, int(cell["run_number"]), 1)
+            if args.resume and prior is not None and str(prior.get("status") or "") == "ok":
+                continue
+            projected += float(rung_params[str(cell["model"])]["cap_usd"])
+    else:
+        for cell in selected:
+            run_number = int(cell["run_number"])
+            for rep in only_reps[run_number]:
+                prior = _find_entry(checkpoint, run_number, int(rep))
+                if args.resume and prior is not None and str(prior.get("status") or "") == "ok":
+                    continue
+                projected += float(rung_params[str(cell["model"])]["cap_usd"])
     _emit(logfile_path, f"[{_utc_iso()}] BUDGET trace={trace} projected_caps_usd={projected:.4f}")
     if projected > 0 and not _ledger_check(projected):
         abort = LadderAbort("plan_budget_refused", {"projected_caps_usd": projected})
@@ -2072,6 +2238,55 @@ def main() -> int:
             model = str(cell["model"])
             params = rung_params[model]
             run_number = int(cell["run_number"])
+
+            if only_reps is not None:
+                reps_selected = only_reps[run_number]
+                for rep in reps_selected:
+                    prior = _find_entry(checkpoint, run_number, int(rep))
+                    if args.resume and prior is not None and str(prior.get("status") or "") == "ok":
+                        skipped += 1
+                        _emit(
+                            logfile_path,
+                            f"[{_utc_iso()}] PROGRESS trace={trace} rung={cell['rung_index']} model={model} "
+                            f"run={run_number} rep={rep} mode={cell['memory_mode']} phase=ok resume_skip=1",
+                        )
+                        continue
+
+                    entry = None
+                    try:
+                        entry = _run_cell_rep(
+                            cell=cell, rep=int(rep), params=params, args=args, trace=trace, logfile_path=logfile_path,
+                        )
+                        executed += 1
+                    except LadderAbort:
+                        raise
+                    except CellRunUnexpectedError as exc:
+                        _persist_error_entry(checkpoint, checkpoint_path, exc.entry)
+                        raise
+                    except Exception as exc:
+                        _persist_error_entry(
+                            checkpoint,
+                            checkpoint_path,
+                            _build_error_entry_from_existing(
+                                cell=cell,
+                                rep=int(rep),
+                                trace=trace,
+                                error=exc,
+                                entry=entry,
+                            ),
+                        )
+                        raise
+
+                    _upsert_entry(checkpoint, entry)
+                    _save_json_atomic(checkpoint_path, checkpoint)
+
+                summary_path = _emit_summary(runs_dir, plan, checkpoint, trace)
+                _emit(
+                    logfile_path,
+                    f"[{_utc_iso()}] CELL-DONE trace={trace} run={run_number} n={len(reps_selected)} "
+                    f"summary={summary_path}",
+                )
+                continue
 
             # rep 1 (the N=1 baseline).
             rep1 = _find_entry(checkpoint, run_number, 1)

@@ -296,6 +296,70 @@ def test_mid_attempt_402_maps_to_budget_stop_and_writes_user_sidecar(
     assert sidecar_lines[1]["text"] == runner._build_feedback_prompt(checks=["gate-check"])
 
 
+def test_opencode_argv_omits_prompt_positional_and_delivers_prompts_via_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
+    _patch_fake_docker(monkeypatch)
+
+    task_prompt = "D6 initial prompt marker"
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: task_prompt)
+
+    gate_calls = {"count": 0}
+
+    def _fake_gate(**kwargs: Any) -> dict[str, Any]:
+        gate_calls["count"] += 1
+        if gate_calls["count"] == 1:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "gate-check"}],
+                "failed_gates": ["gate-check"],
+            }
+        return {
+            "verdict": "PASS",
+            "conformed": True,
+            "problems": [],
+            "failed_gates": [],
+        }
+
+    monkeypatch.setattr(runner, "_run_gate_report", _fake_gate)
+
+    captured_cmds: list[list[str]] = []
+    captured_stdin: list[str | None] = []
+
+    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        captured_cmds.append(list(kwargs["cmd"]))
+        captured_stdin.append(kwargs.get("stdin_text"))
+        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0)
+
+    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+
+    result = runner._run_cell_impl(
+        run_label="stdin-delivery",
+        run_dir=tmp_path / "stdin-delivery",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "PASS"
+    assert len(captured_cmds) == 2
+
+    feedback_prompt = runner._build_feedback_prompt(checks=["gate-check"])
+    initial_cmd, feedback_cmd = captured_cmds
+    initial_inner = initial_cmd[initial_cmd.index("opencode") :]
+    feedback_inner = feedback_cmd[feedback_cmd.index("opencode") :]
+
+    assert task_prompt not in initial_cmd
+    assert feedback_prompt not in feedback_cmd
+    assert "" not in initial_cmd
+    assert "" not in feedback_cmd
+    assert initial_inner[:3] == ["opencode", "run", "--model"]
+    assert feedback_inner[:3] == ["opencode", "run", "--session"]
+    assert captured_stdin == [task_prompt, feedback_prompt]
+
+
 @pytest.mark.parametrize(
     ("conformed", "expected_attempts_to_green"),
     [

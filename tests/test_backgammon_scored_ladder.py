@@ -249,6 +249,13 @@ def _invoke_main(monkeypatch: Any, argv: list[str]) -> int:
     return bl.main()
 
 
+def _assert_cli_error(monkeypatch: Any, capsys: Any, argv: list[str], needle: str) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _invoke_main(monkeypatch, argv)
+    assert excinfo.value.code == 2
+    assert needle in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # Plan / roster derivation
 
@@ -1137,6 +1144,210 @@ def test_dry_run_with_rung_params_discloses_binding_budget(tmp_path: pathlib.Pat
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
     assert all(float(row["binding_budget_usd"]) == pytest.approx(2.0) for row in rows)
+
+
+@pytest.mark.parametrize(
+    ("only_reps", "needle"),
+    [
+        ("1", "--only-reps token is malformed"),
+        ("99:1", "--only-reps run_number 99 is not in the stage-8 plan"),
+        ("1:0", "--only-reps rep must be >= 1"),
+        ("1:4", "--only-reps rep must be <= 3"),
+    ],
+)
+def test_only_reps_validation_errors(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+    capsys: Any,
+    only_reps: str,
+    needle: str,
+) -> None:
+    _assert_cli_error(
+        monkeypatch,
+        capsys,
+        ["--runs-dir", str(tmp_path), "--dry-run", "--only-reps", only_reps],
+        needle,
+    )
+
+
+def test_only_reps_conflicts_with_start_cell(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    _assert_cli_error(
+        monkeypatch,
+        capsys,
+        [
+            "--runs-dir",
+            str(tmp_path),
+            "--dry-run",
+            "--only-reps",
+            "1:1",
+            "--start-cell",
+            "2",
+        ],
+        "--only-reps cannot be combined with --start-cell",
+    )
+
+
+def test_session_only_runs_rejects_unknown_run(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    _assert_cli_error(
+        monkeypatch,
+        capsys,
+        ["--runs-dir", str(tmp_path), "--dry-run", "--session-only-runs", "99"],
+        "--session-only-runs run_number 99 is not in the stage-8 plan",
+    )
+
+
+def test_only_reps_dry_run_prints_exact_selected_reps(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    params_path = _write_rung_params(tmp_path)
+    exit_code = _invoke_main(
+        monkeypatch,
+        [
+            "--runs-dir",
+            str(tmp_path),
+            "--rung-params",
+            str(params_path),
+            "--dry-run",
+            "--only-reps",
+            "1:1,2:2,4:1",
+        ],
+    )
+    assert exit_code == 0
+
+    out = capsys.readouterr().out
+    assert "PLAN-REPS" in out
+    rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    assert [(int(row["run_number"]), int(row.get("rep", 1))) for row in rows] == [
+        (1, 1),
+        (2, 2),
+        (4, 1),
+    ]
+
+
+def test_only_reps_executes_exact_selected_pairs(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    recorder: list[tuple[int, int]] = []
+    _patch_execution(monkeypatch, recorder)
+    params_path = _write_rung_params(tmp_path)
+
+    exit_code = _invoke_main(
+        monkeypatch,
+        [
+            "--runs-dir",
+            str(tmp_path),
+            "--rung-params",
+            str(params_path),
+            "--only-reps",
+            "1:1,2:2,4:1",
+        ],
+    )
+    assert exit_code == 0
+    assert recorder == [(1, 1), (2, 2), (4, 1)]
+
+
+def test_only_reps_rep2_only_bypasses_trigger_evaluation(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+) -> None:
+    recorder: list[tuple[int, int]] = []
+    _patch_execution(monkeypatch, recorder)
+
+    def _trigger_boom(*, stats: dict[str, Any], off_stats: dict[str, Any] | None, anomalies: dict[str, bool], recorded_class: str | None) -> list[str]:
+        del stats, off_stats, anomalies, recorded_class
+        raise AssertionError("trigger evaluation must be bypassed in --only-reps mode")
+
+    monkeypatch.setattr(bl, "_evaluate_triggers", _trigger_boom)
+    params_path = _write_rung_params(tmp_path)
+    exit_code = _invoke_main(
+        monkeypatch,
+        [
+            "--runs-dir",
+            str(tmp_path),
+            "--rung-params",
+            str(params_path),
+            "--only-reps",
+            "2:2",
+        ],
+    )
+    assert exit_code == 0
+    assert recorder == [(2, 2)]
+
+
+def test_session_only_runs_overrides_phase_and_emits_plan_note(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    params_path = _write_rung_params(tmp_path)
+    exit_code = _invoke_main(
+        monkeypatch,
+        [
+            "--runs-dir",
+            str(tmp_path),
+            "--rung-params",
+            str(params_path),
+            "--dry-run",
+            "--session-only-runs",
+            "1",
+        ],
+    )
+    assert exit_code == 0
+
+    out = capsys.readouterr().out
+    assert "PLAN-SESSION-ONLY" in out
+    assert "runs=[1]" in out
+    assert '"run_number":1' in out
+    assert '"phase":"session"' in out
+
+    manifest = bl._load_json(tmp_path / bl.MANIFEST_NAME)
+    assert manifest is not None
+    run1 = next(
+        cell
+        for cell in manifest["cell_allocation"]
+        if int(cell.get("run_number", -1)) == 1
+    )
+    assert run1["phase"] == "session"
+
+
+def test_extra_disclosure_appends_to_manifest_preregistration(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+) -> None:
+    params_path = _write_rung_params(tmp_path)
+    extra_1 = "2026-07-22: targeted rerun disclosure A"
+    extra_2 = "2026-07-22: targeted rerun disclosure B"
+    exit_code = _invoke_main(
+        monkeypatch,
+        [
+            "--runs-dir",
+            str(tmp_path),
+            "--rung-params",
+            str(params_path),
+            "--dry-run",
+            "--extra-disclosure",
+            extra_1,
+            "--extra-disclosure",
+            extra_2,
+        ],
+    )
+    assert exit_code == 0
+
+    manifest = bl._load_json(tmp_path / bl.MANIFEST_NAME)
+    assert manifest is not None
+    prereg = manifest.get("preregistration")
+    assert isinstance(prereg, dict)
+    disclosures = prereg.get("disclosures")
+    assert isinstance(disclosures, list)
+    assert disclosures[-2:] == [extra_1, extra_2]
 
 
 def test_fresh_run_writes_manifest_and_runs_all_cells(tmp_path: pathlib.Path, monkeypatch: Any) -> None:

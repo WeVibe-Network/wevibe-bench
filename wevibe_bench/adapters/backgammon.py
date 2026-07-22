@@ -417,6 +417,7 @@ class BackgammonRunner(AgentRunner):
             cell_config.output_token_max = self.max_output_tokens
             cell_config.proxy_base_url = self.proxy_base_url
             cell_config.proxy_token = self.proxy_token
+            cell_config.worker_logs_dir = worktree.parent / "worker-logs"
             cell_context = DockerCell(
                 cell_config,
                 progress=self._progress,
@@ -431,12 +432,11 @@ class BackgammonRunner(AgentRunner):
                 task_prompt = self._build_task_prompt(injected_memory=injected_memory)
                 self._progress(
                     f"PROGRESS run_label={run_label} step=worker-launch-start mode=real model={self.model} "
-                    f"pure={pure} prompt_chars={len(task_prompt)}"
+                    f"pure={pure} prompt_chars={len(task_prompt)} prompt_delivery=stdin"
                 )
                 initial_inner = [
                     "opencode",
                     "run",
-                    task_prompt,
                     "--model",
                     self.model,
                     "--agent",
@@ -486,6 +486,7 @@ class BackgammonRunner(AgentRunner):
                         fallback_session_id=None,
                         prior_cost_usd=cell_cost_usd,
                         kill_hook=active_cell.kill_worker_processes,
+                        stdin_text=task_prompt,
                     )
                     attempt_costs_usd[1] = first_run.cost_usd
                     observed_attempt_costs.append(first_run.cost_usd)
@@ -640,7 +641,6 @@ class BackgammonRunner(AgentRunner):
                     feedback_inner = [
                         "opencode",
                         "run",
-                        feedback,
                         "--session",
                         session_id,
                         "--dir",
@@ -676,6 +676,7 @@ class BackgammonRunner(AgentRunner):
                         fallback_session_id=session_id,
                         prior_cost_usd=cell_cost_usd,
                         kill_hook=active_cell.kill_worker_processes,
+                        stdin_text=feedback,
                     )
                     attempt_costs_usd[next_attempt] = feedback_run.cost_usd
                     observed_attempt_costs.append(feedback_run.cost_usd)
@@ -1021,6 +1022,7 @@ class BackgammonRunner(AgentRunner):
         fallback_session_id: str | None,
         prior_cost_usd: float = 0.0,
         kill_hook: Callable[[], None] | None = None,
+        stdin_text: str | None = None,
     ) -> _OpencodeRunStats:
         state_lock = threading.Lock()
         state: dict[str, Any] = {
@@ -1046,11 +1048,53 @@ class BackgammonRunner(AgentRunner):
                 cwd=str(worktree),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE if stdin_text is not None else None,
                 text=True,
                 bufsize=1,
                 start_new_session=True,
                 env=env,
             )
+
+            stdin_writer_thread: threading.Thread | None = None
+            if stdin_text is not None:
+                payload = str(stdin_text)
+                payload_chars = len(payload)
+                payload_fp = self._fingerprint_text(payload)
+
+                def stdin_writer() -> None:
+                    try:
+                        if proc.stdin is None:
+                            self._progress(
+                                f"INFO op=worker-stdin-write run_label={run_label} phase={phase} "
+                                "status=skipped reason=stdin_not_available"
+                            )
+                            return
+                        proc.stdin.write(payload)
+                        proc.stdin.flush()
+                        self._progress(
+                            f"PROGRESS op=worker-stdin-write run_label={run_label} phase={phase} "
+                            f"status=ok chars={payload_chars} text_fp={payload_fp}"
+                        )
+                    except BrokenPipeError:
+                        self._progress(
+                            f"INFO op=worker-stdin-write run_label={run_label} phase={phase} "
+                            f"status=broken_pipe chars={payload_chars} text_fp={payload_fp}"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - surface and continue teardown.
+                        reader_failures.append(f"stdin writer failure ({phase}): {exc}")
+                    finally:
+                        try:
+                            if proc.stdin:
+                                proc.stdin.close()
+                        except Exception:
+                            pass
+
+                stdin_writer_thread = threading.Thread(
+                    target=stdin_writer,
+                    name=f"bg-stdin-{phase}",
+                    daemon=True,
+                )
+                stdin_writer_thread.start()
 
             def stdout_reader() -> None:
                 try:
@@ -1257,6 +1301,13 @@ class BackgammonRunner(AgentRunner):
 
             stdout_thread.join(timeout=5)
             stderr_thread.join(timeout=5)
+            if stdin_writer_thread is not None:
+                stdin_writer_thread.join(timeout=5)
+                if stdin_writer_thread.is_alive():
+                    self._progress(
+                        f"INFO op=worker-stdin-write run_label={run_label} phase={phase} "
+                        "status=join_timeout timeout_s=5"
+                    )
             exit_code = proc.returncode
 
         if (
@@ -1287,6 +1338,18 @@ class BackgammonRunner(AgentRunner):
             self._progress(
                 f"PROGRESS run_label={run_label} step=worker-nonzero phase={phase} exit={exit_code} "
                 f"stderr_tail={' | '.join(stderr_tail)}"
+            )
+
+        external_signal = self._external_signal_from_exit_code(exit_code)
+        if (
+            exit_code not in (0, None)
+            and killed_reason is None
+            and not kill_hook_ran
+            and external_signal is not None
+        ):
+            self._progress(
+                f"PROGRESS op=worker.external_exit run_label={run_label} phase={phase} "
+                f"exit={exit_code} signal={external_signal} attribution=external killed_reason=none"
             )
 
         if not budget_stop_detected and stderr_tail:
@@ -1453,6 +1516,22 @@ class BackgammonRunner(AgentRunner):
         if "reservation would exceed hard cap" in lower:
             return True
         return False
+
+    @staticmethod
+    def _external_signal_from_exit_code(exit_code: int | None) -> str | None:
+        if exit_code is None:
+            return None
+        if exit_code < 128:
+            return None
+
+        signal_number = exit_code - 128
+        if signal_number < 1:
+            return None
+
+        try:
+            return signal.Signals(signal_number).name
+        except ValueError:
+            return f"SIGNAL_{signal_number}"
 
     def _budget_stop_signature_from_event(self, event: dict[str, Any]) -> str | None:
         if str(event.get("type", "")).strip().lower() != "error":

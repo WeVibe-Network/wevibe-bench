@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
+import subprocess
 import sys
 import textwrap
 import time
+
+import pytest
 
 from wevibe_bench.adapters.backgammon import BackgammonRunner, _OpencodeRunStats
 
@@ -247,3 +251,112 @@ def test_step_cap_kill_fires_past_cap(tmp_path: Path) -> None:
         for line in progress_lines
     )
     assert not any("step=worker-complete" in line for line in progress_lines)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "signal_name"),
+    (
+        (143, "SIGTERM"),
+        (137, "SIGKILL"),
+    ),
+)
+def test_external_signal_exit_is_logged_with_signal_attribution(
+    tmp_path: Path,
+    exit_code: int,
+    signal_name: str,
+) -> None:
+    progress_lines: list[str] = []
+    runner = _make_runner(tmp_path, completion_grace_s=2, progress=progress_lines.append)
+    script_path = _write_fake_opencode(
+        tmp_path,
+        f"""
+        import sys
+
+        sys.exit({exit_code})
+        """,
+    )
+
+    stats, _ = _run_script(
+        runner,
+        script_path=script_path,
+        events_path=tmp_path / f"external-signal-{exit_code}.events.jsonl",
+        run_label=f"external-signal-{exit_code}",
+        phase="attempt-1",
+    )
+
+    assert stats.exit_code == exit_code
+    assert stats.killed_reason is None
+    assert any(
+        "op=worker.external_exit" in line
+        and f"exit={exit_code}" in line
+        and f"signal={signal_name}" in line
+        and "attribution=external" in line
+        and "killed_reason=none" in line
+        for line in progress_lines
+    )
+
+
+def test_run_opencode_writes_stdin_text_and_closes_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path)
+
+    class _RecordingStdin:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+            self.flush_calls = 0
+            self.closed = False
+
+        def write(self, value: str) -> int:
+            self.writes.append(value)
+            return len(value)
+
+        def flush(self) -> None:
+            self.flush_calls += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+            self.stdin = _RecordingStdin()
+            self.returncode = 0
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            _ = timeout
+            return self.returncode
+
+    fake_proc = _FakeProc()
+    popen_kwargs: dict[str, object] = {}
+
+    def _fake_popen(cmd: list[str], **kwargs: object) -> _FakeProc:
+        popen_kwargs.clear()
+        popen_kwargs.update(kwargs)
+        return fake_proc
+
+    monkeypatch.setattr("wevibe_bench.adapters.backgammon.subprocess.Popen", _fake_popen)
+
+    payload = "D6-STDIN-UNIT-MARKER"
+    stats = runner._run_opencode(
+        cmd=[sys.executable, "-c", "print('ok')"],
+        worktree=tmp_path,
+        events_path=tmp_path / "stdin.events.jsonl",
+        env=os.environ.copy(),
+        run_label="stdin-unit",
+        phase="initial",
+        fallback_session_id="sess-fallback",
+        kill_hook=None,
+        stdin_text=payload,
+    )
+
+    assert popen_kwargs.get("stdin") == subprocess.PIPE
+    assert fake_proc.stdin.writes == [payload]
+    assert fake_proc.stdin.flush_calls == 1
+    assert fake_proc.stdin.closed is True
+    assert stats.exit_code == 0

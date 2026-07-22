@@ -158,6 +158,24 @@ def test_docker_cell_requires_proxy_token_no_fallback(tmp_path: Path) -> None:
         cell.__enter__()
 
 
+def test_exec_argv_includes_stdin_forwarding_flag(tmp_path: Path) -> None:
+    container_name = "wevibe-bench-cell-exec-argv"
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "exec-argv-worktree",
+            memory_mode="off",
+            container_name=container_name,
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+        )
+    )
+
+    cmd = cell.exec_argv(["opencode", "run", "--help"])
+
+    assert cmd[:6] == ["docker", "exec", "-i", "-w", "/work", container_name]
+    assert cmd[6:] == ["opencode", "run", "--help"]
+
+
 def test_docker_cell_forwards_ephemeral_proxy_token_not_host_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -243,6 +261,7 @@ def test_kill_worker_processes_uses_exec_pkill_without_container_rm(
         [
             "docker",
             "exec",
+            "-i",
             "-w",
             "/work",
             container_name,
@@ -286,6 +305,158 @@ def test_force_kill_still_tears_down_with_docker_rm_f(
     assert calls == [["docker", "rm", "-f", container_name]]
     assert any("docker-rm start" in line for line in progress_lines)
     assert any("docker-rm done" in line for line in progress_lines)
+
+
+def test_teardown_captures_worker_logs_before_container_rm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    progress_lines: list[str] = []
+
+    worker_logs_dir = tmp_path / "worker-logs"
+    container_name = "wevibe-bench-cell-capture-order"
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if argv[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout='[{"State":{"ExitCode":143}}]\n', stderr="")
+        if argv[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="2026-07-22T12:15:00Z worker stdout\n2026-07-22T12:15:01Z worker stderr\n",
+                stderr="",
+            )
+        if argv[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:2] == ["docker", "cp"]:
+            copied_dir = Path(argv[-1])
+            copied_dir.mkdir(parents=True, exist_ok=True)
+            (copied_dir / "fake-session.log").write_text("fake-d6-evidence\n", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker invocation: {argv!r}")
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "capture-order-worktree",
+            memory_mode="off",
+            container_name=container_name,
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+            worker_logs_dir=worker_logs_dir,
+        ),
+        progress=progress_lines.append,
+    )
+
+    cell.teardown()
+
+    assert [tuple(call[:2]) for call in calls] == [
+        ("docker", "inspect"),
+        ("docker", "logs"),
+        ("docker", "exec"),
+        ("docker", "cp"),
+        ("docker", "rm"),
+    ]
+    stage_cmd = calls[2]
+    assert stage_cmd[-1].startswith("mkdir -p /work/.wevibe-worker-log-export/opencode")
+    assert "/home/worker/.local/share/opencode/." in stage_cmd[-1]
+    assert (worker_logs_dir / "container-inspect.json").read_text(encoding="utf-8").strip().startswith("[")
+    assert "worker stdout" in (worker_logs_dir / "container-docker.log").read_text(encoding="utf-8")
+    assert (worker_logs_dir / "opencode" / "fake-session.log").read_text(encoding="utf-8").strip() == "fake-d6-evidence"
+    assert any("step=inspect" in line and "status=ok" in line for line in progress_lines)
+    assert any("step=docker_logs" in line and "status=ok" in line for line in progress_lines)
+    assert any("step=cp" in line and "status=ok" in line for line in progress_lines)
+
+
+def test_teardown_cp_failure_is_logged_and_rm_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    progress_lines: list[str] = []
+
+    worker_logs_dir = tmp_path / "worker-logs-failing-cp"
+    container_name = "wevibe-bench-cell-capture-fail"
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if argv[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
+        if argv[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[:2] == ["docker", "cp"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="source path missing")
+        if argv[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
+        raise AssertionError(f"unexpected docker invocation: {argv!r}")
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "capture-failure-worktree",
+            memory_mode="off",
+            container_name=container_name,
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+            worker_logs_dir=worker_logs_dir,
+        ),
+        progress=progress_lines.append,
+    )
+
+    cell.teardown()
+
+    assert [tuple(call[:2]) for call in calls] == [
+        ("docker", "inspect"),
+        ("docker", "logs"),
+        ("docker", "exec"),
+        ("docker", "cp"),
+        ("docker", "rm"),
+    ]
+    assert any("step=cp" in line and "status=failed" in line and "rc=1" in line for line in progress_lines)
+    assert any("docker-rm done" in line for line in progress_lines)
+
+
+def test_teardown_skips_capture_when_worker_logs_dir_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    progress_lines: list[str] = []
+
+    container_name = "wevibe-bench-cell-capture-skip"
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if argv[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker invocation: {argv!r}")
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    cell = DockerCell(
+        DockerCellConfig(
+            worktree=tmp_path / "capture-skip-worktree",
+            memory_mode="off",
+            container_name=container_name,
+            proxy_base_url=TEST_PROXY_BASE_URL,
+            proxy_token=TEST_PROXY_TOKEN,
+            worker_logs_dir=None,
+        ),
+        progress=progress_lines.append,
+    )
+
+    cell.teardown()
+
+    assert calls == [["docker", "rm", "-f", container_name]]
+    assert any("INFO op=worker_logs.capture step=skip" in line for line in progress_lines)
 
 
 @REQUIRES_DOCKER

@@ -143,12 +143,20 @@ untouched; stage-7 cells are historical evidence only, never merged. Reports:
 - **Lift statement:** NO defensible OFF→ON lift claim — opus OFF and big-pickle OFF baselines are unmeasured (D6
   harness deaths); kimi OFF↔ON is budget-truncated (1 gated attempt each, 4 vs 2 failed gates) under N=1 caution.
   Delivery/identity/transport/budget-meter assertions all GREEN.
-- **D6 anomaly (recurring, unresolved):** 3/7 reps died mid-work by EXTERNAL signal (run1/run4 SIGTERM 143,
-  rep2 SIGKILL 137; `killed=none`, no adapter/proxy/docker cause; matches stage-7 defect D6). Root-cause blocked by
-  observability gap: opencode-internal logs live in container tmpfs and are wiped by `docker rm -f`. OPEN follow-up:
-  preserve worker opencode logs to host worktree before teardown; then reproduce+diagnose.
-- **Spend (single proxy meter):** stage8 $16.76/$32.00 (accrued $13.31 = $5.83 false start + $7.48 run;
-  committed-unproven $3.45). Global $48.87/$115.
+- **D6 anomaly (baseline run evidence, now resolved):** 3/7 reps died mid-work by EXTERNAL signal (run1/run4
+  SIGTERM 143, rep2 SIGKILL 137; `killed=none`, no adapter/proxy/docker cause; matches stage-7 defect D6). Root
+  cause + fix are closed in §8; baseline scorecard remains unchanged.
+- **D6-rerun disclosed run (NEW, never merged):** trace lineage `runs/backgammon-scored-ladder-stage8-rerun-d6/`
+  (+ inner `runs/backgammon-stage8-rerun-d6-fix1/`), manifest fp unchanged `3910969ef0342144…`, disclosure
+  recorded in-manifest. Cell-1 opus OFF PASS `gates_green` attempt 1 (85,794 tok, $5.7144, 1183s). Cell-4
+  big-pickle OFF FAIL `attempt_ceiling_reached` after 3 attempts, problems 23→19→4, final failed gates
+  [F03 REQ-HINT, F04 REQ-HINT, F12 REQ-NEWGAME, F14 REQ-ANIM], conformed=True, identity 92/92 ($0, 4182s).
+  Cell-2 rep2 kimi OFF BUDGET_STOP (budget-stop mid attempt-1 ungated; 87 turns, 98,887 tok, $1.8518, 1638s;
+  honest 402 at $2.70 cap). Disclosed N=3 kimi OFF picture now: rep1 BUDGET_STOP ungated / rep2 BUDGET_STOP
+  ungated / rep3 FAIL 4 gates [G08,F10,F12,F14].
+- **Spend (single proxy meter):** baseline run stage8 $16.76/$32.00 (accrued $13.31 = $5.83 false start + $7.48
+  run; committed-unproven $3.45) plus disclosed D6-rerun $9.69 (incl. one $0.39 poller false-hang kill of a
+  healthy kimi rep) → stage8 cumulative $26.4483/$32.00. Global $58.5602/$115.
 - **Harvest observation:** need-harvest fired on all ON-cell recalls (incl. intent=debug) but
   buildFailing/testFailing/errorStrings stayed unpopulated (worker session events are not clone-side) — populated
   case remains suite-tested only (observation: NOT observed, structurally expected).
@@ -250,12 +258,15 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   ONLY the memories reveal — else lift only shows on weak models + obscure integration traps (by design).
 
 ## 8. OPEN DECISIONS / FORKS
-- **D6 mid-work worker deaths (stage-8, OPEN):** preserve worker opencode-internal logs (`~/.local/share/opencode`
-  in container) to the host worktree BEFORE `docker rm -f` teardown, then reproduce+root-cause the external
-  143/137 deaths (3/7 stage-8 reps unmeasured because of this; gates never ran). Small harness chunk.
-- **Rerun decision (Walter/manager):** whether to rerun the D6-killed reps (run1 opus OFF, run4 big-pickle OFF,
-  kimi rep2) after the observability fix — the stage-8 baseline stands as recorded (honest labels), any rerun is a
-  new disclosed run, never a merge.
+- **D6 mid-work worker deaths (stage-8, RESOLVED):** root cause was the worker's own bash cleanup
+  (`kill $(ps aux | grep 'node.*server.ts' …)` / `pkill -f "node.*src/server.ts"`) self-matching the opencode
+  process argv, because argv carried the full 29,157-char task prompt (including `node src/server.ts` and `8002`).
+  Fix: prompt now delivered by STDIN (`opencode run` reads piped stdin via `docker exec -i`); harness logs
+  `op=worker-stdin-write … text_fp=ca05c3ec`. Proof: two forced recurrences captured worker `opencode.db`
+  (fatal tool call with last event left `running`), then fixed-harness 3/3 reps ran D6-free (87–91 turns,
+  including `ps`/`pkill` cleanup commands surviving).
+- **Rerun disclosure rule (locked):** rerun = new disclosed run, never a merge. The D6 rerun is recorded in §2D
+  (`runs/backgammon-scored-ladder-stage8-rerun-d6/` lineage).
 - **Superseded 21-07-26:** the prior BLOCKED-BY-PASSABILITY gate is closed by Walter GO; Stage-7 scored roster
   execution is authorized and currently in Option-B recovery (§2B).
 - **Provider-routing mechanism status:** the prior "harness provider-routing UNPROVEN" gap is now closed by the
@@ -272,14 +283,17 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 - Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
-- **22-07-22 (post-stage8):** qdrant `org_wevibe-org-0_memories` = **6 memories** (stage-8 Cell-1 Opus
-  self-extraction, delivery-proven 6/6). hub :4440 instanceId `94184b05`; 9/9 containers healthy; Ollama :11434
-  (nomic-embed-text:v1.5) up. :4550 clone running pid 55392 (`runs/clone4550.pid`, `WEVIBE_RECALL_MODE=test`,
-  dist = clone HEAD + recorded Jul-9 seed seam + 22-07 bench-gated `suppression` response field). Worker image
-  `wevibe-bench-worker:v1` = `9d389f8e376b`. Stage ledger: **stage8 $16.76/$32.00, stage7 $20.04/$40 (frozen
-  history), global $48.87/$115**. Scored-ladder driver now STAGE_NUMBER=8; fresh runs need a FRESH outer runs-dir
-  AND fresh `--ladder-runs-dir` (the shared `runs/backgammon/ladder-checkpoint.json` will resume-skip cells off
-  13-07-era history — the stage-8 false-start failure mode).
+- **22-07-22 (post-stage8 + disclosed D6 rerun):** qdrant `org_wevibe-org-0_memories` = **6 memories** (stage-8
+  Cell-1 Opus self-extraction, delivery-proven 6/6; pool frozen). hub :4440 instanceId `94184b05`; 9/9 containers
+  healthy; Ollama :11434 (nomic-embed-text:v1.5) up. :4550 clone running pid 55392 (`runs/clone4550.pid`,
+  `WEVIBE_RECALL_MODE=test`, dist = clone HEAD + recorded Jul-9 seed seam + 22-07 bench-gated `suppression`
+  response field). Worker image `wevibe-bench-worker:v1` = `9d389f8e376b`. Stage ledger: **stage8
+  $26.4483/$32.00 (includes disclosed rerun cost $9.69, incl. one $0.39 poller false-hang kill of a healthy kimi
+  rep), stage7 $20.04/$40 (frozen history), global $58.5602/$115**. Scored-ladder driver now STAGE_NUMBER=8;
+  fresh runs need a FRESH outer runs-dir AND fresh `--ladder-runs-dir` (the shared
+  `runs/backgammon/ladder-checkpoint.json` will resume-skip cells off 13-07-era history — the stage-8 false-start
+  failure mode). Disclosed rerun run-dirs: `runs/backgammon-scored-ladder-stage8-rerun-d6/` + inner
+  `runs/backgammon-stage8-rerun-d6-fix1/`.
 - Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).
 
 ## 10. ⚠ FOR-WALTER CARRY ITEM (unresolved)
