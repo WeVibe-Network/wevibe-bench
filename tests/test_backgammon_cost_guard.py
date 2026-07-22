@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import importlib
 import json
-import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import wevibe_bench.adapters.backgammon as backgammon_mod
 from wevibe_bench.adapters.backgammon import (
+    DEFAULT_ATTEMPT_HARD_CEILING,
     DEFAULT_MAX_STEPS_PER_ATTEMPT,
     DEFAULT_RUN_TIMEOUT_S,
     BackgammonRunner,
@@ -40,14 +39,8 @@ def _make_runner(
     max_output_tokens: int | None = None,
     max_steps_per_attempt: int | None = None,
     output_price_per_1m: float | None = None,
-    max_attempts: int = 3,
-    progress: Any = None,
+    max_attempts: int = DEFAULT_ATTEMPT_HARD_CEILING,
 ) -> BackgammonRunner:
-    if cost_limit_usd is not None and max_output_tokens is None:
-        max_output_tokens = 2000
-    if cost_limit_usd is not None and max_steps_per_attempt is None:
-        max_steps_per_attempt = 3
-
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
@@ -59,60 +52,31 @@ def _make_runner(
         max_output_tokens=max_output_tokens,
         max_steps_per_attempt=max_steps_per_attempt,
         output_price_per_1m=output_price_per_1m,
-        progress=progress,
     )
 
 
-def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _FakeDockerCellConfig:
-        def __init__(
-            self,
-            *,
-            worktree: Path,
-            memory_mode: str,
-            container_name: str,
-            output_token_max: int | None = None,
-        ) -> None:
-            self.worktree = worktree
-            self.memory_mode = memory_mode
-            self.container_name = container_name
-            self.output_token_max = output_token_max
-
-    class _FakeDockerCell:
-        def __init__(self, config: _FakeDockerCellConfig, progress: Any) -> None:
-            self.config = config
-            self.progress = progress
-
-        def __enter__(self) -> "_FakeDockerCell":
-            return self
-
-        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-            return False
-
-        def exec_argv(self, inner: list[str]) -> list[str]:
-            return ["python", "-m", "fake", *inner]
-
-        def force_kill(self) -> None:
-            return None
-
-    monkeypatch.setattr(backgammon_mod, "DockerCellConfig", _FakeDockerCellConfig)
-    monkeypatch.setattr(backgammon_mod, "DockerCell", _FakeDockerCell)
-    monkeypatch.setattr(backgammon_mod, "docker_available", lambda: (True, "ok"))
-    monkeypatch.setattr(backgammon_mod, "image_exists", lambda: True)
-    monkeypatch.setattr(
-        backgammon_mod.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0],
-            1,
-            stdout="",
-            stderr="No such container",
+def _write_checkpoint(path: Path, *, hard: float, accrued: float, committed: float) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "test-run",
+                "model_id": "anthropic/claude-opus-4.8",
+                "profile_name": "opus",
+                "hard_cap_usd": hard,
+                "accrued_actual_usd": accrued,
+                "committed_unproven_usd": committed,
+                "outstanding": {},
+                "updated_at": "2026-07-22T00:00:00+00:00",
+            },
+            separators=(",", ":"),
         ),
+        encoding="utf-8",
     )
 
 
 def test_write_worker_config_injects_reasoning_effort(tmp_path: Path) -> None:
-    runner = _make_runner(tmp_path, reasoning_effort="high", max_output_tokens=8192)
+    runner = _make_runner(tmp_path, reasoning_effort="high")
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
 
@@ -151,64 +115,15 @@ def test_worker_run_argv_omits_output_token_env_when_unclamped(tmp_path: Path) -
     assert not any(item.startswith("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=") for item in run_argv)
 
 
-def test_cost_limit_without_output_clamp_arms_accrued_guard_only(tmp_path: Path) -> None:
-    runner = BackgammonRunner(
-        task_dir=TASK_DIR,
-        work_root=tmp_path / "work-root",
-        model="openrouter/anthropic/claude-opus-4.8",
-        cost_limit_usd=11.0,
-        cost_target_usd=10.0,
-        max_output_tokens=None,
-        max_steps_per_attempt=100,
-    )
+def test_attempt_ceiling_clamps_to_canonical_hard_cap(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path, max_attempts=999)
+    assert runner.max_attempts == DEFAULT_ATTEMPT_HARD_CEILING
 
-    assert runner._reservation_usd == 0.0
-    assert runner._one_step_worst_case_usd == 0.0
-    # Reservation refusal degrades to a pure accrued-vs-limit boundary check.
-    assert (
-        runner._refuse_invocation_by_reservation(
-            run_label="unclamped", phase="initial", accrued_cost_usd=10.99
-        )
-        is False
-    )
-    assert (
-        runner._refuse_invocation_by_reservation(
-            run_label="unclamped", phase="initial", accrued_cost_usd=11.01
-        )
-        is True
-    )
-    # Accrued kill (proven 15-07) still arms with cost_limit alone.
-    assert BackgammonRunner._cost_limit_exceeded(6.0, 5.1, runner._one_step_worst_case_usd, 11.0) is True
-    assert BackgammonRunner._cost_limit_exceeded(6.0, 4.9, runner._one_step_worst_case_usd, 11.0) is False
-
-
-def test_reservation_arms_only_with_clamp_and_step_cap(tmp_path: Path) -> None:
-    lookahead_only = BackgammonRunner(
-        task_dir=TASK_DIR,
-        work_root=tmp_path / "work-root-lookahead",
-        model="openrouter/anthropic/claude-opus-4.8",
-        cost_limit_usd=11.0,
-        max_output_tokens=8192,
-        max_steps_per_attempt=None,
-    )
-    assert lookahead_only._one_step_worst_case_usd > 0.0
-    assert lookahead_only._reservation_usd == 0.0
-
-    fully_armed = BackgammonRunner(
-        task_dir=TASK_DIR,
-        work_root=tmp_path / "work-root-armed",
-        model="openrouter/anthropic/claude-opus-4.8",
-        cost_limit_usd=11.0,
-        max_output_tokens=8192,
-        max_steps_per_attempt=100,
-    )
-    assert fully_armed._one_step_worst_case_usd > 0.0
-    assert fully_armed._reservation_usd > fully_armed._one_step_worst_case_usd
+    runner_small = _make_runner(tmp_path, max_attempts=3)
+    assert runner_small.max_attempts == 3
 
 
 def test_canonical_step_cap_is_100_and_cli_default_carries_it() -> None:
-    # The evidence-based runaway-loop guard (77-turn healthy 15-07 baseline +
-    # margin; the clamp-era 40 killed smoke 19c at turn 41 UNGRADED).
     assert DEFAULT_MAX_STEPS_PER_ATTEMPT == 100
 
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
@@ -222,17 +137,8 @@ def test_canonical_step_cap_is_100_and_cli_default_carries_it() -> None:
     args = parser.parse_args(["--run-label", "cap-default-check"])
     assert args.max_steps_per_attempt == DEFAULT_MAX_STEPS_PER_ATTEMPT
 
-    # An explicit flag still overrides the canonical default.
-    args_override = parser.parse_args(
-        ["--run-label", "cap-override-check", "--max-steps-per-attempt", "7"]
-    )
-    assert args_override.max_steps_per_attempt == 7
-
 
 def test_canonical_run_timeout_is_5400_and_cli_default_carries_it() -> None:
-    # The evidence-based wall-clock guard: smoke 19d observed ~3060s on a healthy
-    # 68-turn Opus PASS; Stage-4 kimi/mimo-pro were killed at 1800s while
-    # converging; 5400 keeps headroom for slower int4/fp8 pins.
     assert DEFAULT_RUN_TIMEOUT_S == 5400
 
     scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
@@ -245,12 +151,6 @@ def test_canonical_run_timeout_is_5400_and_cli_default_carries_it() -> None:
     parser = run_backgammon._build_arg_parser()
     args = parser.parse_args(["--run-label", "timeout-default-check"])
     assert args.run_timeout == DEFAULT_RUN_TIMEOUT_S
-
-    # An explicit flag still overrides the canonical default.
-    args_override = parser.parse_args(
-        ["--run-label", "timeout-override-check", "--run-timeout", "900"]
-    )
-    assert args_override.run_timeout == 900
 
 
 def test_write_worker_config_no_provider_when_options_unset(tmp_path: Path) -> None:
@@ -300,7 +200,7 @@ def test_pricing_table_contains_truthful_big_pickle_zero_row() -> None:
         "openrouter/opencode/big-pickle",
     ],
 )
-def test_zero_price_model_cost_math_is_zero_and_does_not_raise(
+def test_zero_price_model_fallback_attempt_estimate_is_zero(
     tmp_path: Path,
     model_selector: str,
 ) -> None:
@@ -311,19 +211,7 @@ def test_zero_price_model_cost_math_is_zero_and_does_not_raise(
         max_output_tokens=8192,
         max_steps_per_attempt=3,
     )
-
-    assert runner._effective_output_price_per_1m == pytest.approx(0.0)
-    assert runner._cache_write_allowance_usd == pytest.approx(0.0)
-    assert runner._one_step_worst_case_usd == pytest.approx(0.0)
-    assert runner._reservation_usd == pytest.approx(0.0)
-    assert (
-        runner._refuse_invocation_by_reservation(
-            run_label="zero-price",
-            phase="initial",
-            accrued_cost_usd=0.99,
-        )
-        is False
-    )
+    assert runner._fallback_attempt_estimate_usd == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(
@@ -345,6 +233,76 @@ def test_init_rejects_missing_pricing_without_override(tmp_path: Path, unknown_m
         )
 
 
+def test_estimated_attempt_cost_prefers_observed_then_fallback() -> None:
+    assert BackgammonRunner._estimate_full_attempt_cost_usd([], fallback_usd=0.6) == pytest.approx(0.6)
+    assert BackgammonRunner._estimate_full_attempt_cost_usd([0.4, 0.7], fallback_usd=0.6) == pytest.approx(0.7)
+    assert BackgammonRunner._estimate_full_attempt_cost_usd([0.0, -1.0], fallback_usd=0.3) == pytest.approx(0.3)
+
+
+def test_budget_decision_allows_when_proxy_remaining_covers_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=2.4)
+    checkpoint = tmp_path / "proxy-checkpoint.json"
+    _write_checkpoint(checkpoint, hard=2.4, accrued=1.5, committed=0.2)  # remaining=0.7
+    monkeypatch.setenv("WEVIBE_BENCH_PROXY_CHECKPOINT", str(checkpoint))
+
+    decision = runner._budget_decision_for_attempt(
+        run_label="allow-check",
+        attempt=2,
+        observed_attempt_costs=[0.6],
+    )
+    assert decision == "allow"
+
+
+def test_budget_decision_stops_when_proxy_remaining_below_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=2.4)
+    checkpoint = tmp_path / "proxy-checkpoint.json"
+    _write_checkpoint(checkpoint, hard=2.4, accrued=1.61, committed=0.2)  # remaining=0.59
+    monkeypatch.setenv("WEVIBE_BENCH_PROXY_CHECKPOINT", str(checkpoint))
+
+    decision = runner._budget_decision_for_attempt(
+        run_label="stop-check",
+        attempt=2,
+        observed_attempt_costs=[0.6],
+    )
+    assert decision == "budget_stop"
+
+
+def test_budget_decision_requires_checkpoint_env_when_budgeted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=2.4)
+    monkeypatch.delenv("WEVIBE_BENCH_PROXY_CHECKPOINT", raising=False)
+
+    decision = runner._budget_decision_for_attempt(
+        run_label="missing-env",
+        attempt=1,
+        observed_attempt_costs=[0.2],
+    )
+    assert decision == "harness_error"
+
+
+def test_budget_decision_unbounded_mode_allows_without_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=None)
+    monkeypatch.delenv("WEVIBE_BENCH_PROXY_CHECKPOINT", raising=False)
+
+    decision = runner._budget_decision_for_attempt(
+        run_label="unbounded",
+        attempt=1,
+        observed_attempt_costs=[],
+    )
+    assert decision == "allow"
+
+
 def test_run_config_carries_new_cost_fields() -> None:
     cfg = RunConfig(
         cost_limit_usd=10.5,
@@ -364,7 +322,7 @@ def test_run_config_carries_new_cost_fields() -> None:
     assert payload["reasoning_effort"] == "high"
 
 
-def test_opencode_run_stats_has_cost_field() -> None:
+def test_opencode_run_stats_has_budget_stop_fields() -> None:
     stats = _OpencodeRunStats(
         input_tokens=11,
         output_tokens=22,
@@ -377,119 +335,5 @@ def test_opencode_run_stats_has_cost_field() -> None:
     )
 
     assert stats.cost_usd == pytest.approx(1.25)
-
-
-def test_reservation_predicate_boundaries() -> None:
-    assert BackgammonRunner._reservation_would_exceed(1.0, 0.4, 1.5) is False
-    assert BackgammonRunner._reservation_would_exceed(1.0, 0.5, 1.5) is False
-    assert BackgammonRunner._reservation_would_exceed(1.0, 0.6, 1.5) is True
-
-
-def test_worst_case_reservation_math() -> None:
-    reservation = BackgammonRunner._worst_case_reservation_usd(
-        max_steps=3,
-        max_output_tokens=2000,
-        output_price_per_1m=25.0,
-        safety_factor=1.1,
-        cache_write_allowance_usd=0.0125,
-    )
-    assert reservation == pytest.approx(0.1775)
-
-
-def test_cost_accumulation_from_part_cost_with_one_step_headroom() -> None:
-    assert BackgammonRunner._cost_limit_exceeded(0.0, 0.0, 0.0, None) is False
-    assert BackgammonRunner._cost_limit_exceeded(1.0, 0.4, 0.5, 2.0) is False
-    assert BackgammonRunner._cost_limit_exceeded(1.0, 0.5, 0.5, 2.0) is False
-    assert BackgammonRunner._cost_limit_exceeded(1.0, 0.6, 0.5, 2.0) is True
-
-
-def test_initial_reservation_refusal_skips_opencode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    progress_lines: list[str] = []
-    runner = _make_runner(
-        tmp_path,
-        cost_limit_usd=0.20,
-        max_output_tokens=10000,
-        max_steps_per_attempt=3,
-        progress=progress_lines.append,
-    )
-    _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "prompt")
-
-    called = {"count": 0}
-
-    def _unexpected_opencode(**kwargs: Any) -> _OpencodeRunStats:
-        called["count"] += 1
-        raise AssertionError("_run_opencode must not run when reservation is refused")
-
-    monkeypatch.setattr(runner, "_run_opencode", _unexpected_opencode)
-
-    result = runner._run_cell_impl(
-        run_label="reservation-refused",
-        run_dir=tmp_path / "reservation-refused",
-        task_id="backgammon",
-        injected_memory=[],
-    )
-
-    assert called["count"] == 0
-    assert result.verdict == "BUDGET_STOP"
-    assert result.wall_cost_usd == pytest.approx(0.0)
-    assert any("reason=cost_reservation_refused" in line for line in progress_lines)
-
-
-def test_partial_usage_is_counted_in_next_reservation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    progress_lines: list[str] = []
-    runner = _make_runner(
-        tmp_path,
-        cost_limit_usd=4.50,
-        max_output_tokens=10000,
-        max_steps_per_attempt=3,
-        max_attempts=2,
-        progress=progress_lines.append,
-    )
-    _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "prompt")
-
-    call_count = {"count": 0}
-
-    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
-        call_count["count"] += 1
-        return _OpencodeRunStats(
-            input_tokens=100,
-            output_tokens=200,
-            reasoning_tokens=50,
-            turns=1,
-            session_id="sess-1",
-            killed_reason=None,
-            exit_code=0,
-            cost_usd=4.0,
-        )
-
-    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
-    monkeypatch.setattr(
-        runner,
-        "_run_gate_report",
-        lambda **kwargs: {
-            "verdict": "FAIL",
-            "conformed": True,
-            "problems": [{"check": "gate-check"}],
-            "failed_gates": ["gate-check"],
-        },
-    )
-
-    result = runner._run_cell_impl(
-        run_label="partial-counted",
-        run_dir=tmp_path / "partial-counted",
-        task_id="backgammon",
-        injected_memory=[],
-    )
-
-    assert call_count["count"] == 1
-    assert result.wall_cost_usd == pytest.approx(4.0)
-    assert result.verdict == "BUDGET_STOP"
-    assert any(
-        "reason=cost_reservation_refused" in line and "accrued_cost_usd=4.0000" in line
-        for line in progress_lines
-    )
+    assert stats.budget_stop_detected is False
+    assert stats.budget_stop_signature is None

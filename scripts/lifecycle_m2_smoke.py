@@ -63,8 +63,8 @@ def main() -> int:
     direct_keywords_raw = os.environ.get("WEVIBE_BENCH_DIRECT_MEMORY_KEYWORDS", "")
     direct_stack_raw = os.environ.get("WEVIBE_BENCH_DIRECT_MEMORY_STACK")
 
-    transcript = ""
-    transcript_path: Path | None = None
+    events: list[dict[str, Any]] = []
+    events_path: Path | None = None
     direct_memory: dict[str, Any] | None = None
     if direct_text:
         direct_keywords = [part.strip() for part in direct_keywords_raw.split(",") if part.strip()]
@@ -75,12 +75,13 @@ def main() -> int:
             "stack_hint": stack_hint,
         }
     else:
-        transcript_path = Path(_required_env("WEVIBE_BENCH_TRANSCRIPT_PATH")).expanduser()
-        if not transcript_path.is_file():
-            raise RuntimeError(f"transcript file not found: {transcript_path}")
-        transcript = transcript_path.read_text(encoding="utf-8")
-        if not transcript.strip():
-            raise RuntimeError(f"transcript file empty: {transcript_path}")
+        events_path = Path(_required_env("WEVIBE_BENCH_EVENTS_PATH")).expanduser()
+        if not events_path.is_file():
+            raise RuntimeError(f"events file not found: {events_path}")
+        raw_events = json.loads(events_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_events, list) or not raw_events:
+            raise RuntimeError(f"events file must hold a non-empty JSON array: {events_path}")
+        events = raw_events
 
     model = os.environ.get("WEVIBE_BENCH_MODEL", "openai/gpt-5.3-codex")
     api_key = os.environ.get("WEVIBE_BENCH_API_KEY", "")
@@ -107,9 +108,9 @@ def main() -> int:
     leader_wallet = _required_env("WEVIBE_BENCH_LEADER_WALLET")
 
     logger.info(
-        "op=lifecycle.m2.smoke.start wevibe_root=%s transcript=%s model=%s logfile=%s",
+        "op=lifecycle.m2.smoke.start wevibe_root=%s events=%s model=%s logfile=%s",
         wevibe_root,
-        transcript_path if transcript_path is not None else "<direct_memory>",
+        events_path if events_path is not None else "<direct_memory>",
         model,
         logfile,
     )
@@ -141,7 +142,7 @@ def main() -> int:
         leader_instance, contributor_instance = orchestrator.bring_up(build=_bool_env("WEVIBE_BENCH_BUILD_DIST"))
         m1_result = orchestrator.run_m1()
         m2_result = proof.run(
-            transcript=transcript,
+            events=events,
             model=model,
             api_key=api_key,
             project_context=_project_context(),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -27,8 +28,6 @@ from wevibe_bench.preflight import preflight
 DEFAULT_RUN_LABEL = "backgammon-smoke"
 DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_RUNS_DIR = "runs/backgammon"
-DEFAULT_TRANSCRIPT_CHAR_CAP = 120_000
-DEFAULT_SOURCE_CHAR_CAP = 35_000
 DEFAULT_EXTRACT_TIMEOUT_S = 900
 TASK_HEADER = "Build a Node+TypeScript backgammon game passing the CONTRACT gates"
 _KEYWORD_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
@@ -40,21 +39,6 @@ def _utc_iso() -> str:
 
 def _sha256_first8(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
-
-
-def _truncate(text: str, limit: int) -> str:
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    marker = "\n...[truncated]"
-    if limit <= len(marker):
-        return text[:limit]
-    return text[: limit - len(marker)] + marker
-
-
-def _one_line(value: str) -> str:
-    return " ".join(value.split())
 
 
 def _default_extract_timeout_s() -> int:
@@ -78,7 +62,7 @@ class _PromptInjectingRest:
 
     def extract(
         self,
-        transcript: str,
+        events: list[dict[str, Any]],
         model: str,
         project_context: dict[str, Any] | None = None,
         org_id: str | None = None,
@@ -90,7 +74,7 @@ class _PromptInjectingRest:
         session_id: str | None = None,
     ) -> str:
         return self._inner.extract(
-            transcript=transcript,
+            events=events,
             model=model,
             project_context=project_context,
             org_id=org_id,
@@ -255,74 +239,239 @@ def _session_id_from_events(
     return chosen_session_id
 
 
-def _assistant_text_chunks(events_file: Path) -> list[str]:
-    chunks: list[str] = []
-    for line_no, raw in enumerate(events_file.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw.strip()
-        if not line:
-            continue
-        entry = _json_line(events_file, line_no, line)
-        if entry.get("type") != "text":
-            continue
-        part = entry.get("part")
-        if not isinstance(part, dict):
-            continue
-        text = part.get("text")
-        if isinstance(text, str) and text.strip():
-            chunks.append(text.strip())
-    return chunks
+def _canonical_json(value: Any, *, source: str) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{source} must be JSON-serializable: {exc}") from exc
 
 
-def _source_section(path: Path, *, cap: int) -> str:
-    if not path.is_file():
-        return f"[missing] {path}"
-    body = path.read_text(encoding="utf-8")
-    return _truncate(body, cap)
+def _finite_time_ms(value: Any, *, source: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"{source} must be finite numeric ms timestamp, got: {value!r}")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise RuntimeError(f"{source} must be finite numeric ms timestamp, got: {value!r}")
+    return int(numeric)
 
 
-def _build_transcript(
+def _event_time_ms(entry: dict[str, Any], part: dict[str, Any], *, path: Path, line_no: int) -> int:
+    part_time = part.get("time")
+    if isinstance(part_time, dict) and "start" in part_time:
+        return _finite_time_ms(
+            part_time.get("start"),
+            source=f"worker event part.time.start at {path}:{line_no}",
+        )
+    return _finite_time_ms(
+        entry.get("timestamp"),
+        source=f"worker event timestamp at {path}:{line_no}",
+    )
+
+
+def _user_sidecar_for_events(events_file: Path) -> Path:
+    suffix = ".events.jsonl"
+    if not events_file.name.endswith(suffix):
+        raise RuntimeError(f"events file name must end with {suffix}: {events_file}")
+    return events_file.with_name(events_file.name[: -len(suffix)] + ".user-events.jsonl")
+
+
+def _build_substrate_events(
     *,
     session_dir: Path,
-    run_label: str,
-    s_prompt: str,
-    transcript_cap: int,
-    source_cap: int,
-) -> tuple[str, int, list[Path]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[Path]]:
     events_files = _event_files(session_dir)
+    events: list[dict[str, Any]] = []
+    seq = 0
 
-    chunks: list[str] = []
+    def emit(event: dict[str, Any]) -> None:
+        nonlocal seq
+        event["seq"] = seq
+        seq += 1
+
+        kind = event.get("kind")
+        if kind not in {"user", "assistant", "reasoning", "tool", "edit"}:
+            raise RuntimeError(f"invalid substrate event kind={kind!r}")
+
+        time_value = event.get("time")
+        if isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
+            raise RuntimeError(f"invalid substrate event time kind={kind!r} time={time_value!r}")
+        if not math.isfinite(float(time_value)):
+            raise RuntimeError(f"invalid substrate event time kind={kind!r} time={time_value!r}")
+
+        seq_value = event.get("seq")
+        if not isinstance(seq_value, int) or seq_value < 0:
+            raise RuntimeError(f"invalid substrate event seq kind={kind!r} seq={seq_value!r}")
+
+        events.append(event)
+
     for events_file in events_files:
-        chunks.extend(_assistant_text_chunks(events_file))
+        sidecar_file = _user_sidecar_for_events(events_file)
+        if not sidecar_file.is_file():
+            raise RuntimeError(
+                "missing user sidecar for worker events file: "
+                f"events={events_file} sidecar={sidecar_file}"
+            )
 
-    worktree_src = session_dir / "worktree" / "src"
-    game_path = worktree_src / "game.ts"
-    ai_path = worktree_src / "ai.ts"
-    server_path = worktree_src / "server.ts"
+        for line_no, raw in enumerate(sidecar_file.read_text(encoding="utf-8").splitlines(), start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            user_entry = _json_line(sidecar_file, line_no, line)
+            if user_entry.get("type") != "user":
+                raise RuntimeError(
+                    f"invalid user sidecar record at {sidecar_file}:{line_no}: "
+                    f"type must be 'user', got {user_entry.get('type')!r}"
+                )
+            user_text = user_entry.get("text")
+            if not isinstance(user_text, str):
+                raise RuntimeError(
+                    f"invalid user sidecar record at {sidecar_file}:{line_no}: text must be string"
+                )
+            emit(
+                {
+                    "kind": "user",
+                    "time": _finite_time_ms(
+                        user_entry.get("timestamp"),
+                        source=f"user sidecar timestamp at {sidecar_file}:{line_no}",
+                    ),
+                    "text": user_text,
+                }
+            )
 
-    transcript_parts = [
-        f"TASK: {TASK_HEADER}",
-        f"RUN_LABEL: {run_label}",
-        f"SESSION_DIR: {session_dir}",
-        "",
-        "=== S PROMPT (fork reasoning strategy) ===",
-        s_prompt.strip(),
-        "",
-        "=== ASSISTANT TEXT CHUNKS (type:text part.text) ===",
-        "\n\n---\n\n".join(chunks) if chunks else "<no assistant text chunks found>",
-        "",
-        "=== FINAL SOURCE: src/game.ts ===",
-        _source_section(game_path, cap=source_cap),
-        "",
-        "=== FINAL SOURCE: src/ai.ts ===",
-        _source_section(ai_path, cap=source_cap),
-        "",
-        "=== FINAL SOURCE: src/server.ts ===",
-        _source_section(server_path, cap=source_cap),
-    ]
+        for line_no, raw in enumerate(events_file.read_text(encoding="utf-8").splitlines(), start=1):
+            line = raw.strip()
+            if not line:
+                continue
 
-    transcript = "\n".join(transcript_parts).strip()
-    transcript = _truncate(transcript, transcript_cap)
-    return transcript, len(chunks), events_files
+            entry = _json_line(events_file, line_no, line)
+            event_type = entry.get("type")
+            if event_type in {"step_start", "step_finish"}:
+                continue
+
+            part = entry.get("part")
+            if not isinstance(part, dict):
+                raise RuntimeError(f"worker event part missing object at {events_file}:{line_no}")
+
+            event_time = _event_time_ms(entry, part, path=events_file, line_no=line_no)
+
+            part_metadata = part.get("metadata")
+            openrouter_meta = part_metadata.get("openrouter") if isinstance(part_metadata, dict) else None
+            reasoning_details = (
+                openrouter_meta.get("reasoning_details") if isinstance(openrouter_meta, dict) else None
+            )
+            if isinstance(reasoning_details, list):
+                for detail in reasoning_details:
+                    if not isinstance(detail, dict):
+                        continue
+                    if detail.get("type") != "reasoning.text":
+                        continue
+                    reasoning_text = detail.get("text")
+                    if isinstance(reasoning_text, str) and reasoning_text.strip():
+                        emit(
+                            {
+                                "kind": "reasoning",
+                                "time": event_time,
+                                "role": "assistant",
+                                "text": reasoning_text,
+                            }
+                        )
+
+            if event_type == "text":
+                assistant_text = part.get("text")
+                if isinstance(assistant_text, str) and assistant_text.strip():
+                    emit(
+                        {
+                            "kind": "assistant",
+                            "time": event_time,
+                            "role": "assistant",
+                            "text": assistant_text,
+                        }
+                    )
+                continue
+
+            if event_type != "tool_use":
+                continue
+
+            tool_name = part.get("tool")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise RuntimeError(f"worker tool_use missing tool name at {events_file}:{line_no}")
+
+            state = part.get("state")
+            if not isinstance(state, dict):
+                raise RuntimeError(f"worker tool_use state missing object at {events_file}:{line_no}")
+
+            state_input = state.get("input")
+            if tool_name in {"edit", "write"}:
+                if not isinstance(state_input, dict):
+                    raise RuntimeError(f"edit/write tool input missing object at {events_file}:{line_no}")
+
+                file_path = state_input.get("filePath")
+                if not isinstance(file_path, str) or not file_path.strip():
+                    raise RuntimeError(f"edit/write tool missing filePath at {events_file}:{line_no}")
+
+                detail_key = "newString" if tool_name == "edit" else "content"
+                detail = state_input.get(detail_key)
+                if not isinstance(detail, str):
+                    raise RuntimeError(
+                        f"edit/write tool missing string {detail_key} at {events_file}:{line_no}"
+                    )
+
+                emit(
+                    {
+                        "kind": "edit",
+                        "time": event_time,
+                        "file": file_path,
+                        "detail": detail,
+                    }
+                )
+                continue
+
+            state_output = state.get("output")
+            state_metadata = state.get("metadata")
+            status_value = state.get("status")
+
+            tool_event: dict[str, Any] = {
+                "kind": "tool",
+                "time": event_time,
+                "name": tool_name,
+                "input": _canonical_json(
+                    state_input,
+                    source=f"tool input at {events_file}:{line_no}",
+                ),
+                "output": state_output,
+                "exit": state_metadata.get("exit") if isinstance(state_metadata, dict) else None,
+                "status": status_value,
+            }
+            if status_value == "error":
+                error_text: str | None = None
+                state_error = state.get("error")
+                if isinstance(state_error, str) and state_error.strip():
+                    error_text = state_error
+                elif isinstance(state_output, str) and state_output.strip():
+                    error_text = state_output
+                elif state_output is not None:
+                    error_text = _canonical_json(
+                        state_output,
+                        source=f"tool output at {events_file}:{line_no}",
+                    )
+                if error_text is not None:
+                    tool_event["error"] = error_text
+            emit(tool_event)
+
+    kind_counts = {kind: 0 for kind in ("user", "assistant", "reasoning", "tool", "edit")}
+    for event in events:
+        kind = event.get("kind")
+        if isinstance(kind, str):
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+    canonical_events_json = _canonical_json(events, source=f"substrate events list under {session_dir}")
+    stats = {
+        "event_count": len(events),
+        "kind_counts": kind_counts,
+        "total_chars": len(canonical_events_json),
+        "events_sha256_first8": _sha256_first8(canonical_events_json),
+    }
+    return events, stats, events_files
 
 
 def _normalize_keywords(raw: Any) -> list[str]:
@@ -394,9 +543,8 @@ def _normalize_memory(memory: dict[str, Any], *, fallback_keywords: list[str]) -
     }
 
 
-def _memory_fragment(text: str, limit: int = 84) -> str:
-    compact = _one_line(text)
-    return compact[:limit]
+def _memory_fragment(text: str) -> str:
+    return M2Proof.memory_fragment(text)
 
 
 def _memory_fingerprint_fields(text: str) -> dict[str, Any]:
@@ -455,7 +603,8 @@ def main() -> int:
         "approve_status": "",
         "delivery": "NO",
         "memory_fp": "",
-        "text_size": 0,
+        "n_memories": 0,
+        "memories": [],
         "extract_path": "",
         "logfile": logfile,
     }
@@ -480,14 +629,8 @@ def main() -> int:
         e_prompt = _load_prompt(e_prompt_path)
         s_prompt = _load_prompt(s_prompt_path)
 
-        stage = "transcript"
-        transcript, text_chunks, events_files = _build_transcript(
-            session_dir=session_dir,
-            run_label=args.run_label,
-            s_prompt=s_prompt,
-            transcript_cap=DEFAULT_TRANSCRIPT_CHAR_CAP,
-            source_cap=DEFAULT_SOURCE_CHAR_CAP,
-        )
+        stage = "substrate_events"
+        events, event_stats, events_files = _build_substrate_events(session_dir=session_dir)
         session_counts = _session_id_counts_from_events(session_dir)
         session_id = _session_id_from_events(session_dir, session_counts=session_counts)
         progress(
@@ -500,9 +643,14 @@ def main() -> int:
                 "WARNING source_mode=on no sessionID found in events; "
                 "injected_memory dedup will be skipped for this run"
             )
+        kind_counts = event_stats.get("kind_counts", {})
         progress(
-            "transcript built "
-            f"events_files={len(events_files)} text_chunks={text_chunks} transcript_chars={len(transcript)}"
+            "substrate events built "
+            f"events_files={len(events_files)} event_count={event_stats.get('event_count', len(events))} "
+            f"kind_user={kind_counts.get('user', 0)} kind_assistant={kind_counts.get('assistant', 0)} "
+            f"kind_reasoning={kind_counts.get('reasoning', 0)} kind_tool={kind_counts.get('tool', 0)} "
+            f"kind_edit={kind_counts.get('edit', 0)} total_chars={event_stats.get('total_chars', 0)} "
+            f"events_sha256_first8={event_stats.get('events_sha256_first8', 'none')}"
         )
 
         stage = "identity"
@@ -604,8 +752,6 @@ def main() -> int:
         }
 
         extract_provider = "openrouter"
-        if not extract_provider.strip():
-            raise RuntimeError("extract provider must be non-empty")
         # The opencode SESSION slug is provider-prefixed (e.g. 'openrouter/anthropic/claude-opus-4.6'),
         # but /v1/extract wants the RAW provider id with `provider` passed separately. For
         # self-extraction (extract_model defaults to session_model) normalize by stripping a leading
@@ -623,12 +769,13 @@ def main() -> int:
         progress(
             "extract start "
             f"session_model={args.session_model} extract_model={extract_model} "
-            f"extract_timeout_s={args.extract_timeout} transcript_chars={len(transcript)} "
+            f"extract_timeout_s={args.extract_timeout} events={event_stats.get('event_count', len(events))} "
+            f"events_sha256_first8={event_stats.get('events_sha256_first8', 'none')} "
             f"prompt=E-assembled provider={extract_provider}"
         )
 
-        memory_raw = proof.produce_memory(
-            transcript=transcript,
+        memories_raw = proof.produce_memories(
+            events=events,
             model=extract_model,
             api_key=api_key,
             project_context=project_context,
@@ -639,52 +786,104 @@ def main() -> int:
         )
         extract_path = "extract"
 
-        memory = _normalize_memory(
-            memory_raw,
-            fallback_keywords=[
-                "backgammon",
-                "typescript",
-                "game_engine",
-                "doubling_cube",
-                "bear_off",
-            ],
-        )
+        fallback_keywords = [
+            "backgammon",
+            "typescript",
+            "game_engine",
+            "doubling_cube",
+            "bear_off",
+        ]
+        memories = [
+            _normalize_memory(memory_raw, fallback_keywords=fallback_keywords)
+            for memory_raw in memories_raw
+        ]
         extract_dur_ms = int((time.perf_counter() - extract_start) * 1000)
+        total_text_size = sum(len(str(memory["text"])) for memory in memories)
+        total_keywords = sum(len(list(memory["keywords"])) for memory in memories)
         progress(
             "extract end "
-            f"path={extract_path} dur_ms={extract_dur_ms} text_size={len(memory['text'])} keywords={len(memory['keywords'])}"
+            f"path={extract_path} dur_ms={extract_dur_ms} n_memories={len(memories)} "
+            f"total_text_size={total_text_size} total_keywords={total_keywords}"
         )
 
-        stage = "submit"
-        submission_hash = proof.submit_memory(org_id, memory)
-        progress(f"submit ok org_id={org_id} submission_hash={submission_hash}")
+        committed_memories: list[dict[str, Any]] = []
+        for index, memory in enumerate(memories, start=1):
+            stage = f"submit[{index}/{len(memories)}]"
+            submission_hash = proof.submit_memory(org_id, memory)
 
-        stage = "approve"
-        verify_payload = proof.leader_verify_and_commit(org_id, submission_hash, list(memory["keywords"]))
-        approve_status = _commit_status_label(verify_payload, submission_hash)
-        progress(f"approve/commit ok submission_hash={submission_hash} status={approve_status}")
+            stage = f"approve[{index}/{len(memories)}]"
+            verify_payload = proof.leader_verify_and_commit(
+                org_id,
+                submission_hash,
+                list(memory["keywords"]),
+            )
+            approve_status = _commit_status_label(verify_payload, submission_hash)
+
+            fp_fields = _memory_fingerprint_fields(str(memory["text"]))
+            committed_memories.append(
+                {
+                    "submission_hash": submission_hash,
+                    "approve_status": approve_status,
+                    "keywords": list(memory["keywords"]),
+                    **fp_fields,
+                }
+            )
+            progress(
+                "memory commit "
+                f"idx={index}/{len(memories)} submission_hash={submission_hash} "
+                f"status={approve_status} memory_fp={fp_fields['memory_fp']} "
+                f"text_size={fp_fields['text_size']} keywords={len(memory['keywords'])}"
+            )
 
         stage = "prove_delivery"
-        memory_fragment = _memory_fragment(str(memory["text"]))
-        delivery_payload = proof.prove_delivery(org_id, memory_fragment)
+        memory_fragments = [_memory_fragment(str(memory["text"])) for memory in memories]
+        delivery_payload = proof.prove_delivery(org_id, memory_fragments)
         delivery = str(delivery_payload.get("delivery") or "NO")
-        n_memories = int(delivery_payload.get("n_memories") or 0)
+        n_memories = int(delivery_payload.get("n_memories") or len(memory_fragments))
         matched = bool(delivery_payload.get("matched"))
-        fp_fields = _memory_fingerprint_fields(str(memory["text"]))
+        per_memory_delivery_raw = delivery_payload.get("per_memory")
+        per_memory_delivery = (
+            per_memory_delivery_raw if isinstance(per_memory_delivery_raw, list) else []
+        )
+        matched_count = sum(
+            1
+            for item in per_memory_delivery
+            if isinstance(item, dict) and bool(item.get("matched"))
+        )
         progress(
             "delivery proof "
             f"delivery={delivery} n_memories={n_memories} matched={matched} "
-            f"memory_fp={fp_fields['memory_fp']} text_size={fp_fields['text_size']}"
+            f"matched_count={matched_count}"
         )
+        for index, item in enumerate(per_memory_delivery, start=1):
+            if not isinstance(item, dict):
+                continue
+            progress(
+                "delivery probe "
+                f"idx={index}/{len(memory_fragments)} fragment_fp={item.get('fragment_fp')} "
+                f"matched={bool(item.get('matched'))}"
+            )
 
         status = "ok" if delivery == "YES" else "delivery_no"
+        primary_memory = committed_memories[0] if committed_memories else {}
         result_payload = {
             "status": status,
             "org_id": org_id,
-            "submission_hash": submission_hash,
-            "approve_status": approve_status,
+            # Compatibility-only fields for the historical import-cell schema.
+            "submission_hash": str(primary_memory.get("submission_hash") or ""),
+            "approve_status": str(primary_memory.get("approve_status") or ""),
             "delivery": delivery,
-            **fp_fields,
+            "memory_fp": str(primary_memory.get("memory_fp") or ""),
+            "n_memories": len(committed_memories),
+            "memories": [
+                {
+                    "submission_hash": str(item.get("submission_hash") or ""),
+                    "memory_fp": str(item.get("memory_fp") or ""),
+                    "text_size": int(item.get("text_size") or 0),
+                    "approve_status": str(item.get("approve_status") or ""),
+                }
+                for item in committed_memories
+            ],
             "extract_path": extract_path,
             "logfile": logfile,
         }

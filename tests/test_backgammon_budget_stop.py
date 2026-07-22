@@ -1,0 +1,406 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
+from typing import Any
+
+import pytest
+
+import wevibe_bench.adapters.backgammon as backgammon_mod
+from wevibe_bench.adapters.backgammon import BackgammonRunner, _OpencodeRunStats
+
+
+TASK_DIR = (Path(__file__).resolve().parents[1] / "tasks" / "backgammon").resolve()
+
+
+def _make_runner(
+    tmp_path: Path,
+    *,
+    cost_limit_usd: float | None = None,
+    max_attempts: int = 8,
+    max_output_tokens: int | None = None,
+    max_steps_per_attempt: int | None = None,
+    output_price_per_1m: float | None = None,
+    mock: str | None = None,
+    progress: Any = None,
+) -> BackgammonRunner:
+    return BackgammonRunner(
+        task_dir=TASK_DIR,
+        work_root=tmp_path / "work-root",
+        model="openrouter/anthropic/claude-opus-4.8",
+        cost_limit_usd=cost_limit_usd,
+        max_attempts=max_attempts,
+        max_output_tokens=max_output_tokens,
+        max_steps_per_attempt=max_steps_per_attempt,
+        output_price_per_1m=output_price_per_1m,
+        mock=mock,
+        progress=progress,
+    )
+
+
+def _stats(
+    *,
+    session_id: str | None = "sess-1",
+    killed_reason: str | None = None,
+    exit_code: int | None = 0,
+    cost_usd: float = 0.0,
+    budget_stop_detected: bool = False,
+    budget_stop_signature: str | None = None,
+) -> _OpencodeRunStats:
+    return _OpencodeRunStats(
+        input_tokens=10,
+        output_tokens=20,
+        reasoning_tokens=5,
+        turns=1,
+        session_id=session_id,
+        killed_reason=killed_reason,
+        exit_code=exit_code,
+        cost_usd=cost_usd,
+        budget_stop_detected=budget_stop_detected,
+        budget_stop_signature=budget_stop_signature,
+    )
+
+
+def _write_checkpoint(path: Path, *, hard: float, accrued: float, committed: float) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "test-run",
+                "model_id": "anthropic/claude-opus-4.8",
+                "profile_name": "opus",
+                "hard_cap_usd": hard,
+                "accrued_actual_usd": accrued,
+                "committed_unproven_usd": committed,
+                "outstanding": {},
+                "updated_at": "2026-07-22T00:00:00+00:00",
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeDockerCellConfig:
+        def __init__(
+            self,
+            *,
+            worktree: Path,
+            memory_mode: str,
+            container_name: str,
+            output_token_max: int | None = None,
+        ) -> None:
+            self.worktree = worktree
+            self.memory_mode = memory_mode
+            self.container_name = container_name
+            self.output_token_max = output_token_max
+
+    class _FakeDockerCell:
+        def __init__(self, config: _FakeDockerCellConfig, progress: Any) -> None:
+            self.config = config
+            self.progress = progress
+
+        def __enter__(self) -> "_FakeDockerCell":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        def exec_argv(self, inner: list[str]) -> list[str]:
+            return [sys.executable, "-c", "print('fake')", *inner]
+
+        def force_kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(backgammon_mod, "DockerCellConfig", _FakeDockerCellConfig)
+    monkeypatch.setattr(backgammon_mod, "DockerCell", _FakeDockerCell)
+    monkeypatch.setattr(backgammon_mod, "docker_available", lambda: (True, "ok"))
+    monkeypatch.setattr(backgammon_mod, "image_exists", lambda: True)
+
+    real_run = backgammon_mod.subprocess.run
+
+    def _run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, list) and cmd and cmd[0] == "docker":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="No such container")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(backgammon_mod.subprocess, "run", _run)
+
+
+def test_run_opencode_detects_402_budget_stop_error_event(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    script_path = tmp_path / "fake_opencode_budget_stop.py"
+    script_path.write_text(
+        textwrap.dedent(
+            """
+            import json
+
+            event = {
+                "type": "error",
+                "sessionID": "ses-budget-stop",
+                "error": {
+                    "name": "APIError",
+                    "data": {
+                        "statusCode": 402,
+                        "message": "reservation would exceed hard cap",
+                        "responseBody": "{\\\"error\\\":{\\\"type\\\":\\\"insufficient_quota\\\",\\\"code\\\":\\\"budget_exceeded\\\"}}",
+                    },
+                },
+            }
+            print(json.dumps(event), flush=True)
+            raise SystemExit(1)
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    stats = runner._run_opencode(
+        cmd=[sys.executable, str(script_path)],
+        worktree=tmp_path,
+        events_path=tmp_path / "budget-stop.events.jsonl",
+        env=os.environ.copy(),
+        run_label="budget-stop-detect",
+        phase="initial",
+        fallback_session_id=None,
+        kill_hook=None,
+    )
+
+    assert stats.exit_code == 1
+    assert stats.budget_stop_detected is True
+    assert stats.budget_stop_signature is not None
+    assert "status_code=402" in stats.budget_stop_signature
+
+
+def test_pre_attempt_budget_exhaustion_returns_budget_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    progress_lines: list[str] = []
+    runner = _make_runner(
+        tmp_path,
+        cost_limit_usd=2.4,
+        max_attempts=8,
+        max_output_tokens=10000,
+        max_steps_per_attempt=10,
+        output_price_per_1m=25.0,
+        progress=progress_lines.append,
+    )
+    _patch_fake_docker(monkeypatch)
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
+
+    checkpoint = tmp_path / "proxy-checkpoint.json"
+    _write_checkpoint(checkpoint, hard=2.4, accrued=1.8, committed=0.5)
+    monkeypatch.setenv("WEVIBE_BENCH_PROXY_CHECKPOINT", str(checkpoint))
+
+    call_count = {"count": 0}
+
+    def _unexpected_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        call_count["count"] += 1
+        raise AssertionError("_run_opencode must not run when attempt 1 is budget-exhausted")
+
+    monkeypatch.setattr(runner, "_run_opencode", _unexpected_opencode)
+
+    result = runner._run_cell_impl(
+        run_label="budget-precheck-stop",
+        run_dir=tmp_path / "budget-precheck-stop",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert call_count["count"] == 0
+    assert result.verdict == "BUDGET_STOP"
+    assert result.termination_reason == "attempts_exhausted_by_budget"
+    assert result.attempts_to_green == "BUDGET_STOP"
+    assert result.attempt_reports == []
+    assert any("step=budget-decision" in line and "decision=budget_stop" in line for line in progress_lines)
+
+
+def test_mid_attempt_402_maps_to_budget_stop_and_writes_user_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=2.4, max_attempts=8)
+    _patch_fake_docker(monkeypatch)
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
+
+    checkpoint = tmp_path / "proxy-checkpoint.json"
+    _write_checkpoint(checkpoint, hard=2.4, accrued=0.1, committed=0.0)
+    monkeypatch.setenv("WEVIBE_BENCH_PROXY_CHECKPOINT", str(checkpoint))
+
+    gate_calls = {"count": 0}
+
+    def _fake_gate(**kwargs: Any) -> dict[str, Any]:
+        gate_calls["count"] += 1
+        if gate_calls["count"] == 1:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "gate-check"}],
+                "failed_gates": ["gate-check"],
+            }
+        raise AssertionError("should stop before second gate when feedback hits 402")
+
+    monkeypatch.setattr(runner, "_run_gate_report", _fake_gate)
+
+    opencode_calls = {"count": 0}
+
+    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        opencode_calls["count"] += 1
+        if opencode_calls["count"] == 1:
+            return _stats(session_id="sess-1", exit_code=0, cost_usd=0.6)
+        if opencode_calls["count"] == 2:
+            return _stats(
+                session_id="sess-1",
+                exit_code=1,
+                cost_usd=0.0,
+                budget_stop_detected=True,
+                budget_stop_signature="status_code=402 error_code=budget_exceeded",
+            )
+        raise AssertionError("unexpected extra _run_opencode call")
+
+    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+
+    result = runner._run_cell_impl(
+        run_label="mid-attempt-402",
+        run_dir=tmp_path / "mid-attempt-402",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "BUDGET_STOP"
+    assert result.termination_reason == "budget_stop_mid_attempt"
+    assert result.attempts_to_green == "BUDGET_STOP"
+    assert result.attempt_reports[-1]["termination_reason"] == "budget_stop_mid_attempt"
+
+    sidecar_path = Path(f"{result.worktree}.user-events.jsonl")
+    sidecar_lines = [json.loads(line) for line in sidecar_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [row["attempt"] for row in sidecar_lines] == [1, 2]
+    assert sidecar_lines[0]["text"] == "INITIAL PROMPT"
+    assert sidecar_lines[1]["text"] == runner._build_feedback_prompt(checks=["gate-check"])
+
+
+@pytest.mark.parametrize(
+    ("conformed", "expected_attempts_to_green"),
+    [
+        (True, "FAIL"),
+        (False, "DID_NOT_CONFORM"),
+    ],
+)
+def test_hard_attempt_ceiling_sets_fail_termination_label(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    conformed: bool,
+    expected_attempts_to_green: str,
+) -> None:
+    runner = _make_runner(tmp_path, mock="scaffold", max_attempts=2)
+
+    monkeypatch.setattr(
+        runner,
+        "_run_gate_report",
+        lambda **kwargs: {
+            "verdict": "FAIL",
+            "conformed": conformed,
+            "problems": [{"check": "x"}],
+            "failed_gates": ["x"],
+        },
+    )
+
+    result = runner._run_cell_impl(
+        run_label="ceiling",
+        run_dir=tmp_path / "ceiling",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "FAIL"
+    assert result.termination_reason == "attempt_ceiling_reached"
+    assert result.attempts_to_green == expected_attempts_to_green
+    assert result.attempt_reports[-1]["termination_reason"] == "attempt_ceiling_reached"
+
+
+def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
+    _patch_fake_docker(monkeypatch)
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "PROMPT")
+
+    gate_calls = {"count": 0}
+
+    def _fake_gate(**kwargs: Any) -> dict[str, Any]:
+        gate_calls["count"] += 1
+        if gate_calls["count"] == 1:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "gate-check"}],
+                "failed_gates": ["gate-check"],
+            }
+        return {
+            "verdict": "PASS",
+            "conformed": True,
+            "problems": [],
+            "failed_gates": [],
+        }
+
+    monkeypatch.setattr(runner, "_run_gate_report", _fake_gate)
+
+    opencode_calls = {"count": 0}
+
+    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        opencode_calls["count"] += 1
+        if opencode_calls["count"] == 1:
+            return _stats(session_id="sess-1", killed_reason="run_timeout", exit_code=137, cost_usd=0.4)
+        return _stats(session_id="sess-1", killed_reason=None, exit_code=0, cost_usd=0.1)
+
+    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+
+    result = runner._run_cell_impl(
+        run_label="harness-limit-continue",
+        run_dir=tmp_path / "harness-limit-continue",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "PASS"
+    assert result.termination_reason == "gates_green"
+    assert result.attempts_to_green == 1
+
+
+def test_non_budget_nonzero_worker_exit_classifies_as_harness_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
+    _patch_fake_docker(monkeypatch)
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "PROMPT")
+    monkeypatch.setattr(
+        runner,
+        "_run_opencode",
+        lambda **kwargs: _stats(
+            session_id="sess-1",
+            killed_reason=None,
+            exit_code=1,
+            cost_usd=0.0,
+            budget_stop_detected=False,
+        ),
+    )
+
+    result = runner._run_cell_impl(
+        run_label="harness-error",
+        run_dir=tmp_path / "harness-error",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "FAIL"
+    assert result.termination_reason == "harness_error"
+    assert result.attempts_to_green == "FAIL"
+    assert result.attempt_reports == []

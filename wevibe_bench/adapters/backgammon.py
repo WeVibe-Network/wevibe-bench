@@ -4,7 +4,7 @@ This adapter drives a single backgammon cell end-to-end:
 - seed a fresh worktree from scaffold
 - run either a mock worker (golden/scaffold copy) or headless opencode
 - evaluate with the backgammon gate report runner
-- apply up to 3 rounds of *problems-only* feedback in the same session
+- apply budget-bounded rounds of *problems-only* feedback in the same session
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import collections
 from contextlib import nullcontext
 from dataclasses import dataclass
 import datetime as _dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -80,7 +81,17 @@ _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
 }
 
 _RESERVATION_SAFETY_FACTOR = 1.10
-_BUDGET_STOP_REASONS = {"cost_limit", "cost_reservation_refused", "max_steps_per_attempt"}
+_HARNESS_LIMIT_REASONS = {"run_timeout", "max_steps_per_attempt", "token_cap"}
+_PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
+
+# Canonical budget-bounded attempt ceiling.
+# Fixture evidence (runs/backgammon/*.scorecard.json):
+# - stage7 kimi-k2.7 cells at cap=2.4 spent 1.37-1.69 over 3 attempts
+#   (~$0.46-$0.56 per attempt, so ~4 attempts inside a $2.4 cap).
+# - stage7 opus-4.8 at cap=11 spent 6.17 over 3 attempts
+#   (~$2.06 per attempt, so ~6 attempts inside an ~$12 cap).
+# 8 is a bounded safety margin above both observed envelopes.
+DEFAULT_ATTEMPT_HARD_CEILING = 8
 
 # Canonical per-attempt step cap (runaway-loop guard, NOT a budget instrument).
 # Budget enforcement is the accrued usage.cost kill plus the proxy's hard-cap
@@ -111,12 +122,24 @@ class _OpencodeRunStats:
     killed_reason: str | None
     exit_code: int | None
     cost_usd: float
+    budget_stop_detected: bool = False
+    budget_stop_signature: str | None = None
+
+
+@dataclass(frozen=True)
+class _ProxyBudgetSnapshot:
+    hard_cap_usd: float
+    accrued_actual_usd: float
+    committed_unproven_usd: float
+    remaining_usd: float
+    checkpoint_path: str
 
 
 @dataclass
 class BackgammonCellResult:
     verdict: str
     attempts_to_green: int | str
+    termination_reason: str
     conformed: bool
     input_tokens: int
     output_tokens: int
@@ -149,7 +172,7 @@ class BackgammonRunner(AgentRunner):
         model: str,
         memory_mode: str = "off",
         mock: str | None = None,
-        max_attempts: int = 3,
+        max_attempts: int = DEFAULT_ATTEMPT_HARD_CEILING,
         token_cap: int = 200000,
         run_timeout_s: int = DEFAULT_RUN_TIMEOUT_S,
         completion_grace_s: int = 30,
@@ -172,7 +195,10 @@ class BackgammonRunner(AgentRunner):
         self.model = str(model)
         self.memory_mode = str(memory_mode)
         self.mock = mock
-        self.max_attempts = int(max_attempts)
+        requested_max_attempts = int(max_attempts)
+        if requested_max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        self.max_attempts = min(requested_max_attempts, DEFAULT_ATTEMPT_HARD_CEILING)
         self.token_cap = int(token_cap)
         self.run_timeout_s = int(run_timeout_s)
         self.completion_grace_s = int(completion_grace_s)
@@ -188,8 +214,7 @@ class BackgammonRunner(AgentRunner):
 
         self._effective_output_price_per_1m = 0.0
         self._cache_write_allowance_usd = 0.0
-        self._reservation_usd = 0.0
-        self._one_step_worst_case_usd = 0.0
+        self._fallback_attempt_estimate_usd = 0.0
 
         self.logger = logger
         self._progress_cb = progress or _default_progress
@@ -199,8 +224,6 @@ class BackgammonRunner(AgentRunner):
             raise ValueError("memory_mode must be 'off' or 'on'")
         if self.mock not in {None, "golden", "scaffold"}:
             raise ValueError("mock must be one of: None, 'golden', 'scaffold'")
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be >= 1")
         if self.token_cap < 1:
             raise ValueError("token_cap must be >= 1")
         if self.run_timeout_s < 1:
@@ -221,22 +244,17 @@ class BackgammonRunner(AgentRunner):
             if self.cost_target_usd >= self.cost_limit_usd:
                 raise ValueError("cost_target_usd must be < cost_limit_usd")
 
-        # Budget guards are layered (19-07-26-0913 audit):
-        # - cost_limit_usd alone arms the accrued `part.cost` kill (proven 15-07 at $11.80).
-        # - The worst-case RESERVATION guards additionally arm only when an output-token
-        #   clamp bounds a step: one-step lookahead needs max_output_tokens; the
-        #   whole-attempt reservation also needs max_steps_per_attempt. An un-clamped
-        #   run (no max_output_tokens) relies on the accrued kill + the proxy hard cap —
-        #   the 8192 clamp is NOT a required budget lever (it guillotined HIGH-effort
-        #   whole-file turns at finish=length; see the audit).
-        if self.cost_limit_usd is not None and self.max_output_tokens is not None:
+        # Single-meter budget design: proxy ledger is authoritative. The adapter keeps
+        # only a conservative fallback *estimate* for attempt-cost forecasting.
+        if (
+            self.cost_limit_usd is not None
+            and self.max_output_tokens is not None
+            and self.max_steps_per_attempt is not None
+        ):
             self._effective_output_price_per_1m = self._resolve_output_price_per_1m(
                 model=self.model,
                 explicit_output_price_per_1m=self.output_price_per_1m,
             )
-            # Free/free rows intentionally resolve to zero reservation/headroom.
-            # In that case cost_limit_usd enforcement remains the accrued `part.cost`
-            # boundary from _cost_limit_exceeded + proxy hard cap.
             cache_write_price_per_1m = self._resolve_cache_write_price_per_1m(
                 model=self.model,
                 fallback_price_per_1m=self._effective_output_price_per_1m,
@@ -244,21 +262,13 @@ class BackgammonRunner(AgentRunner):
             self._cache_write_allowance_usd = (
                 float(self.max_output_tokens) * cache_write_price_per_1m / 1_000_000.0
             )
-            self._one_step_worst_case_usd = self._worst_case_reservation_usd(
-                max_steps=1,
+            self._fallback_attempt_estimate_usd = self._worst_case_reservation_usd(
+                max_steps=self.max_steps_per_attempt,
                 max_output_tokens=self.max_output_tokens,
                 output_price_per_1m=self._effective_output_price_per_1m,
                 safety_factor=_RESERVATION_SAFETY_FACTOR,
-                cache_write_allowance_usd=0.0,
+                cache_write_allowance_usd=self._cache_write_allowance_usd,
             )
-            if self.max_steps_per_attempt is not None:
-                self._reservation_usd = self._worst_case_reservation_usd(
-                    max_steps=self.max_steps_per_attempt,
-                    max_output_tokens=self.max_output_tokens,
-                    output_price_per_1m=self._effective_output_price_per_1m,
-                    safety_factor=_RESERVATION_SAFETY_FACTOR,
-                    cache_write_allowance_usd=self._cache_write_allowance_usd,
-                )
 
         allowed_reasoning_efforts = {"minimal", "low", "medium", "high", "xhigh", "none"}
         if self.reasoning_effort is not None and self.reasoning_effort not in allowed_reasoning_efforts:
@@ -337,14 +347,17 @@ class BackgammonRunner(AgentRunner):
         output_tokens_total = 0
         turns_total = 0
         events_path = Path(f"{worktree}.events.jsonl")
+        user_events_path = Path(f"{worktree}.user-events.jsonl")
 
         attempt_reports: list[dict[str, Any]] = []
         final_report: dict[str, Any] = {}
         verdict = "FAIL"
         attempts_to_green: int | str = "FAIL"
+        termination_reason = "pending"
 
         worker_killed_reason: str | None = None
-        budget_stop_reason: str | None = None
+        observed_attempt_costs: list[float] = []
+        attempt_costs_usd: dict[int, float] = {}
         active_cell: DockerCell | None = None
         cell_context: Any = nullcontext()
 
@@ -441,15 +454,27 @@ class BackgammonRunner(AgentRunner):
                     phase="initial",
                     cumulative_cost_usd=cell_cost_usd,
                 )
-                if self._refuse_invocation_by_reservation(
+
+                budget_decision = self._budget_decision_for_attempt(
                     run_label=run_label,
-                    phase="initial",
-                    accrued_cost_usd=cell_cost_usd,
-                ):
-                    budget_stop_reason = "cost_reservation_refused"
+                    attempt=1,
+                    observed_attempt_costs=observed_attempt_costs,
+                )
+                if budget_decision == "harness_error":
+                    verdict = "FAIL"
+                    attempts_to_green = "FAIL"
+                    termination_reason = "harness_error"
+                elif budget_decision == "budget_stop":
                     verdict = "BUDGET_STOP"
                     attempts_to_green = "BUDGET_STOP"
+                    termination_reason = "attempts_exhausted_by_budget"
                 else:
+                    self._append_user_event(
+                        run_label=run_label,
+                        sidecar_path=user_events_path,
+                        attempt=1,
+                        text=task_prompt,
+                    )
                     self._write_worker_permission_config(worktree=worktree)
                     first_run = self._run_opencode(
                         cmd=active_cell.exec_argv(initial_inner),
@@ -462,6 +487,8 @@ class BackgammonRunner(AgentRunner):
                         prior_cost_usd=cell_cost_usd,
                         kill_hook=active_cell.force_kill,
                     )
+                    attempt_costs_usd[1] = first_run.cost_usd
+                    observed_attempt_costs.append(first_run.cost_usd)
                     cell_cost_usd += first_run.cost_usd
                     session_id = first_run.session_id
                     input_tokens_total += first_run.input_tokens
@@ -476,12 +503,22 @@ class BackgammonRunner(AgentRunner):
                         f"session_id={session_id or 'none'} cost_usd={first_run.cost_usd:.4f} "
                         f"cell_cost_usd={cell_cost_usd:.4f}"
                     )
-                    if first_run.killed_reason in _BUDGET_STOP_REASONS:
-                        budget_stop_reason = first_run.killed_reason
+
+                    if first_run.budget_stop_detected:
                         verdict = "BUDGET_STOP"
                         attempts_to_green = "BUDGET_STOP"
+                        termination_reason = "budget_stop_mid_attempt"
+                    elif (
+                        first_run.exit_code not in (0, None)
+                        and first_run.killed_reason not in _HARNESS_LIMIT_REASONS
+                    ):
+                        verdict = "FAIL"
+                        attempts_to_green = "FAIL"
+                        termination_reason = "harness_error"
+            else:
+                attempt_costs_usd[1] = 0.0
 
-            if budget_stop_reason is None:
+            if termination_reason == "pending":
                 for attempt in range(1, self.max_attempts + 1):
                     report_json = run_dir / f"attempt-{attempt}-report.json"
                     gate_log = run_dir / f"attempt-{attempt}-gate.log"
@@ -508,6 +545,7 @@ class BackgammonRunner(AgentRunner):
                             "conformed": conformed,
                             "n_problems": len(problems),
                             "failed_gates": failed_gates,
+                            "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
                         }
                     )
                     self._progress(
@@ -518,118 +556,162 @@ class BackgammonRunner(AgentRunner):
                     if attempt_verdict == "PASS":
                         verdict = "PASS"
                         attempts_to_green = attempt - 1
+                        termination_reason = "gates_green"
                         break
 
-                    if worker_killed_reason is not None:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
-                            f"reason=container-dead killed={worker_killed_reason}"
-                        )
-                        if worker_killed_reason in _BUDGET_STOP_REASONS:
-                            budget_stop_reason = worker_killed_reason
-                            verdict = "BUDGET_STOP"
-                            attempts_to_green = "BUDGET_STOP"
-                        else:
-                            verdict = "FAIL"
-                            attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    if attempt >= self.max_attempts:
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "attempt_ceiling_reached"
                         break
 
-                    if attempt < self.max_attempts:
-                        if self.mock is not None:
-                            self._progress(
-                                f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
-                            )
-                            continue
-
-                        if active_cell is None:
-                            raise RuntimeError("feedback loop requires an active docker cell")
-
-                        if not session_id:
-                            raise RuntimeError("feedback loop requires a session_id, but none was captured")
-
-                        feedback_checks = [
-                            str(p.get("check", "")).strip()
-                            for p in problems
-                            if isinstance(p, dict) and str(p.get("check", "")).strip()
-                        ]
-                        feedback = self._build_feedback_prompt(checks=feedback_checks)
+                    if worker_killed_reason in _HARNESS_LIMIT_REASONS:
                         self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
-                            f"checks={len(feedback_checks)}"
+                            f"PROGRESS run_label={run_label} step=attempt-harness-limit attempt={attempt} "
+                            f"reason={worker_killed_reason} decision=continue_if_budget"
                         )
+                    elif worker_killed_reason is not None:
                         self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
-                            f"problem_count={len(problems)} session_id={session_id}"
+                            f"PROGRESS run_label={run_label} step=attempt-harness-limit attempt={attempt} "
+                            f"reason={worker_killed_reason} decision=stop"
                         )
-                        feedback_inner = [
-                            "opencode",
-                            "run",
-                            feedback,
-                            "--session",
-                            session_id,
-                            "--dir",
-                            "/work",
-                            "--format",
-                            "json",
-                        ]
-                        if pure:
-                            feedback_inner.append("--pure")
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "harness_error"
+                        break
 
-                        self._emit_cost_target_warning_if_reached(
-                            run_label=run_label,
-                            phase=f"feedback-{attempt}",
-                            cumulative_cost_usd=cell_cost_usd,
-                        )
-                        if self._refuse_invocation_by_reservation(
-                            run_label=run_label,
-                            phase=f"feedback-{attempt}",
-                            accrued_cost_usd=cell_cost_usd,
-                        ):
-                            budget_stop_reason = "cost_reservation_refused"
-                            verdict = "BUDGET_STOP"
-                            attempts_to_green = "BUDGET_STOP"
-                            break
-
-                        self._write_worker_permission_config(worktree=worktree)
-
-                        feedback_run = self._run_opencode(
-                            cmd=active_cell.exec_argv(feedback_inner),
-                            worktree=worktree,
-                            events_path=events_path,
-                            env=run_env,
-                            run_label=run_label,
-                            phase=f"feedback-{attempt}",
-                            fallback_session_id=session_id,
-                            prior_cost_usd=cell_cost_usd,
-                            kill_hook=active_cell.force_kill,
-                        )
-                        cell_cost_usd += feedback_run.cost_usd
-                        if feedback_run.session_id:
-                            session_id = feedback_run.session_id
-
-                        input_tokens_total += feedback_run.input_tokens
-                        output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
-                        turns_total += feedback_run.turns
-                        if feedback_run.killed_reason:
-                            worker_killed_reason = feedback_run.killed_reason
-                            if feedback_run.killed_reason in _BUDGET_STOP_REASONS:
-                                budget_stop_reason = feedback_run.killed_reason
+                    if self.mock is not None:
                         self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
-                            f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
-                            f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
-                            f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens} "
-                            f"cost_usd={feedback_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
+                            f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
                         )
-                        if budget_stop_reason is not None:
-                            verdict = "BUDGET_STOP"
-                            attempts_to_green = "BUDGET_STOP"
-                            break
                         continue
 
-                    verdict = "FAIL"
-                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                    break
+                    if active_cell is None:
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
+                            "reason=active_cell_missing"
+                        )
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "harness_error"
+                        break
+
+                    if not session_id:
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
+                            "reason=session_id_missing"
+                        )
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "harness_error"
+                        break
+
+                    next_attempt = attempt + 1
+                    budget_decision = self._budget_decision_for_attempt(
+                        run_label=run_label,
+                        attempt=next_attempt,
+                        observed_attempt_costs=observed_attempt_costs,
+                    )
+                    if budget_decision == "harness_error":
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "harness_error"
+                        break
+                    if budget_decision == "budget_stop":
+                        verdict = "BUDGET_STOP"
+                        attempts_to_green = "BUDGET_STOP"
+                        termination_reason = "attempts_exhausted_by_budget"
+                        break
+
+                    feedback_checks = [
+                        str(p.get("check", "")).strip()
+                        for p in problems
+                        if isinstance(p, dict) and str(p.get("check", "")).strip()
+                    ]
+                    feedback = self._build_feedback_prompt(checks=feedback_checks)
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
+                        f"checks={len(feedback_checks)}"
+                    )
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
+                        f"problem_count={len(problems)} session_id={session_id}"
+                    )
+                    feedback_inner = [
+                        "opencode",
+                        "run",
+                        feedback,
+                        "--session",
+                        session_id,
+                        "--dir",
+                        "/work",
+                        "--format",
+                        "json",
+                    ]
+                    if pure:
+                        feedback_inner.append("--pure")
+
+                    self._emit_cost_target_warning_if_reached(
+                        run_label=run_label,
+                        phase=f"feedback-{attempt}",
+                        cumulative_cost_usd=cell_cost_usd,
+                    )
+
+                    self._append_user_event(
+                        run_label=run_label,
+                        sidecar_path=user_events_path,
+                        attempt=next_attempt,
+                        text=feedback,
+                    )
+
+                    self._write_worker_permission_config(worktree=worktree)
+
+                    feedback_run = self._run_opencode(
+                        cmd=active_cell.exec_argv(feedback_inner),
+                        worktree=worktree,
+                        events_path=events_path,
+                        env=run_env,
+                        run_label=run_label,
+                        phase=f"feedback-{attempt}",
+                        fallback_session_id=session_id,
+                        prior_cost_usd=cell_cost_usd,
+                        kill_hook=active_cell.force_kill,
+                    )
+                    attempt_costs_usd[next_attempt] = feedback_run.cost_usd
+                    observed_attempt_costs.append(feedback_run.cost_usd)
+                    cell_cost_usd += feedback_run.cost_usd
+                    if feedback_run.session_id:
+                        session_id = feedback_run.session_id
+
+                    input_tokens_total += feedback_run.input_tokens
+                    output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
+                    turns_total += feedback_run.turns
+                    worker_killed_reason = feedback_run.killed_reason
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
+                        f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
+                        f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
+                        f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens} "
+                        f"cost_usd={feedback_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
+                    )
+                    if feedback_run.budget_stop_detected:
+                        verdict = "BUDGET_STOP"
+                        attempts_to_green = "BUDGET_STOP"
+                        termination_reason = "budget_stop_mid_attempt"
+                        break
+                    if (
+                        feedback_run.exit_code not in (0, None)
+                        and feedback_run.killed_reason not in _HARNESS_LIMIT_REASONS
+                    ):
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "harness_error"
+                        break
+
+        if termination_reason == "pending":
+            verdict = "FAIL"
+            attempts_to_green = "FAIL"
+            termination_reason = "harness_error"
 
         wall_seconds = time.monotonic() - started
         problems_final = self._normalize_problems(final_report.get("problems"))
@@ -643,6 +725,7 @@ class BackgammonRunner(AgentRunner):
         cheat_detail = cheat_finding.summary()
         if cheated:
             verdict = "CHEAT"
+            termination_reason = "cheat_detected"
             cheat_marker = run_dir / "CHEAT.json"
             cheat_marker.write_text(
                 json.dumps(
@@ -679,9 +762,13 @@ class BackgammonRunner(AgentRunner):
                 f"hits={len(cheat_finding.hits)} summary={cheat_detail} marker={cheat_marker}"
             )
 
+        if attempt_reports:
+            attempt_reports[-1]["termination_reason"] = termination_reason
+
         return BackgammonCellResult(
             verdict=verdict,
             attempts_to_green=attempts_to_green,
+            termination_reason=termination_reason,
             conformed=bool(final_report.get("conformed", False)),
             input_tokens=input_tokens_total,
             output_tokens=output_tokens_total,
@@ -944,6 +1031,8 @@ class BackgammonRunner(AgentRunner):
             "max_input": 0,
             "sum_cost": 0.0,
             "completed_at": None,
+            "budget_stop_detected": False,
+            "budget_stop_signature": None,
         }
         stderr_tail: collections.deque[str] = collections.deque(maxlen=120)
         reader_failures: list[str] = []
@@ -972,6 +1061,16 @@ class BackgammonRunner(AgentRunner):
                         try:
                             event = json.loads(line)
                         except json.JSONDecodeError:
+                            if self._line_indicates_budget_stop(line):
+                                line_fp = self._fingerprint_text(line)
+                                with state_lock:
+                                    state["budget_stop_detected"] = True
+                                    if not state["budget_stop_signature"]:
+                                        state["budget_stop_signature"] = f"stdout_line_fp={line_fp}"
+                                self._progress(
+                                    f"PROGRESS run_label={run_label} step=budget-stop-detected phase={phase} "
+                                    f"source=stdout-unparsed line_fp={line_fp}"
+                                )
                             continue
 
                         sid = event.get("sessionID")
@@ -980,6 +1079,18 @@ class BackgammonRunner(AgentRunner):
                                 state["session_id"] = str(sid)
 
                         event_type = event.get("type")
+                        if event_type == "error":
+                            signal = self._budget_stop_signature_from_event(event)
+                            if signal is not None:
+                                with state_lock:
+                                    state["budget_stop_detected"] = True
+                                    if not state["budget_stop_signature"]:
+                                        state["budget_stop_signature"] = signal
+                                self._progress(
+                                    f"PROGRESS run_label={run_label} step=budget-stop-detected phase={phase} "
+                                    f"source=event-error signal={signal}"
+                                )
+                            continue
                         if event_type == "step_start":
                             with state_lock:
                                 state["completed_at"] = None
@@ -1019,6 +1130,16 @@ class BackgammonRunner(AgentRunner):
                     for line in proc.stderr:
                         text = line.rstrip("\n")
                         stderr_tail.append(text)
+                        if self._line_indicates_budget_stop(text):
+                            line_fp = self._fingerprint_text(text)
+                            with state_lock:
+                                state["budget_stop_detected"] = True
+                                if not state["budget_stop_signature"]:
+                                    state["budget_stop_signature"] = f"stderr_line_fp={line_fp}"
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=budget-stop-detected phase={phase} "
+                                f"source=stderr line_fp={line_fp}"
+                            )
                         self._progress(
                             f"PROGRESS run_label={run_label} step=worker-stderr phase={phase} line={text}"
                         )
@@ -1125,22 +1246,6 @@ class BackgammonRunner(AgentRunner):
                     self._kill_process_group(proc)
                     run_kill_hook(reason="token_cap")
                     break
-                if self._cost_limit_exceeded(
-                    prior_cost_usd=prior_cost_usd,
-                    sum_cost=sum_cost,
-                    one_step_worst_case_usd=self._one_step_worst_case_usd,
-                    limit=self.cost_limit_usd,
-                ):
-                    killed_reason = "cost_limit"
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=worker-kill phase={phase} "
-                        f"reason=cost_limit cumulative_cost_usd={cumulative_cost:.4f} "
-                        f"one_step_worst_case_usd={self._one_step_worst_case_usd:.4f} "
-                        f"limit_usd={self.cost_limit_usd:.4f}"
-                    )
-                    self._kill_process_group(proc)
-                    run_kill_hook(reason="cost_limit")
-                    break
                 time.sleep(2.0)
 
             if proc.poll() is None:
@@ -1175,12 +1280,24 @@ class BackgammonRunner(AgentRunner):
             output_tokens = self._to_int(state["sum_output"])
             reasoning_tokens = self._to_int(state["sum_reasoning"])
             cost_usd = float(state["sum_cost"])
+            budget_stop_detected = bool(state.get("budget_stop_detected", False))
+            budget_stop_signature = state.get("budget_stop_signature")
 
         if exit_code not in (0, None) and stderr_tail:
             self._progress(
                 f"PROGRESS run_label={run_label} step=worker-nonzero phase={phase} exit={exit_code} "
                 f"stderr_tail={' | '.join(stderr_tail)}"
             )
+
+        if not budget_stop_detected and stderr_tail:
+            stderr_blob = "\n".join(stderr_tail)
+            if self._line_indicates_budget_stop(stderr_blob):
+                budget_stop_detected = True
+                budget_stop_signature = f"stderr_tail_fp={self._fingerprint_text(stderr_blob)}"
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=budget-stop-detected phase={phase} "
+                    f"source=stderr-tail signal={budget_stop_signature}"
+                )
 
         return _OpencodeRunStats(
             input_tokens=input_tokens,
@@ -1191,6 +1308,8 @@ class BackgammonRunner(AgentRunner):
             killed_reason=killed_reason,
             exit_code=exit_code,
             cost_usd=cost_usd,
+            budget_stop_detected=budget_stop_detected,
+            budget_stop_signature=None if budget_stop_signature is None else str(budget_stop_signature),
         )
 
     def _emit_cost_target_warning_if_reached(
@@ -1210,27 +1329,168 @@ class BackgammonRunner(AgentRunner):
             f"target_usd={self.cost_target_usd:.4f}"
         )
 
-    def _refuse_invocation_by_reservation(
+    def _append_user_event(
         self,
         *,
         run_label: str,
-        phase: str,
-        accrued_cost_usd: float,
-    ) -> bool:
-        if self.cost_limit_usd is None:
-            return False
-        if not self._reservation_would_exceed(
-            accrued_usd=accrued_cost_usd,
-            reservation_usd=self._reservation_usd,
-            limit_usd=self.cost_limit_usd,
-        ):
-            return False
+        sidecar_path: Path,
+        attempt: int,
+        text: str,
+    ) -> None:
+        payload = {
+            "type": "user",
+            "timestamp": int(time.time() * 1000),
+            "attempt": int(attempt),
+            "text": str(text),
+        }
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        with sidecar_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
         self._progress(
-            f"PROGRESS run_label={run_label} step=worker-launch-refused phase={phase} "
-            f"reason=cost_reservation_refused accrued_cost_usd={accrued_cost_usd:.4f} "
-            f"reservation_usd={self._reservation_usd:.4f} limit_usd={self.cost_limit_usd:.4f}"
+            f"PROGRESS run_label={run_label} step=user-event-sidecar attempt={attempt} "
+            f"chars={len(text)} text_fp={self._fingerprint_text(text)} path={sidecar_path}"
         )
-        return True
+
+    def _budget_decision_for_attempt(
+        self,
+        *,
+        run_label: str,
+        attempt: int,
+        observed_attempt_costs: list[float],
+    ) -> str:
+        estimate_usd = self._estimate_full_attempt_cost_usd(
+            observed_attempt_costs,
+            fallback_usd=self._fallback_attempt_estimate_usd,
+        )
+        checkpoint_path = self._proxy_checkpoint_path()
+
+        if checkpoint_path is None:
+            if self.cost_limit_usd is None:
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=budget-decision attempt={attempt} "
+                    f"decision=allow source=unbounded remaining_usd=inf estimate_attempt_usd={estimate_usd:.6f}"
+                )
+                return "allow"
+            self._progress(
+                f"PROGRESS run_label={run_label} step=budget-decision attempt={attempt} "
+                f"decision=harness_error reason=missing_checkpoint_env env={_PROXY_CHECKPOINT_ENV} "
+                f"estimate_attempt_usd={estimate_usd:.6f}"
+            )
+            return "harness_error"
+
+        try:
+            snapshot = self._read_proxy_budget_snapshot(checkpoint_path=checkpoint_path)
+        except Exception as exc:  # noqa: BLE001 - classified as harness_error upstream.
+            self._progress(
+                f"PROGRESS run_label={run_label} step=budget-decision attempt={attempt} "
+                f"decision=harness_error reason=checkpoint_read_error checkpoint={checkpoint_path} "
+                f"error_fp={self._fingerprint_text(str(exc))}"
+            )
+            return "harness_error"
+
+        decision = "allow" if snapshot.remaining_usd >= estimate_usd else "budget_stop"
+        configured_cap = "none" if self.cost_limit_usd is None else f"{self.cost_limit_usd:.6f}"
+        self._progress(
+            f"PROGRESS run_label={run_label} step=budget-decision attempt={attempt} decision={decision} "
+            f"remaining_usd={snapshot.remaining_usd:.6f} estimate_attempt_usd={estimate_usd:.6f} "
+            f"hard_cap_usd={snapshot.hard_cap_usd:.6f} accrued_actual_usd={snapshot.accrued_actual_usd:.6f} "
+            f"committed_unproven_usd={snapshot.committed_unproven_usd:.6f} cost_limit_usd={configured_cap} "
+            f"checkpoint={snapshot.checkpoint_path}"
+        )
+        return decision
+
+    @staticmethod
+    def _proxy_checkpoint_path() -> Path | None:
+        raw = os.environ.get(_PROXY_CHECKPOINT_ENV, "").strip()
+        if not raw:
+            return None
+        return Path(raw).expanduser().resolve()
+
+    @staticmethod
+    def _estimate_full_attempt_cost_usd(observed_attempt_costs: list[float], fallback_usd: float = 0.0) -> float:
+        observed_max = 0.0
+        for value in observed_attempt_costs:
+            if isinstance(value, (int, float)):
+                observed_max = max(observed_max, float(value))
+        return max(observed_max, float(fallback_usd), 0.0)
+
+    def _read_proxy_budget_snapshot(self, *, checkpoint_path: Path) -> _ProxyBudgetSnapshot:
+        if not checkpoint_path.is_file():
+            raise RuntimeError(f"proxy checkpoint missing: {checkpoint_path}")
+
+        last_error: Exception | None = None
+        for _ in range(3):
+            try:
+                payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise RuntimeError("proxy checkpoint payload is not an object")
+                hard_cap_usd = float(payload["hard_cap_usd"])
+                accrued_actual_usd = float(payload["accrued_actual_usd"])
+                committed_unproven_usd = float(payload["committed_unproven_usd"])
+                remaining_usd = hard_cap_usd - accrued_actual_usd - committed_unproven_usd
+                return _ProxyBudgetSnapshot(
+                    hard_cap_usd=hard_cap_usd,
+                    accrued_actual_usd=accrued_actual_usd,
+                    committed_unproven_usd=committed_unproven_usd,
+                    remaining_usd=remaining_usd,
+                    checkpoint_path=str(checkpoint_path),
+                )
+            except Exception as exc:  # noqa: BLE001 - retries for concurrent writes.
+                last_error = exc
+                time.sleep(0.1)
+
+        raise RuntimeError(
+            f"failed reading proxy checkpoint {checkpoint_path}: {last_error}"
+        )
+
+    @staticmethod
+    def _line_indicates_budget_stop(text: str) -> bool:
+        lower = str(text).lower()
+        if "budget_exceeded" in lower or "insufficient_quota" in lower:
+            return True
+        if "statuscode\":402" in lower or "status code: 402" in lower or "status=402" in lower:
+            return True
+        if "reservation would exceed hard cap" in lower:
+            return True
+        return False
+
+    def _budget_stop_signature_from_event(self, event: dict[str, Any]) -> str | None:
+        if str(event.get("type", "")).strip().lower() != "error":
+            return None
+        error_block = event.get("error") if isinstance(event.get("error"), dict) else {}
+        data = error_block.get("data") if isinstance(error_block.get("data"), dict) else {}
+        status_code = self._to_int(data.get("statusCode"))
+        message = str(data.get("message", ""))
+        response_body = str(data.get("responseBody", ""))
+
+        error_type = ""
+        error_code = ""
+        if response_body:
+            try:
+                body_payload = json.loads(response_body)
+            except json.JSONDecodeError:
+                body_payload = None
+            if isinstance(body_payload, dict):
+                body_error = body_payload.get("error") if isinstance(body_payload.get("error"), dict) else {}
+                error_type = str(body_error.get("type", "")).strip()
+                error_code = str(body_error.get("code", "")).strip()
+                if not message:
+                    message = str(body_error.get("message", ""))
+
+        haystack = " ".join((message, response_body, error_type, error_code)).lower()
+        if status_code == 402 or "budget_exceeded" in haystack or "insufficient_quota" in haystack:
+            return (
+                f"status_code={status_code or 'none'} "
+                f"error_type={error_type or 'none'} "
+                f"error_code={error_code or 'none'} "
+                f"message_fp={self._fingerprint_text(message)} "
+                f"body_fp={self._fingerprint_text(response_body)}"
+            )
+        return None
+
+    @staticmethod
+    def _fingerprint_text(text: str) -> str:
+        return hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:8]
 
     @staticmethod
     def _model_id_from_selector(model: str) -> str:
@@ -1277,14 +1537,6 @@ class BackgammonRunner(AgentRunner):
         return float(fallback_price_per_1m)
 
     @staticmethod
-    def _reservation_would_exceed(
-        accrued_usd: float,
-        reservation_usd: float,
-        limit_usd: float | None,
-    ) -> bool:
-        return limit_usd is not None and (accrued_usd + reservation_usd) > limit_usd
-
-    @staticmethod
     def _worst_case_reservation_usd(
         max_steps: int,
         max_output_tokens: int,
@@ -1320,15 +1572,6 @@ class BackgammonRunner(AgentRunner):
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             return
-
-    @staticmethod
-    def _cost_limit_exceeded(
-        prior_cost_usd: float,
-        sum_cost: float,
-        one_step_worst_case_usd: float,
-        limit: float | None,
-    ) -> bool:
-        return limit is not None and (prior_cost_usd + sum_cost + one_step_worst_case_usd) > limit
 
     def _progress(self, message: str) -> None:
         self._progress_cb(message)

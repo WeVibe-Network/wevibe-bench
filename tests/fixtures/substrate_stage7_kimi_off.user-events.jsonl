@@ -1,0 +1,3 @@
+{"type":"user","timestamp":1784670198600,"attempt":1,"text":"Build a Node+TypeScript backgammon game passing the CONTRACT gates."}
+{"type":"user","timestamp":1784670955000,"attempt":2,"text":"Problems only: expose reverseMove from src/game.ts and make server import wiring compile."}
+{"type":"user","timestamp":1784672055000,"attempt":3,"text":"Problems only: fix remaining Node 22 launch-path and gate-failure issues only."}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import shlex
 import sys
 from typing import Any
 
@@ -186,8 +187,11 @@ def _stats(
     total_tokens: float = 100000.0,
     max_attempts: int = 3,
     wall_seconds: float = 1000.0,
+    turns: float = 50.0,
+    cost_usd: float = 1.0,
+    termination_reason: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    stats = {
         "verdict": verdict,
         "scored": True,
         "conformed": conformed,
@@ -195,10 +199,13 @@ def _stats(
         "failed_gates": list(failed_gates or []),
         "max_attempts": max_attempts,
         "total_tokens": total_tokens,
-        "turns": 50.0,
+        "turns": turns,
         "wall_seconds": wall_seconds,
-        "cost_usd": 1.0,
+        "cost_usd": cost_usd,
     }
+    if termination_reason is not None:
+        stats["termination_reason"] = termination_reason
+    return stats
 
 
 def _synthetic_entry(cell: dict[str, Any], rep: int, **stats_kwargs: Any) -> dict[str, Any]:
@@ -336,8 +343,11 @@ def test_rung_params_validation(tmp_path: pathlib.Path) -> None:
 # Stats extraction / sentinel handling
 
 
-@pytest.mark.parametrize("sentinel", ["FAIL", "BUDGET_STOP"])
-def test_extract_stats_preserves_attempt_sentinels(sentinel: str) -> None:
+@pytest.mark.parametrize(
+    ("sentinel", "expected_verdict"),
+    [("FAIL", "FAIL"), ("BUDGET_STOP", "BUDGET_STOP")],
+)
+def test_extract_stats_preserves_attempt_sentinels(sentinel: str, expected_verdict: str) -> None:
     scorecard = {
         "cells": [
             {
@@ -363,7 +373,43 @@ def test_extract_stats_preserves_attempt_sentinels(sentinel: str) -> None:
 
     stats = bl._extract_stats(scorecard, detail)
     assert stats["attempts_to_green"] == sentinel
-    assert stats["verdict"] == "FAIL"
+    assert stats["verdict"] == expected_verdict
+
+
+def test_extract_stats_preserves_scorecard_budget_stop_termination_reason() -> None:
+    scorecard = {
+        "cells": [
+            {
+                "resolved": False,
+                "scored": True,
+                "verdict": "BUDGET_STOP",
+                "termination_reason": "budget_stop_mid_attempt",
+                "total_tokens": 12345.0,
+                "turns": 18.0,
+                "wall_seconds": 99.0,
+                "wall_cost_usd": 0.75,
+            }
+        ],
+        "manifest": {"config": {"max_attempts": 3}},
+    }
+    detail = {
+        "cells": [
+            {
+                "conformed": False,
+                "attempts_to_green": "BUDGET_STOP",
+                "failed_gates": [],
+            }
+        ]
+    }
+
+    stats = bl._extract_stats(scorecard, detail)
+    assert stats["verdict"] == "BUDGET_STOP"
+    assert stats["termination_reason"] == "budget_stop_mid_attempt"
+
+
+def test_attempts_numeric_handles_new_sentinels_gracefully() -> None:
+    assert bl._attempts_numeric("DID_NOT_CONFORM") is None
+    assert bl._attempts_numeric("attempt_ceiling_reached") is None
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +419,7 @@ def test_extract_stats_preserves_attempt_sentinels(sentinel: str) -> None:
 def test_classify_mapping() -> None:
     assert bl._classify(_stats(verdict="PASS", attempts=1)) == "CEILING"
     assert bl._classify(_stats(verdict="PASS", attempts=3)) == "BRACKET"
+    assert bl._classify(_stats(verdict="BUDGET_STOP", attempts="BUDGET_STOP")) == "BRACKET"
     assert bl._classify(_stats(verdict="FAIL", conformed=True)) == "BRACKET"
     assert bl._classify(_stats(verdict="FAIL", conformed=False)) == "FLOOR"
 
@@ -534,8 +581,62 @@ def test_scan_delivery() -> None:
 def test_majority_and_median() -> None:
     assert bl._majority_verdict(["PASS", "FAIL", "PASS"]) == "PASS"
     assert bl._majority_verdict(["PASS", "FAIL"]) == "FAIL"
+    assert bl._majority_verdict(["BUDGET_STOP", "BUDGET_STOP", "FAIL"]) == "BUDGET_STOP"
+    assert bl._majority_verdict(["PASS", "FAIL", "BUDGET_STOP"]) == "FAIL"
     assert bl._median([3.0, 1.0, 2.0]) == 2.0
     assert bl._median([]) == 0.0
+
+
+def test_reconciled_cost_limit_prefers_proxy_cap() -> None:
+    cap_usd, reconciled_from = bl._reconciled_cost_limit_usd({"cap_usd": 2.7, "cost_limit": 2.4})
+    assert cap_usd == pytest.approx(2.7)
+    assert reconciled_from == pytest.approx(2.4)
+
+    cap_usd, reconciled_from = bl._reconciled_cost_limit_usd({"cap_usd": 2.7, "cost_limit": 2.7})
+    assert cap_usd == pytest.approx(2.7)
+    assert reconciled_from is None
+
+
+def test_build_session_extra_flags_uses_binding_cap_for_cost_limit() -> None:
+    flags = bl._build_session_extra_flags(
+        {"cost_target": 1.5, "output_price_per_1m": None},
+        pathlib.Path("/tmp/proxy-token"),
+        8789,
+        binding_cap_usd=2.7,
+    )
+    parts = shlex.split(flags)
+    assert parts[parts.index("--cost-limit") + 1] == "2.700000"
+    assert parts[parts.index("--cost-target") + 1] == "1.500000"
+
+
+def test_build_inner_env_sets_proxy_checkpoint_path(monkeypatch: Any) -> None:
+    monkeypatch.setenv("WEVIBE_TEST_SENTINEL", "x")
+    env = bl._build_inner_env(pathlib.Path("/tmp/proxy-cp.json"))
+    assert env["WEVIBE_TEST_SENTINEL"] == "x"
+    assert env["WEVIBE_BENCH_PROXY_CHECKPOINT"] == "/tmp/proxy-cp.json"
+
+
+def test_summarize_cell_uses_true_median_and_proxy_accrued_cost() -> None:
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    entries = [
+        _synthetic_entry(cell, 1, wall_seconds=1628.5, total_tokens=120000.0),
+        _synthetic_entry(cell, 2, wall_seconds=1830.19, total_tokens=130000.0),
+        _synthetic_entry(cell, 3, wall_seconds=1972.44, total_tokens=140000.0),
+    ]
+    # Deliberately disagreeing non-authoritative wall costs in stats must be ignored.
+    entries[0]["stats"]["cost_usd"] = 9.9
+    entries[1]["stats"]["cost_usd"] = 8.8
+    entries[2]["stats"]["cost_usd"] = 7.7
+
+    # Authoritative cost meter is proxy-accrued_usd on checkpoint entries.
+    entries[0]["accrued_usd"] = 1.20001
+    entries[1]["accrued_usd"] = 1.66286
+    entries[2]["accrued_usd"] = 2.40042
+
+    summary = bl._summarize_cell(cell, entries)
+    assert summary["median_wall_seconds"] == pytest.approx(1830.19)
+    assert summary["median_wall_seconds"] != pytest.approx(1628.5)
+    assert summary["median_cost_usd"] == pytest.approx(1.66286)
 
 
 # ---------------------------------------------------------------------------
@@ -965,6 +1066,28 @@ def test_dry_run_prints_plan_without_execution(tmp_path: pathlib.Path, monkeypat
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "big-pickle" in out and "claude-opus-4.8" in out
+    rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    assert rows
+    assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
+    assert all(row["binding_budget_usd"] is None for row in rows)
+
+
+def test_dry_run_with_rung_params_discloses_binding_budget(tmp_path: pathlib.Path, monkeypatch: Any, capsys: Any) -> None:
+    def _boom(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("must not execute cells in dry-run")
+
+    monkeypatch.setattr(bl, "_run_cell_rep", _boom)
+    params_path = _write_rung_params(tmp_path)
+    exit_code = _invoke_main(
+        monkeypatch,
+        ["--runs-dir", str(tmp_path), "--rung-params", str(params_path), "--dry-run"],
+    )
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    assert rows
+    assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
+    assert all(float(row["binding_budget_usd"]) == pytest.approx(2.0) for row in rows)
 
 
 def test_fresh_run_writes_manifest_and_runs_all_cells(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
@@ -1085,6 +1208,44 @@ def test_valid_resume_skips_completed_and_proceeds(tmp_path: pathlib.Path, monke
     )
     assert exit_code == 0
     assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1)]
+
+
+def test_checkpoint_round_trip_accepts_new_and_historical_entry_shapes(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+) -> None:
+    plan = bl._build_plan()
+    params = _rung_params_payload()
+    bl._save_json_atomic(tmp_path / bl.MANIFEST_NAME, bl._build_manifest(plan, params, "seed"))
+
+    new_shape = _synthetic_entry(
+        plan[0],
+        1,
+        verdict="BUDGET_STOP",
+        attempts="BUDGET_STOP",
+        termination_reason="attempts_exhausted_by_budget",
+    )
+    old_shape = _synthetic_entry(plan[1], 1)
+    old_shape["stats"].pop("termination_reason", None)
+
+    bl._save_json_atomic(tmp_path / bl.CHECKPOINT_NAME, {"cells": [new_shape, old_shape]})
+    loaded = bl._load_checkpoint(tmp_path / bl.CHECKPOINT_NAME)
+    assert len(loaded["cells"]) == 2
+    by_run = {int(entry["run_number"]): entry for entry in loaded["cells"]}
+    assert by_run[1]["stats"]["termination_reason"] == "attempts_exhausted_by_budget"
+    assert "termination_reason" not in by_run[2]["stats"]
+
+    recorder: list[tuple[int, int]] = []
+    _patch_execution(monkeypatch, recorder)
+    params_path = tmp_path / "rung-params.json"
+    params_path.write_text(json.dumps(params), encoding="utf-8")
+
+    exit_code = _invoke_main(
+        monkeypatch,
+        ["--runs-dir", str(tmp_path), "--rung-params", str(params_path), "--resume"],
+    )
+    assert exit_code == 0
+    assert recorder == [(3, 1), (4, 1), (5, 1)]
 
 
 def test_resume_rejects_roster_fingerprint_drift(tmp_path: pathlib.Path, monkeypatch: Any) -> None:

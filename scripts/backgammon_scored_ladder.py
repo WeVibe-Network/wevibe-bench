@@ -68,6 +68,8 @@ REASONING_EFFORT = "high"
 EXTRACT_TIMEOUT_S = 900
 DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_CLONE_LOG = "runs/clone4550.log"
+BINDING_BUDGET_METER = "proxy_budget_ledger.hard_cap_usd"
+PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
 
 REQUIRED_RUNG_PARAM_FIELDS = (
     "profile",
@@ -361,8 +363,38 @@ def _load_rung_params(path: Path, rungs: tuple[LadderRung, ...]) -> dict[str, di
         validated[rung.model] = entry
     return validated
 
+
+def _reconciled_cost_limit_usd(params: dict[str, Any]) -> tuple[float, float | None]:
+    """Return (binding hard cap, mismatched rung cost_limit if reconciliation happened)."""
+
+    hard_cap_usd = float(params["cap_usd"])
+    rung_cost_limit_usd = float(params["cost_limit"])
+    if abs(rung_cost_limit_usd - hard_cap_usd) <= 1e-9:
+        return hard_cap_usd, None
+    return hard_cap_usd, rung_cost_limit_usd
+
+
+def _dry_run_cell_payload(
+    cell: dict[str, Any],
+    rung_params: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    payload = dict(cell)
+    payload["binding_budget_meter"] = BINDING_BUDGET_METER
+    binding_budget_usd = None
+    if rung_params is not None:
+        params = rung_params.get(str(cell["model"]))
+        if isinstance(params, dict) and params.get("cap_usd") is not None:
+            binding_budget_usd = float(params["cap_usd"])
+    payload["binding_budget_usd"] = binding_budget_usd
+    return payload
+
 # ---------------------------------------------------------------------------
 # Checkpoint
+
+
+# Entry schema is additive: new entries may include
+# stats.verdict == "BUDGET_STOP" and stats.termination_reason while historical
+# entries without these fields remain loadable/resumable.
 
 
 def _checkpoint_cells(checkpoint: dict[str, Any]) -> list[dict[str, Any]]:
@@ -765,6 +797,10 @@ def _build_import_entry(
         )
 
     stats = _extract_stats(scorecard, detail)
+    try:
+        stats["cost_usd"] = float(payload["accrued_usd"])
+    except (TypeError, ValueError):
+        pass
 
     proxy_log_text = _read_text_or_empty(proxy_log_path)
     cell_log_text = _read_text_or_empty(cell_log_path)
@@ -898,6 +934,34 @@ def _attempts_numeric(value: Any) -> int | None:
     return None
 
 
+def _normalize_verdict(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    verdict = value.strip().upper()
+    if verdict in {"PASS", "FAIL", "BUDGET_STOP"}:
+        return verdict
+    return None
+
+
+def _extract_termination_reason(scorecard_cell: dict[str, Any], detail_cell: dict[str, Any]) -> str | None:
+    from_scorecard = scorecard_cell.get("termination_reason")
+    if isinstance(from_scorecard, str) and from_scorecard.strip():
+        return from_scorecard.strip()
+
+    from_detail = detail_cell.get("termination_reason")
+    if isinstance(from_detail, str) and from_detail.strip():
+        return from_detail.strip()
+
+    reports = detail_cell.get("attempt_reports")
+    if isinstance(reports, list):
+        for report in reversed(reports):
+            if isinstance(report, dict):
+                candidate = report.get("termination_reason")
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+    return None
+
+
 def _extract_stats(scorecard: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
     scorecard_cells = scorecard.get("cells")
     detail_cells = detail.get("cells")
@@ -919,11 +983,21 @@ def _extract_stats(scorecard: dict[str, Any], detail: dict[str, Any]) -> dict[st
     if not isinstance(failed_gates, list):
         failed_gates = []
 
+    attempts_to_green = dc.get("attempts_to_green")
+    verdict = _normalize_verdict(sc.get("verdict"))
+    if verdict is None:
+        verdict = _normalize_verdict(dc.get("verdict"))
+    if verdict is None and isinstance(attempts_to_green, str) and attempts_to_green.strip().upper() == "BUDGET_STOP":
+        verdict = "BUDGET_STOP"
+    if verdict is None:
+        verdict = "PASS" if bool(sc.get("resolved")) else "FAIL"
+
     return {
-        "verdict": "PASS" if bool(sc.get("resolved")) else "FAIL",
+        "verdict": verdict,
+        "termination_reason": _extract_termination_reason(sc, dc),
         "scored": bool(sc.get("scored")),
         "conformed": bool(dc.get("conformed")),
-        "attempts_to_green": dc.get("attempts_to_green"),
+        "attempts_to_green": attempts_to_green,
         "failed_gates": [str(g) for g in failed_gates],
         "max_attempts": max_attempts if max_attempts is not None else MAX_ATTEMPTS,
         "total_tokens": float(sc.get("total_tokens") or 0.0),
@@ -989,6 +1063,9 @@ def _classify(stats: dict[str, Any]) -> str:
         if attempts_numeric == 1:
             return "CEILING"
         return "BRACKET"
+    if stats["verdict"] == "BUDGET_STOP":
+        # Budget-stop is an instrument outcome, not a capability fail class.
+        return "BRACKET"
     if stats.get("conformed"):
         return "BRACKET"
     return "FLOOR"
@@ -1034,6 +1111,7 @@ def _evaluate_triggers(
             fired.append("T2")
 
     # T3 — instrument anomaly while the cell still produced a scored verdict.
+    # BUDGET_STOP itself does not trigger T3; only explicit anomalies do.
     if any(anomalies.values()):
         fired.append("T3")
 
@@ -1053,16 +1131,39 @@ def _detect_anomalies(proxy_log_text: str, cell_log_text: str, stats: dict[str, 
 
 
 def _majority_verdict(verdicts: list[str]) -> str:
-    passes = sum(1 for v in verdicts if v == "PASS")
-    return "PASS" if passes * 2 > len(verdicts) else "FAIL"
+    if not verdicts:
+        return "FAIL"
+
+    counts = {"PASS": 0, "FAIL": 0, "BUDGET_STOP": 0}
+    for verdict_raw in verdicts:
+        verdict = _normalize_verdict(verdict_raw)
+        counts[verdict or "FAIL"] += 1
+
+    winner, winner_count = max(counts.items(), key=lambda item: item[1])
+    return winner if winner_count * 2 > len(verdicts) else "FAIL"
 
 
 def _median(values: list[float]) -> float:
     return float(statistics.median(values)) if values else 0.0
 
 
+def _entry_accrued_usd(entry: dict[str, Any]) -> float | None:
+    value = entry.get("accrued_usd")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _summarize_cell(cell: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
     stats_list = [e["stats"] for e in entries if isinstance(e.get("stats"), dict)]
+    accrued_costs = [
+        accrued
+        for entry in entries
+        if (accrued := _entry_accrued_usd(entry)) is not None
+    ]
     verdicts = [str(s.get("verdict")) for s in stats_list]
     classes = [_classify(s) for s in stats_list]
     triggers = entries[0].get("triggers") if entries else []
@@ -1082,7 +1183,7 @@ def _summarize_cell(cell: dict[str, Any], entries: list[dict[str, Any]]) -> dict
         "median_total_tokens": _median([float(s.get("total_tokens") or 0.0) for s in stats_list]),
         "median_turns": _median([float(s.get("turns") or 0.0) for s in stats_list]),
         "median_wall_seconds": _median([float(s.get("wall_seconds") or 0.0) for s in stats_list]),
-        "median_cost_usd": _median([float(s.get("cost_usd") or 0.0) for s in stats_list]),
+        "median_cost_usd": _median(accrued_costs),
         "attempts_to_green": [s.get("attempts_to_green") for s in stats_list],
         "assertions": [e.get("assertions") for e in entries],
         "run_ids": [e.get("run_id") for e in entries],
@@ -1203,14 +1304,22 @@ def _stop_proxy(proc: subprocess.Popen[bytes]) -> None:
             proc.wait(timeout=PROXY_STOP_TIMEOUT_S)
 
 
-def _build_session_extra_flags(params: dict[str, Any], token_file: Path, port: int) -> str:
+def _build_session_extra_flags(
+    params: dict[str, Any],
+    token_file: Path,
+    port: int,
+    *,
+    binding_cap_usd: float,
+) -> str:
+    # Single-meter canonical path: proxy BudgetLedger hard cap is authoritative.
+    # Mirror that same hard cap into adapter --cost-limit for informational parity.
     flags = [
         "--max-attempts",
         str(MAX_ATTEMPTS),
         "--max-steps-per-attempt",
         str(MAX_STEPS_PER_ATTEMPT),
         "--cost-limit",
-        f"{float(params['cost_limit']):.6f}",
+        f"{float(binding_cap_usd):.6f}",
         "--cost-target",
         f"{float(params['cost_target']):.6f}",
         "--run-timeout",
@@ -1264,6 +1373,12 @@ def _build_inner_cmd(
     if str(cell["phase"]) == "all":
         cmd.extend(["--extract-timeout", str(EXTRACT_TIMEOUT_S), "--org-id", org_id])
     return cmd
+
+
+def _build_inner_env(proxy_checkpoint: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env[PROXY_CHECKPOINT_ENV] = str(proxy_checkpoint)
+    return env
 
 
 def _build_error_entry(
@@ -1357,7 +1472,7 @@ def _persist_error_entry(checkpoint: dict[str, Any], checkpoint_path: Path, entr
     _save_json_atomic(checkpoint_path, checkpoint)
 
 
-def _run_inner_tee(cmd: list[str], cell_log: Path) -> int:
+def _run_inner_tee(cmd: list[str], cell_log: Path, *, env: dict[str, str] | None = None) -> int:
     """Run the inner ladder, teeing stdout+stderr to the cell log.
 
     PROGRESS / RESULT_JSON lines are also relayed to this driver's stdout so a
@@ -1372,6 +1487,7 @@ def _run_inner_tee(cmd: list[str], cell_log: Path) -> int:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -1438,10 +1554,17 @@ def _run_cell_rep(
     assertions: dict[str, Any] | None = None
 
     try:
-        cap_usd = float(params["cap_usd"])
-        progress("ledger-check", f"cap_usd={cap_usd:.4f}")
-        if not _ledger_check(cap_usd):
-            raise LadderAbort("ledger_refused", {"run_id": run_id, "cap_usd": cap_usd})
+        binding_cap_usd, reconciled_cost_limit = _reconciled_cost_limit_usd(params)
+        if reconciled_cost_limit is not None:
+            progress(
+                "budget-reconcile",
+                f"meter={BINDING_BUDGET_METER} hard_cap_usd={binding_cap_usd:.6f} "
+                f"rung_cost_limit_usd={reconciled_cost_limit:.6f} decision=use_cap_usd",
+            )
+
+        progress("ledger-check", f"cap_usd={binding_cap_usd:.4f}")
+        if not _ledger_check(binding_cap_usd):
+            raise LadderAbort("ledger_refused", {"run_id": run_id, "cap_usd": binding_cap_usd})
 
         prebudget_path = runs_dir / f"{run_id}-prebudget.json"
         _save_json_atomic(
@@ -1450,7 +1573,7 @@ def _run_cell_rep(
                 "schema_version": 1,
                 "run_id": run_id,
                 "accrued_actual_usd": 0.0,
-                "committed_unproven_usd": cap_usd,
+                "committed_unproven_usd": binding_cap_usd,
             },
         )
         if not _ledger_record(prebudget_path):
@@ -1480,7 +1603,12 @@ def _run_cell_rep(
                 time.sleep(1.0)
             time.sleep(2.0)
 
-            extra_session_flags = _build_session_extra_flags(params, token_file, int(args.proxy_port))
+            extra_session_flags = _build_session_extra_flags(
+                params,
+                token_file,
+                int(args.proxy_port),
+                binding_cap_usd=binding_cap_usd,
+            )
             inner_cmd = _build_inner_cmd(
                 cell=cell,
                 rep=rep,
@@ -1489,10 +1617,11 @@ def _run_cell_rep(
                 ladder_runs_dir=ladder_runs_dir,
                 org_id=str(args.org_id),
             )
+            inner_env = _build_inner_env(proxy_checkpoint)
             cell_log = runs_dir / f"{stamp}-{run_label}-cell.log"
             progress("cell-start", f"cell_log={cell_log}")
             started = time.perf_counter()
-            inner_rc = _run_inner_tee(inner_cmd, cell_log)
+            inner_rc = _run_inner_tee(inner_cmd, cell_log, env=inner_env)
             dur_s = time.perf_counter() - started
         finally:
             _stop_proxy(proxy_proc)
@@ -1563,6 +1692,11 @@ def _run_cell_rep(
         if isinstance(proxy_cp, dict):
             accrued = proxy_cp.get("accrued_actual_usd")
             committed = proxy_cp.get("committed_unproven_usd")
+            if stats is not None and accrued is not None:
+                try:
+                    stats["cost_usd"] = float(accrued)
+                except (TypeError, ValueError):
+                    pass
 
         progress(
             "ok",
@@ -1774,16 +1908,6 @@ def main() -> int:
         f"cells={json.dumps([{k: cell[k] for k in ('rung_index', 'model', 'role', 'run_number', 'memory_mode', 'phase')} for cell in plan], separators=(',', ':'))}"
     )
 
-    if args.dry_run and not args.import_cell:
-        _append_log_line(logfile_path, plan_line)
-        for cell in selected:
-            print(json.dumps(cell, sort_keys=True), flush=True)
-        _append_log_line(
-            logfile_path,
-            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)}",
-        )
-        return 0
-
     rung_params: dict[str, dict[str, Any]] | None = None
     if args.rung_params:
         rung_params = _load_rung_params(
@@ -1792,6 +1916,16 @@ def main() -> int:
         )
     elif not args.dry_run:
         parser.error("--rung-params is required for a real run")
+
+    if args.dry_run and not args.import_cell:
+        _append_log_line(logfile_path, plan_line)
+        for cell in selected:
+            print(json.dumps(_dry_run_cell_payload(cell, rung_params), sort_keys=True), flush=True)
+        _append_log_line(
+            logfile_path,
+            f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)}",
+        )
+        return 0
 
     _emit(logfile_path, plan_line)
 
@@ -1864,7 +1998,7 @@ def main() -> int:
 
     if args.dry_run:
         for cell in selected:
-            print(json.dumps(cell, sort_keys=True), flush=True)
+            print(json.dumps(_dry_run_cell_payload(cell, rung_params), sort_keys=True), flush=True)
         _emit(
             logfile_path,
             f"[{_utc_iso()}] SUMMARY trace={trace} status=dry-run planned_cells={len(selected)}",

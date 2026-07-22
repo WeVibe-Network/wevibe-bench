@@ -25,6 +25,7 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 class M2Proof:
     _KEYWORD_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+    _MEMORY_FRAGMENT_LIMIT = 64
 
     def __init__(
         self,
@@ -122,31 +123,54 @@ class M2Proof:
     @classmethod
     def _extract_candidate_keywords(cls, raw: Any) -> list[str]:
         if isinstance(raw, dict):
-            classified = raw.get("classified")
-            if isinstance(classified, list):
-                keywords: list[str] = []
-                for item in classified:
+            keywords: list[str] = []
+            for bucket in ("classified", "suggestions"):
+                bucket_items = raw.get(bucket)
+                if not isinstance(bucket_items, list):
+                    continue
+                for item in bucket_items:
                     keyword = item.get("keyword") if isinstance(item, dict) else item
                     if isinstance(keyword, str) and keyword.strip():
                         keywords.append(keyword.strip())
-                if keywords:
-                    return keywords
-                return []
+            if keywords:
+                return keywords
+            return []
         return cls._normalize_keywords(raw)
 
     @staticmethod
-    def _extract_candidate_text(candidate: dict[str, Any]) -> str | None:
-        implement = candidate.get("implement")
-        if isinstance(implement, str) and implement.strip():
-            text = implement.strip()
-            context = candidate.get("context")
-            if isinstance(context, str) and context.strip():
-                text = f"{text}\n\nContext: {context.strip()}"
-            dnd = candidate.get("dnd")
-            if isinstance(dnd, str) and dnd.strip():
-                text = f"{text}\n\nAvoid: {dnd.strip()}"
-            return text
+    def _normalize_candidate_stack(raw: Any) -> list[str]:
+        if isinstance(raw, list):
+            values = [str(item).strip() for item in raw if str(item).strip()]
+            return values
+        if isinstance(raw, str):
+            values = [part.strip() for part in raw.split(",") if part.strip()]
+            return values
+        return []
 
+    @classmethod
+    def _render_atomic_candidate_text(cls, candidate: dict[str, Any]) -> str | None:
+        implement = candidate.get("implement")
+        if not isinstance(implement, str) or not implement.strip():
+            return None
+
+        context_raw = candidate.get("context")
+        context = context_raw.strip() if isinstance(context_raw, str) and context_raw.strip() else "unspecified"
+        stack_values = cls._normalize_candidate_stack(candidate.get("stack"))
+
+        lines = [
+            f"Implement: {implement.strip()}",
+            f"Context: {context}",
+            f"Stack: {', '.join(stack_values) if stack_values else 'unknown'}",
+        ]
+
+        dnd_raw = candidate.get("dnd")
+        if isinstance(dnd_raw, str) and dnd_raw.strip():
+            lines.append(f"Avoid: {dnd_raw.strip()}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_candidate_text(candidate: dict[str, Any]) -> str | None:
         fallback = (
             candidate.get("text")
             or candidate.get("plaintext")
@@ -155,7 +179,7 @@ class M2Proof:
         )
         if isinstance(fallback, str) and fallback.strip():
             return fallback.strip()
-        return None
+        return M2Proof._render_atomic_candidate_text(candidate)
 
     @staticmethod
     def _normalize_stack_hint(raw: Any) -> list[str] | None:
@@ -314,9 +338,44 @@ class M2Proof:
     def _leader_rest(self) -> Any:
         return self._mcp_rest_factory(self._cfg.leader_mcp_url)
 
-    def produce_memory(
+    @classmethod
+    def memory_fragment(cls, text: str) -> str:
+        compact = " ".join(str(text).split())
+        return compact[: cls._MEMORY_FRAGMENT_LIMIT]
+
+    def _memory_from_candidate(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
+        text = self._extract_candidate_text(candidate)
+        if text is None:
+            return None
+
+        capped_text = self._cap_utf8_bytes(text, 1800).strip()
+        if not capped_text:
+            return None
+
+        stack_value = candidate.get("stack")
+        stack_hint = (
+            stack_value
+            if isinstance(stack_value, list)
+            else candidate.get("stack_hint") or stack_value
+        )
+
+        memory_type = candidate.get("memory_type")
+        normalized_memory_type = (
+            memory_type.strip()
+            if isinstance(memory_type, str) and memory_type.strip()
+            else "memory"
+        )
+
+        return {
+            "text": capped_text,
+            "keywords": self._extract_candidate_keywords(candidate.get("keywords")),
+            "stack_hint": stack_hint,
+            "memory_type": normalized_memory_type,
+        }
+
+    def produce_memories(
         self,
-        transcript: str,
+        events: list[dict[str, Any]],
         model: str,
         api_key: str,
         project_context: dict[str, Any],
@@ -325,7 +384,7 @@ class M2Proof:
         base_url: str | None = None,
         extract_timeout_s: float = 900,
         session_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> list[dict[str, Any]]:
         if isinstance(self._direct_memory, dict):
             raw_text = self._direct_memory.get("text")
             if isinstance(raw_text, str) and raw_text.strip():
@@ -341,11 +400,14 @@ class M2Proof:
                     keyword_count=len(keywords),
                     memory_fp=fp(text),
                 )
-                return {
-                    "text": text,
-                    "keywords": keywords,
-                    "stack_hint": self._direct_memory.get("stack_hint"),
-                }
+                return [
+                    {
+                        "text": text,
+                        "keywords": keywords,
+                        "stack_hint": self._direct_memory.get("stack_hint"),
+                        "memory_type": str(self._direct_memory.get("memory_type") or "memory"),
+                    }
+                ]
 
         hosted_api_key = api_key.strip() if isinstance(api_key, str) else ""
         if not hosted_api_key:
@@ -358,7 +420,7 @@ class M2Proof:
 
         client = self._contributor_rest()
         job_id = client.extract(
-            transcript=transcript,
+            events=events,
             model=model,
             project_context=context,
             org_id=org_id,
@@ -372,30 +434,49 @@ class M2Proof:
         if not isinstance(status, dict):
             raise RuntimeError(f"extract status expected object, got: {status}")
 
+        memories: list[dict[str, Any]] = []
         for candidate in self._candidate_sources(status):
-            text = self._extract_candidate_text(candidate)
-            if text is None:
+            memory = self._memory_from_candidate(candidate)
+            if memory is None:
                 continue
-            capped_text = self._cap_utf8_bytes(text, 1800).strip()
-            if not capped_text:
-                continue
+            memories.append(memory)
 
-            stack_value = candidate.get("stack")
-            stack_hint = (
-                stack_value
-                if isinstance(stack_value, list)
-                else candidate.get("stack_hint") or stack_value
-            )
-
-            return {
-                "text": capped_text,
-                "keywords": self._extract_candidate_keywords(candidate.get("keywords")),
-                "stack_hint": stack_hint,
-            }
+        if memories:
+            return memories
 
         if isinstance(status, dict):
             raise RuntimeError(f"extract produced no usable memory candidate (status_keys={sorted(status)})")
         raise RuntimeError("extract produced no usable memory candidate")
+
+    def produce_memory(
+        self,
+        events: list[dict[str, Any]],
+        model: str,
+        api_key: str,
+        project_context: dict[str, Any],
+        org_id: str,
+        provider: str = "openrouter",
+        base_url: str | None = None,
+        extract_timeout_s: float = 900,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        memories = self.produce_memories(
+            events=events,
+            model=model,
+            api_key=api_key,
+            project_context=project_context,
+            org_id=org_id,
+            provider=provider,
+            base_url=base_url,
+            extract_timeout_s=extract_timeout_s,
+            session_id=session_id,
+        )
+        memory = memories[0]
+        return {
+            "text": memory.get("text"),
+            "keywords": memory.get("keywords"),
+            "stack_hint": memory.get("stack_hint"),
+        }
 
     def submit_memory(self, org_id: str, memory: dict[str, Any]) -> str:
         text = memory.get("text")
@@ -638,27 +719,63 @@ class M2Proof:
 
         raise TimeoutError(f"commit_status did not report committed for {submission_hash}")
 
-    def prove_delivery(self, org_id: str, expected_text_fragment: str) -> dict[str, Any]:
-        payload = self._leader_rest().recall(
-            query=expected_text_fragment,
-            org_id=org_id,
-        )
-        memories = payload.get("memories") if isinstance(payload, dict) else None
-        memory_items = memories if isinstance(memories, list) else []
+    def prove_delivery(self, org_id: str, expected_text_fragment: str | list[str]) -> dict[str, Any]:
+        if isinstance(expected_text_fragment, list):
+            fragments_raw = [str(item) for item in expected_text_fragment if str(item).strip()]
+        elif isinstance(expected_text_fragment, str):
+            fragments_raw = [expected_text_fragment] if expected_text_fragment.strip() else []
+        else:
+            raise RuntimeError("prove_delivery expected fragment string or list of strings")
 
-        fragment = expected_text_fragment.lower()
-        matched = False
-        for item in memory_items:
-            text = item.get("text") if isinstance(item, dict) else None
-            if isinstance(text, str) and fragment and fragment in text.lower():
-                matched = True
-                break
+        fragments: list[str] = []
+        for raw_fragment in fragments_raw:
+            fragment = self.memory_fragment(raw_fragment)
+            if fragment:
+                fragments.append(fragment)
+        if not fragments:
+            return {
+                "delivery": "NO",
+                "n_memories": 0,
+                "matched": False,
+                "per_memory": [],
+            }
 
-        delivery = "YES" if memory_items and matched else "NO"
+        leader_rest = self._leader_rest()
+        per_memory: list[dict[str, Any]] = []
+        all_matched = True
+        any_matched = False
+
+        for fragment in fragments:
+            payload = leader_rest.recall(
+                query=fragment,
+                org_id=org_id,
+            )
+            memories = payload.get("memories") if isinstance(payload, dict) else None
+            memory_items = memories if isinstance(memories, list) else []
+
+            fragment_lc = fragment.lower()
+            matched = False
+            for item in memory_items:
+                text = item.get("text") if isinstance(item, dict) else None
+                if isinstance(text, str) and fragment_lc and fragment_lc in text.lower():
+                    matched = True
+                    break
+
+            per_memory.append(
+                {
+                    "fragment_fp": fp(fragment),
+                    "matched": matched,
+                }
+            )
+            all_matched = all_matched and matched
+            any_matched = any_matched or matched
+
         return {
-            "delivery": delivery,
-            "n_memories": len(memory_items),
-            "matched": matched,
+            "delivery": "YES" if all_matched else "NO",
+            "n_memories": len(per_memory),
+            "matched": all_matched,
+            "any_matched": any_matched,
+            "per_memory": per_memory,
         }
 
     def _qdrant_delta(
@@ -686,7 +803,7 @@ class M2Proof:
 
     def run(
         self,
-        transcript: str,
+        events: list[dict[str, Any]],
         model: str,
         api_key: str,
         project_context: dict[str, Any],
@@ -695,7 +812,7 @@ class M2Proof:
         qdrant_before = self._snapshot_fn(self._qdrant_url)
 
         memory = self.produce_memory(
-            transcript=transcript,
+            events=events,
             model=model,
             api_key=api_key,
             project_context=project_context,
@@ -712,7 +829,7 @@ class M2Proof:
                 f"saw_plus_one={qdrant_delta.get('saw_plus_one')} grew={qdrant_delta.get('grew')}"
             )
 
-        expected_fragment = memory["text"].strip()[:64]
+        expected_fragment = self.memory_fragment(str(memory.get("text") or ""))
         delivery = self.prove_delivery(org_id, expected_fragment)
 
         memory_text = memory["text"] if isinstance(memory.get("text"), str) else ""

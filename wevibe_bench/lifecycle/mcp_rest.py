@@ -136,7 +136,7 @@ class McpRest:
 
     def extract(
         self,
-        transcript: str,
+        events: list[dict[str, Any]],
         model: str,
         project_context: dict[str, Any] | None = None,
         org_id: str | None = None,
@@ -148,7 +148,7 @@ class McpRest:
         session_id: str | None = None,
     ) -> str:
         body: dict[str, Any] = {
-            "transcript": transcript,
+            "events": events,
             "model": model,
         }
         if project_context is not None:
