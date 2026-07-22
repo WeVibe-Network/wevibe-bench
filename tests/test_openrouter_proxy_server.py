@@ -25,7 +25,12 @@ from wevibe_bench.adapters.openrouter_proxy import (
     UPSTREAM_CHAT_COMPLETIONS_URLS,
     key_fingerprint,
 )
-from wevibe_bench.adapters.openrouter_proxy_server import ProxyServer, UpstreamResponse, make_server
+from wevibe_bench.adapters.openrouter_proxy_server import (
+    ProxyServer,
+    UpstreamResponse,
+    _assert_expected_upstream_key_fp,
+    make_server,
+)
 
 
 CHAT_COMPLETIONS_PATH = "/api/v1/chat/completions"
@@ -143,6 +148,10 @@ def test_main_bigpickle_sources_opencode_key_and_zen_url(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # This test isolates key-source + URL routing; pinned-fingerprint behavior is
+    # covered by dedicated _assert_expected_upstream_key_fp tests below.
+    monkeypatch.setattr(proxy_server, "key_fingerprint", lambda _raw: "b5ce6e5e")
+
     auth_path = _write_auth_json(
         tmp_path,
         key="sk-or-test-main-openrouter",
@@ -225,6 +234,8 @@ def test_main_authorize_accepts_zero_pricing_for_bigpickle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(proxy_server, "key_fingerprint", lambda _raw: "b5ce6e5e")
+
     auth_path = _write_auth_json(tmp_path, opencode_key="sk-zen-zero-pricing")
     argv = _main_argv(
         tmp_path,
@@ -1338,7 +1349,6 @@ def _bigpickle_zen_response(*, model: str, cost: float = 0.0) -> UpstreamRespons
         "id": "chatcmpl-zen",
         "object": "chat.completion",
         "model": model,
-        "provider": "Xiaomi",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
         "usage": {"completion_tokens": 4, "cost": cost},
     }
@@ -1371,8 +1381,8 @@ def _bigpickle_body() -> dict[str, Any]:
 def test_identity_match_passes_and_never_trips(tmp_path: Path) -> None:
     fake = _FakeUpstream(
         [
-            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
-            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
+            _bigpickle_zen_response(model="big-pickle"),
+            _bigpickle_zen_response(model="big-pickle"),
         ]
     )
     with _running_proxy_server(
@@ -1387,14 +1397,14 @@ def test_identity_match_passes_and_never_trips(tmp_path: Path) -> None:
 
     assert status_1 == 200 and status_2 == 200
     assert 'event="identity_mismatch"' not in log_text
-    assert log_text.count('model="xiaomi/mimo-v2.5"') == 2
+    assert log_text.count('model="big-pickle"') == 2
 
 
 def test_identity_mismatch_logs_and_refuses_subsequent_requests(tmp_path: Path) -> None:
     fake = _FakeUpstream(
         [
             _bigpickle_zen_response(model="somebody/else-entirely"),
-            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
+            _bigpickle_zen_response(model="big-pickle"),
         ]
     )
     with _running_proxy_server(
@@ -1413,9 +1423,38 @@ def test_identity_mismatch_logs_and_refuses_subsequent_requests(tmp_path: Path) 
     error = _decode_json(payload_2)["error"]
     assert error["code"] == "identity_mismatch"
     assert 'event="identity_mismatch"' in log_text
-    assert 'expected_upstream_model="xiaomi/mimo-v2.5"' in log_text
+    assert 'expected_upstream_model="big-pickle"' in log_text
     assert 'observed_upstream_model="somebody/else-entirely"' in log_text
     # The swapped model never reached upstream a second time.
+    assert len(fake.calls) == 1
+
+
+def test_identity_old_echo_now_trips_and_refuses(tmp_path: Path) -> None:
+    fake = _FakeUpstream(
+        [
+            _bigpickle_zen_response(model="xiaomi/mimo-v2.5"),
+            _bigpickle_zen_response(model="big-pickle"),
+        ]
+    )
+    with _running_proxy_server(
+        tmp_path,
+        fake_upstream=fake,
+        profile_name="bigpickle",
+        profiles_override=_runnable_bigpickle_profiles(),
+    ) as running:
+        status_1, _, _ = _post_json(running, _bigpickle_body(), token=running.run_token)
+        status_2, _, payload_2 = _post_json(running, _bigpickle_body(), token=running.run_token)
+        log_text = running.log_path.read_text(encoding="utf-8")
+
+    # Old upstream echo now mismatches the pinned identity and latches refusal.
+    assert status_1 == 200
+    assert status_2 == 503
+    error = _decode_json(payload_2)["error"]
+    assert error["code"] == "identity_mismatch"
+    assert 'event="identity_mismatch"' in log_text
+    assert 'expected_upstream_model="big-pickle"' in log_text
+    assert 'observed_upstream_model="xiaomi/mimo-v2.5"' in log_text
+    # Latched request was refused locally and never forwarded upstream.
     assert len(fake.calls) == 1
 
 
@@ -1435,3 +1474,23 @@ def test_identity_check_inactive_without_expected_model(tmp_path: Path) -> None:
 
     assert status_1 == 200 and status_2 == 200
     assert "identity_mismatch" not in log_text
+
+
+def test_assert_expected_upstream_key_fp_noop_when_profile_unpinned() -> None:
+    glm_profile = DEFAULT_PROFILES()["glm"]
+    _assert_expected_upstream_key_fp(glm_profile, "deadbeef")
+
+
+def test_assert_expected_upstream_key_fp_noop_when_matching() -> None:
+    bigpickle_profile = DEFAULT_PROFILES()["bigpickle"]
+    _assert_expected_upstream_key_fp(bigpickle_profile, "b5ce6e5e")
+
+
+def test_assert_expected_upstream_key_fp_raises_when_mismatched() -> None:
+    bigpickle_profile = DEFAULT_PROFILES()["bigpickle"]
+    with pytest.raises(RuntimeError) as excinfo:
+        _assert_expected_upstream_key_fp(bigpickle_profile, "deadbeef")
+
+    message = str(excinfo.value)
+    assert "b5ce6e5e" in message
+    assert "deadbeef" in message

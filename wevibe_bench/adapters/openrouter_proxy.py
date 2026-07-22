@@ -104,6 +104,10 @@ class ProviderProfile:
     # the proxy server trips a one-way per-run refusal switch on any mismatch
     # (identity check for stealth/alias models, Walter 21-07-26).
     expected_upstream_model: str | None = None
+    # When set, proxy startup fails fast if the loaded upstream credential
+    # fingerprint (sha256 first-8-hex) differs (credential-rotation trip,
+    # Walter 22-07-26).
+    expected_upstream_key_fp: str | None = None
 
     def runnable_reason(self) -> str | None:
         """Return blocking reason or ``None`` if this profile is runnable."""
@@ -280,10 +284,18 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             upstream="opencode",
             authorized=False,
             pin_constraints=None,
-            # Zen serves big-pickle as xiaomi/mimo-v2.5 (unmasked 21-07-26,
-            # report 21-07-26-0735). Walter's Stage-7 lock: assert this identity
-            # on every response; on ANY swap abort the cell, never score it.
-            expected_upstream_model="xiaomi/mimo-v2.5",
+            # big-pickle IS xiaomi/mimo-v2.5 upstream. Since
+            # 2026-07-21T23:50Z Zen echoes alias "big-pickle" in response
+            # ``model`` (previously "xiaomi/mimo-v2.5") and dropped the
+            # ``provider`` field — cosmetic echo change verified 2026-07-22 by
+            # live probe (runs/identity-probe/20260722T085209Z/: model system
+            # info self-identifies "MiMo-v2.5 / Xiaomi LLM Core Team"; key fp
+            # + endpoint + system-prompt cache prefix unchanged; identical
+            # workload fingerprint as the 14:33Z qualification). Walter's
+            # Stage-7 lock stands: assert this identity on every response; on
+            # ANY deviation abort the cell, never score it.
+            expected_upstream_model="big-pickle",
+            expected_upstream_key_fp="b5ce6e5e",
         ),
     }
 

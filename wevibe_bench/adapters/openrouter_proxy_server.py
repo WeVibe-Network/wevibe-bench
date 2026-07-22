@@ -915,6 +915,25 @@ def _write_token_file(path: str, token: str) -> None:
     os.chmod(path, 0o600)
 
 
+def _assert_expected_upstream_key_fp(profile: Any, key_fp: str) -> None:
+    """Fail fast when a profile pins upstream key fingerprint and it differs."""
+
+    expected = getattr(profile, "expected_upstream_key_fp", None)
+    if expected is None:
+        return
+
+    expected_fp = str(expected).strip()
+    observed_fp = str(key_fp).strip()
+    if expected_fp == observed_fp:
+        return
+
+    profile_name = str(getattr(profile, "name", "unknown"))
+    raise RuntimeError(
+        "UPSTREAM KEY FINGERPRINT MISMATCH "
+        f"(profile={profile_name!r}, expected={expected_fp!r}, observed={observed_fp!r})"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for running the local OpenRouter benchmark proxy."""
 
@@ -1017,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
         upstream_key = load_upstream_key(selected_profile.upstream, args.auth_path)
     except CredentialError as exc:
         parser.error(str(exc))
+    upstream_key_fp = key_fingerprint(upstream_key)
 
     if args.authorize:
         pricing: dict[str, float] = {
@@ -1034,6 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
             authorized=True,
         )
         profiles[args.profile] = selected_profile
+    _assert_expected_upstream_key_fp(selected_profile, upstream_key_fp)
     registry = ProfileRegistry(profiles)
 
     normalized_model = normalize_model_selector(args.model)
@@ -1077,7 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
         provider=selected_profile.provider_object,
         upstream_provider=selected_profile.upstream,
         upstream_url=upstream_url,
-        upstream_key_fp=key_fingerprint(upstream_key),
+        upstream_key_fp=upstream_key_fp,
     )
 
     server = make_server(proxy, host="127.0.0.1", port=int(args.port))

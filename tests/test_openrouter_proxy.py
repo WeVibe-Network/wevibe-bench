@@ -713,9 +713,11 @@ def test_proxy_logger_excludes_secrets_prompts_and_rejects_forbidden_fields(tmp_
 
 def test_bigpickle_profile_pins_expected_upstream_identity() -> None:
     profiles = DEFAULT_PROFILES()
-    # Walter 21-07-26: big-pickle is served as xiaomi/mimo-v2.5; every scored
-    # cell asserts this identity. No other profile pins an expected identity.
-    assert profiles["bigpickle"].expected_upstream_model == "xiaomi/mimo-v2.5"
+    # 2026-07-22 cosmetic-echo evidence: Zen now echoes the alias "big-pickle"
+    # in response bodies; only bigpickle pins upstream identity + key fingerprint.
+    assert profiles["bigpickle"].expected_upstream_model == "big-pickle"
+    assert profiles["bigpickle"].expected_upstream_key_fp == "b5ce6e5e"
     for name, profile in profiles.items():
         if name != "bigpickle":
             assert profile.expected_upstream_model is None
+            assert profile.expected_upstream_key_fp is None

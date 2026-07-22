@@ -52,12 +52,20 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
 ### 2A. Stage-7 roster status (Walter decision, 2026-07-21)
 - `opencode/big-pickle` is a full Stage-7 MEASURE rung (resolves fork F1; supersedes the same-day smoke-only pin).
 - Canonical roster: SOURCE Opus-4.8 (OFF cell + self-extraction) → MEASURE `moonshotai/kimi-k2.7-code` (OFF+ON, session-only)
-  → MEASURE `opencode/big-pickle` (OFF+ON, session-only). `xiaomi/mimo-v2.5` is big-pickle's upstream identity only (Zen alias),
-  not a separate rung.
+  → MEASURE `opencode/big-pickle` (OFF+ON, session-only). big-pickle is `xiaomi/mimo-v2.5` upstream (Zen alias), not a
+  separate rung.
+- Identity note (2026-07-22 probe): since 2026-07-21T23:50Z Zen echoes alias `big-pickle` in response `model`
+  (was `xiaomi/mimo-v2.5`) and no longer sends response `provider`; verified cosmetic-only via
+  `runs/identity-probe/20260722T085209Z/` (system information self-IDs MiMo-v2.5/Xiaomi, key fp `b5ce6e5e`, endpoint and
+  injected system-prompt prefix `cached_tokens=192` unchanged, identical workload fingerprint `in_bytes=61581` /
+  `in_tokens_ub=61409` vs 2026-07-21T14:33Z qualification).
 - Qualification evidence: `runs/qualification/stage3-opencode-big-pickle-20260721T142452Z.smoke.log` (4/4 transport checks pass:
   streaming/tools/structured/require-params; $0) + `runs/backgammon/20260721T143340Z-stage5-opencode-big-pickle-scorecard.json`
   and `runs/openrouter-proxy/20260721T143337Z-stage5-opencode-big-pickle-20260721T143337Z.log` (OFF transport-clean over real Zen;
-  capability FAIL is measured capability, not a transport failure).
+  capability FAIL is measured capability, not a transport failure; pre-23:50Z echo shape `model=xiaomi/mimo-v2.5` with
+  response `provider` present).
+- Per-cell identity pin now expects alias echo `big-pickle` plus startup upstream-key fingerprint assert `b5ce6e5e`; any
+  deviation trips one-way `503 identity_mismatch` and that cell is never scored.
 - ON-cell recall delivery is asserted in-cell by `scripts/backgammon_scored_ladder.py::_scan_delivery`; failure aborts with
   `delivery_unproven`.
 - Run forms (do not execute here; invoke from repo root with `PYTHONPATH=.`): real run requires `--rung-params` →

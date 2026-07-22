@@ -105,7 +105,9 @@ class LadderRung:
 # of truth for the ordered rungs. Knowledge SOURCE = Opus-4.8 (acing model; its
 # fail→fix iteration arcs are the extraction substrate); MEASURE rungs top→bottom:
 # kimi-k2.7-code (pin siliconflow/fp8) → big-pickle (opencode/big-pickle via zen
-# upstream, free/free — served as xiaomi/mimo-v2.5, identity-checked per cell).
+# upstream, free/free — upstream is xiaomi/mimo-v2.5; since 2026-07-21T23:50Z Zen
+# echoes alias id `big-pickle`; per-cell identity pin expects that echo + startup
+# key-fingerprint assert `b5ce6e5e`).
 # Paid xiaomi/mimo-v2.5 is DROPPED from the measured roster but RETAINED as the
 # qualified fallback profile ("mimo25") — usable only on Walter's explicit
 # in-thread approval if big-pickle's identity check trips.

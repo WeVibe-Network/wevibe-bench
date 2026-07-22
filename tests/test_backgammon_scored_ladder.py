@@ -35,7 +35,7 @@ def _rung_params_payload() -> dict[str, Any]:
             "cost_target": 1.5,
         }
         if "big-pickle" in rung.model:
-            entry["expected_upstream_model"] = "xiaomi/mimo-v2.5"
+            entry["expected_upstream_model"] = "big-pickle"
         payload[rung.model] = entry
     return payload
 
