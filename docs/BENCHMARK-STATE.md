@@ -5,6 +5,21 @@
 > and the next build step. Detail lives in the dated reports under `wevibe-meta/workspace/reports/`.
 > Home repo: `wevibe-bench/` (own git repo, no remote). Backstop copy: `~/Desktop/benchmark/` (FROZEN, do not delete).
 
+> **⚠ PRIMARY-MODEL CORRECTION (2026-07-23, Walter-ratified — canon `D-BENCH-CUMULATIVE-LOOP-2026-07-23`; reconstruction
+> `wevibe-meta/workspace/reports/23-07-26-1110-benchmark-model-correction-cumulative-loop-report.md`).** The PRIMARY benchmark
+> is the CUMULATIVE organizational-learning loop: one benchmark-owned org, empty corpus → per-model recall-OFF baseline (OFF =
+> no injected memory, but the productive session still extracts+commits, seeding the corpus) → deterministic roster-seeded
+> consecutive recall-ON sessions, each resetting the code fixture to the same failing state, preserving the cumulative corpus,
+> recalling eligible memories, resolving the SAME target test, and extracting+committing before the next session. Success =
+> the same test getting faster/better across successive ON runs. Frozen-corpus waves / peer-stack isolation / step-down relay
+> are SECONDARY/out-of-scope or history. **Built/unbuilt truth:** `wevibe-bench 46e266d` = arbitrary-ordered OFF/ON grouping
+> ONLY (no cumulative extract→commit→next-session persistence); current harness OFF writes no memory, ON recalls but does NOT
+> post-run extract/commit, no smart leader, no roster-seeded ON order, no served-memory-store/`/v1/serves` population, and the
+> zero-progress extraction gate (zero-resolution session ⇒ zero memories) is ABSENT. Clone HEAD `fbfde17` is dirty
+> (reproducibility blocker). Prior Stage result: transport PROVEN, lift/degradation UNMEASURED — NO degradation claim is
+> established; it remains a hypothesis/release criterion. The §1–§11 build state below predates this correction; read it
+> through this banner.
+
 ---
 
 ## 1. WHAT THE BENCHMARK IS
