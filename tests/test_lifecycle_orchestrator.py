@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import BenchmarkSchedule, BenchmarkWave, RunConfig
 from wevibe_bench.lifecycle.driver import RelayDriver
 from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
@@ -800,13 +800,13 @@ def test_driver_dry_pass_completes_without_live_services() -> None:
 
     driver = RelayDriver(
         cfg=LifecycleConfig(),
-        run_cfg=RunConfig(model_ladder=("model-dry",), tau=0.5, surface_budget=1),
+        run_cfg=RunConfig(schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="single", models=("model-dry",),),),), tau=0.5, surface_budget=1),
         m2_proof=DummyM2(),
         logger=logger,
         exercises=["exercise-1"],
     )
 
-    result = driver.dry_pass()
+    result = driver.dry_pass(model="model-dry")
     assert result["mode"] == "dry"
     assert result["model"] == "model-dry"
     assert len(result["results"]) == 1

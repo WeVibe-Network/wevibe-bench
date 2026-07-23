@@ -24,7 +24,7 @@ from wevibe_bench.backends.base import (
 )
 from wevibe_bench.backends.none_backend import NoneBackend
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import BenchmarkSchedule, RunConfig
 from wevibe_bench.scorecard import Cell, Scorecard
 
 
@@ -199,7 +199,17 @@ def _cell_from_outcome(
     scored: bool,
     not_scored_reason: str | None,
     outcome: TaskOutcome,
+    wave_id: str = "",
+    wave_index: int = 0,
+    position_in_wave: int = 0,
+    injection_count: int = 0,
+    memory_mode: str | None = None,
 ) -> Cell:
+    _ = wave_index
+    pattern_position = f"{wave_id}:{position_in_wave}" if wave_id else None
+    run_block = wave_id if wave_id else None
+    is_on_condition = condition.startswith("ON")
+
     return Cell(
         model=model,
         task_id=task_id,
@@ -213,6 +223,10 @@ def _cell_from_outcome(
         delivery=delivery,
         scored=scored,
         not_scored_reason=not_scored_reason,
+        pattern_position=pattern_position,
+        run_block=run_block,
+        injection_count=injection_count if is_on_condition else 0,
+        memory_mode=memory_mode,
     )
 
 
@@ -243,7 +257,7 @@ def run_ablation(
     on_backend: MemoryBackend | None = None,
     off_backend: MemoryBackend | None = None,
 ) -> Scorecard:
-    """Run deterministic OFF/ON memory ablation across cfg.model_ladder.
+    """Run deterministic OFF/ON memory ablation across cfg.schedule waves.
 
     A local RNG seeded from ``cfg.rng_seed`` drives any non-semantic ordering/id
     choices (session ids here), so repeated runs with the same seed are stable.
@@ -261,53 +275,65 @@ def run_ablation(
 
     scorecard = Scorecard(cfg, split_disclosure=split_disclosure)
 
-    for model in cfg.model_ladder:
-        for task_id in task_ids:
-            need = agent.build_need_card(task_id)
+    schedule: BenchmarkSchedule = cfg.schedule
 
-            off.prime_session(_session_id(model, task_id, "OFF", rng))
-            _ = off.recall(need, cfg)
-            off_outcome = agent.run_task(model, task_id, [])
-            off_cell = _cell_from_outcome(
-                model=model,
-                task_id=task_id,
-                condition="OFF",
-                delivery="N/A",
-                scored=True,
-                not_scored_reason=None,
-                outcome=off_outcome,
-            )
-            scorecard.add_cell(off_cell)
-            _log_cell(off_cell)
+    for wave_idx, wave in enumerate(schedule.waves):
+        for model_idx, model in enumerate(wave.models):
+            for task_id in task_ids:
+                need = agent.build_need_card(task_id)
 
-            on.prime_session(_session_id(model, task_id, "ON", rng))
-            result = on.recall(need, cfg)
-            verdict = on.verify_delivery(result)
+                if "off" in wave.memory_modes:
+                    off.prime_session(_session_id(model, task_id, "OFF", rng))
+                    _ = off.recall(need, cfg)
+                    off_outcome = agent.run_task(model, task_id, [])
+                    off_cell = _cell_from_outcome(
+                        model=model,
+                        task_id=task_id,
+                        condition="OFF",
+                        delivery="N/A",
+                        scored=True,
+                        not_scored_reason=None,
+                        outcome=off_outcome,
+                        wave_id=wave.wave_id,
+                        wave_index=wave_idx,
+                        position_in_wave=model_idx,
+                        injection_count=0,
+                        memory_mode="off",
+                    )
+                    scorecard.add_cell(off_cell)
+                    _log_cell(off_cell)
 
-            if cfg.require_delivery_verification and verdict != DeliveryVerdict.YES:
-                on_outcome = agent.run_task(model, task_id, [])
-                on_cell = _cell_from_outcome(
-                    model=model,
-                    task_id=task_id,
-                    condition="ON",
-                    delivery=verdict.value,
-                    scored=False,
-                    not_scored_reason=f"delivery={verdict.value}",
-                    outcome=on_outcome,
-                )
-            else:
-                on_outcome = agent.run_task(model, task_id, result.memories)
-                on_cell = _cell_from_outcome(
-                    model=model,
-                    task_id=task_id,
-                    condition="ON",
-                    delivery=verdict.value,
-                    scored=True,
-                    not_scored_reason=None,
-                    outcome=on_outcome,
-                )
+                if "on" in wave.memory_modes:
+                    on.prime_session(_session_id(model, task_id, "ON", rng))
+                    result = on.recall(need, cfg)
+                    verdict = on.verify_delivery(result)
+                    injection_count = len(result.memories)
 
-            scorecard.add_cell(on_cell)
-            _log_cell(on_cell)
+                    if cfg.require_delivery_verification and verdict != DeliveryVerdict.YES:
+                        on_memories = []
+                        on_scored = False
+                        on_not_scored_reason = f"delivery={verdict.value}"
+                    else:
+                        on_memories = result.memories
+                        on_scored = True
+                        on_not_scored_reason = None
+
+                    on_outcome = agent.run_task(model, task_id, on_memories)
+                    on_cell = _cell_from_outcome(
+                        model=model,
+                        task_id=task_id,
+                        condition="ON",
+                        delivery=verdict.value,
+                        scored=on_scored,
+                        not_scored_reason=on_not_scored_reason,
+                        outcome=on_outcome,
+                        wave_id=wave.wave_id,
+                        wave_index=wave_idx,
+                        position_in_wave=model_idx,
+                        injection_count=injection_count,
+                        memory_mode="on",
+                    )
+                    scorecard.add_cell(on_cell)
+                    _log_cell(on_cell)
 
     return scorecard

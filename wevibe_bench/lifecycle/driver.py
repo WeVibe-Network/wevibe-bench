@@ -124,8 +124,7 @@ class RelayDriver:
 
         return results
 
-    def dry_pass(self) -> dict[str, Any]:
-        model = self._run_cfg.model_ladder[0] if self._run_cfg.model_ladder else "dry-model"
+    def dry_pass(self, model: str) -> dict[str, Any]:
         exercise = self._exercise_set[0] if self._exercise_set else "dry-exercise"
 
         original_producer = self._producer_fn

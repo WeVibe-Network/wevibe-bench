@@ -870,11 +870,11 @@ def _build_import_entry(
             f"expected {expected_run_label!r}, got {config_run_label!r}"
         )
 
-    model_ladder = scorecard_config.get("model_ladder")
-    if not isinstance(model_ladder, list) or [str(v) for v in model_ladder] != [expected_model]:
+    schedule_data = scorecard_config.get("schedule")
+    if not isinstance(schedule_data, dict) or str(expected_model) not in schedule_data.get("all_models", []):
         raise RuntimeError(
-            "import-cell scorecard manifest.config.model_ladder mismatch: "
-            f"expected [{expected_model!r}], got {model_ladder!r}"
+            "import-cell scorecard manifest.config.schedule mismatch: "
+            f"expected model {expected_model!r} in schedule.all_models(), got {schedule_data}"
         )
 
     stats = _extract_stats(scorecard, detail)

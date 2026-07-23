@@ -4,13 +4,13 @@ import json
 
 from wevibe_bench.backends.base import NeedCard
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import BenchmarkSchedule, BenchmarkWave, RunConfig
 from wevibe_bench.runner import MockAgentRunner, run_ablation
 
 
 def _cfg(seed: int) -> RunConfig:
     return RunConfig(
-        model_ladder=("model-a", "model-b"),
+        schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="multi", models=("model-a", "model-b"),),),),
         rng_seed=seed,
         mcp_recall_url="http://offline.local",
         session_token_path="/tmp/__wevibe_bench_missing_token__",

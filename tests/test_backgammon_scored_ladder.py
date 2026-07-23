@@ -101,7 +101,7 @@ def _write_import_fixture(
             "config": {
                 "max_attempts": 3,
                 "run_label": run_label,
-                "model_ladder": [scorecard_model],
+                "schedule": {"all_models": [scorecard_model]},
             }
         },
         "model_diffs": [],

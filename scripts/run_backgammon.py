@@ -16,7 +16,7 @@ from wevibe_bench.adapters.backgammon import (
     BackgammonRunner,
 )
 from wevibe_bench.benv import load_bench_env
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import RunConfig, BenchmarkSchedule, BenchmarkWave
 from wevibe_bench.lifecycle.logging_util import run_logger
 from wevibe_bench.preflight import preflight
 from wevibe_bench.scorecard import Cell, Scorecard
@@ -249,7 +249,7 @@ def main() -> int:
     progress(start_line)
 
     cfg = RunConfig(
-        model_ladder=(args.model,),
+        schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="single", models=(args.model,), memory_modes=("off",),),),),
         run_label=args.run_label,
         tau=0.68,
         surface_budget=3,

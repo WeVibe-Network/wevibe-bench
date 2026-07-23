@@ -17,7 +17,7 @@ import sys
 
 from wevibe_bench.adapters.aider_polyglot import AiderPolyglotRunner
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import RunConfig, BenchmarkSchedule, BenchmarkWave
 from wevibe_bench.preflight import preflight
 from wevibe_bench.runner import run_ablation
 from wevibe_bench.scorecard import Cell, ModelDiff, Scorecard
@@ -239,7 +239,7 @@ def main() -> int:
     _configure_model_env(model_slug)
 
     cfg = RunConfig(
-        model_ladder=(model_slug,),
+        schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="single", models=(model_slug,), memory_modes=("off",),),),),
         tau=0.68,
         surface_budget=3,
         mcp_recall_url="http://localhost:4450",

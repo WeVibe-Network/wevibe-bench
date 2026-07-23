@@ -3,6 +3,10 @@
 Required launch environment for benchmark runs is process-scoped on the MCP side:
 WEVIBE_RECALL_MODE=test and WEVIBE_KEYSTORE_TEST=1 must be set before MCP startup.
 These are not request-body fields, and the harness cannot toggle them per request.
+
+Per D-BENCH-CONTRACT-2026-07: the benchmark measures pattern/quantity resilience and
+capability-direction safety across ordered waves; it is NOT a fixed strong→weak
+distillation script. The schedule schema below is the single active path.
 """
 
 from __future__ import annotations
@@ -10,20 +14,227 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Arbitrary schedule schema (replaces old fixed model_ladder)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BenchmarkWave:
+    """One wave of the benchmark schedule.
+
+    A wave groups models that run in parallel (or sequentially within the wave).
+    After a wave completes, extraction/commit happens, then the next wave starts.
+
+    ``tier`` is UNKNOWN/UNORDERED until registry evidence establishes bands;
+    never invent a tier or ordering. ``models`` are the model slugs in this
+    wave (arbitrary interleaving supported). ``memory_modes`` specifies which
+    recall modes this wave exercises.
+    """
+
+    wave_id: str
+    models: tuple[str, ...]
+    tier: str = "UNKNOWN"  # UNKNOWN/UNORDERED until registry evidence (D-BENCH-CONTRACT-2026-07 §10)
+    memory_modes: tuple[str, ...] = ("off", "on")
+
+    def validate(self) -> None:
+        """Validate this wave's structure. Raises RuntimeError on violation."""
+        if not str(self.wave_id).strip():
+            raise RuntimeError(f"wave_id must be non-empty: {self.wave_id!r}")
+        if not self.models:
+            raise RuntimeError(f"wave {self.wave_id!r} has no models")
+        for model in self.models:
+            if not str(model).strip():
+                raise RuntimeError(f"wave {self.wave_id!r} has blank model")
+        valid_tiers = {"UNKNOWN", "UNORDERED"} | {
+            "CEILING", "BRACKET", "FLOOR"
+        }  # CEILING/BRACKET/FLOOR from variance policy
+        if str(self.tier) not in valid_tiers:
+            raise RuntimeError(
+                f"wave {self.wave_id!r} tier {self.tier!r} not in "
+                f"{{UNKNOWN, UNORDERED, CEILING, BRACKET, FLOOR}}"
+            )
+        for mode in self.memory_modes:
+            if mode not in ("off", "on"):
+                raise RuntimeError(
+                    f"wave {self.wave_id!r} has unknown memory_mode {mode!r}"
+                )
+
+
+@dataclass(frozen=True)
+class BenchmarkSchedule:
+    """General pattern/quantity-resilience schedule (replaces old fixed model_ladder).
+
+    Supports arbitrary model-capability interleavings and run lengths per
+    D-BENCH-CONTRACT-2026-07. Waves are ordered; within each wave, models
+    may run in any order (interleaving supported).
+
+    ``waves`` is the ordered list of waves. ``schema_version`` bumps on
+    structural changes.
+    """
+
+    waves: tuple[BenchmarkWave, ...] = ()
+    schema_version: int = 1  # bump when structure/interpretation changes
+
+    def validate(self) -> None:
+        """Validate the entire schedule. Raises RuntimeError on violation."""
+        if not self.waves:
+            raise RuntimeError("benchmark schedule has no waves")
+        seen_wave_ids: set[str] = set()
+        for wave in self.waves:
+            wave.validate()
+            if wave.wave_id in seen_wave_ids:
+                raise RuntimeError(
+                    f"duplicate wave_id {wave.wave_id!r} in schedule"
+                )
+            seen_wave_ids.add(wave.wave_id)
+        # Ensure at least one wave with "off" mode (baseline required)
+        has_off = any("off" in w.memory_modes for w in self.waves)
+        if not has_off:
+            raise RuntimeError(
+                "benchmark schedule must include at least one wave with 'off' memory_mode"
+            )
+
+    def all_models(self) -> tuple[str, ...]:
+        """Return all model slugs across all waves, deduplicated, preserving first-seen order."""
+        seen: set[str] = set()
+        models: list[str] = []
+        for wave in self.waves:
+            for model in wave.models:
+                if model not in seen:
+                    seen.add(model)
+                    models.append(str(model))
+        return tuple(models)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to JSON-serializable dict for manifest."""
+        return {
+            "schema_version": self.schema_version,
+            "waves": [
+                {
+                    "wave_id": w.wave_id,
+                    "models": list(w.models),
+                    "tier": w.tier,
+                    "memory_modes": list(w.memory_modes),
+                }
+                for w in self.waves
+            ],
+        }
+
+
+def parse_benchmark_schedule(payload: dict[str, Any]) -> BenchmarkSchedule:
+    """Parse and validate a benchmark schedule from a dict.
+
+    Accepts the output of BenchmarkSchedule.to_dict() or a manual dict.
+    Raises RuntimeError on validation failure.
+    """
+    waves_raw = payload.get("waves")
+    if not isinstance(waves_raw, list):
+        raise RuntimeError("benchmark schedule 'waves' must be an array")
+
+    waves: list[BenchmarkWave] = []
+    for w_raw in waves_raw:
+        if not isinstance(w_raw, dict):
+            raise RuntimeError("each wave must be an object")
+        wave = BenchmarkWave(
+            wave_id=str(w_raw.get("wave_id", "")).strip(),
+            models=tuple(str(m) for m in w_raw.get("models", [])),
+            tier=str(w_raw.get("tier", "UNKNOWN")) if w_raw.get("tier") else "UNKNOWN",
+            memory_modes=tuple(str(m) for m in w_raw.get("memory_modes", ("off", "on"))),
+        )
+        wave.validate()  # validates in-place
+        waves.append(wave)
+
+    return BenchmarkSchedule(
+        waves=tuple(waves),
+        schema_version=int(payload.get("schema_version", 1)),
+    )
+
+
+def benchmark_schedule_fingerprint(
+    schedule: BenchmarkSchedule | None = None,
+) -> str:
+    """Return a deterministic fingerprint of the schedule.
+
+    Covers wave_ids, model slugs, tiers, and memory_modes.
+    """
+    resolved = schedule if schedule is not None else _default_benchmark_schedule()
+    canonical_payload = [
+        {
+            "wave_id": wave.wave_id,
+            "models": [str(model) for model in wave.models],
+            "tier": wave.tier,
+            "memory_modes": [str(mode) for mode in wave.memory_modes],
+        }
+        for wave in resolved.waves
+    ]
+    canonical = json.dumps(
+        canonical_payload,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Default schedule: current canon roster (UNKNOWN/UNORDERED)
+# ---------------------------------------------------------------------------
+
+# Canonical benchmark schedule — current roster with UNKNOWN/UNORDERED tiers
+# (D-BENCH-CONTRACT-2026-07 §10, DECISIONS §22.10).
+# Prior step-down/distillation framing and superseded rosters (D-BENCH-CONTRACT-2026-07)
+# are HISTORY, not current benchmark truth.
+#
+# Roster:
+#   z-ai/glm-5.2   pinned FriendliAI   (tier UNKNOWN)
+#   xiaomi/mimo-v2.5-pro  pinned DeepInfra  (tier UNKNOWN)
+#   tencent/hy3    pinned DeepInfra    (tier UNKNOWN)
+#
+# Tiers remain UNKNOWN/UNORDERED until registry evidence (D-BENCH-CONTRACT-2026-07 §10).
+# Prior scored roster (opus-4.8 / kimi-k2.7-code / minimax-m3) → history.
+_DEFAULT_SCHEDULE: BenchmarkSchedule = BenchmarkSchedule(
+    waves=(
+        BenchmarkWave(
+            wave_id="baseline",
+            models=(
+                "z-ai/glm-5.2",
+                "xiaomi/mimo-v2.5-pro",
+                "tencent/hy3",
+            ),
+            tier="UNKNOWN",
+            memory_modes=("off", "on"),
+        ),
+    ),
+    schema_version=1,
+)
+
+
+def _default_benchmark_schedule() -> BenchmarkSchedule:
+    """Return the canonical default benchmark schedule."""
+    return _DEFAULT_SCHEDULE
+
+
+# ---------------------------------------------------------------------------
+# RunConfig — schedule is the single active path (no model_ladder shim)
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Immutable benchmark manifest enforcing reproducibility and one-org MC-1 symmetry invariants."""
+    """Immutable benchmark manifest enforcing reproducibility and one-org MC-1 symmetry invariants.
 
-    # model ladder (capability step-down relay)
-    model_ladder: tuple[str, ...] = (
-        "opus-4.8",
-        "glm-5.2",
-        "kimi-k2.6",
-        "minimax-m3",
-        "minimax-M2.7-LOCAL",
-    )
+    The single active path is ``schedule`` (a BenchmarkSchedule). There is no
+    backward-compat fallback to a fixed model_ladder. New runs must provide an
+    explicit schedule; the default schedule uses the current canon roster with
+    UNKNOWN/UNORDERED tiers (D-BENCH-CONTRACT-2026-07).
+    """
+
+    # Schedule is the single active path (replaces old model_ladder).
+    schedule: BenchmarkSchedule = field(default_factory=_default_benchmark_schedule)
+
     tau: float = 0.68  # relevance floor on COMBINED score (ratified). Sent as relevance_floor on the wire.
     rng_seed: int = 20260709  # FIXED — the live D-9.4 sampler seeds from wall-clock; pin it or Recall@k>1 wobbles.
     surface_budget: int = 3  # prod surface budget / max-k
@@ -57,7 +268,7 @@ class RunConfig:
         """Return all fields as a JSON-serializable manifest for scorecard reproducibility."""
 
         return {
-            "model_ladder": list(self.model_ladder),
+            "schedule": self.schedule.to_dict(),
             "tau": self.tau,
             "rng_seed": self.rng_seed,
             "surface_budget": self.surface_budget,

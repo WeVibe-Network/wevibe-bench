@@ -16,7 +16,7 @@ from wevibe_bench.adapters.aider_polyglot import (
 )
 from wevibe_bench.backends.base import RecalledMemory
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import BenchmarkSchedule, BenchmarkWave, RunConfig
 from wevibe_bench.runner import run_ablation
 
 
@@ -26,7 +26,7 @@ def _fixture_polyglot_dir() -> Path:
 
 def _cfg() -> RunConfig:
     return RunConfig(
-        model_ladder=("model-a",),
+        schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="single", models=("model-a",),),),),
         rng_seed=20260708,
         mcp_recall_url="http://offline.local",
         session_token_path="/tmp/__wevibe_bench_missing_token__",
@@ -233,7 +233,7 @@ def test_run_ablation_off_on_round_trip_with_real_runner_and_mock_executor() -> 
     assert payload["manifest"]["split_disclosure"] == {"fixture": True}
 
     cells = payload["cells"]
-    assert len(cells) == len(runner.task_ids()) * 2 * len(cfg.model_ladder)
+    assert len(cells) == len(runner.task_ids()) * 2 * len(cfg.schedule.all_models())
     assert {cell["condition"] for cell in cells} == {"OFF", "ON"}
     for task_id in runner.task_ids():
         assert {cell["condition"] for cell in cells if cell["task_id"] == task_id} == {"OFF", "ON"}

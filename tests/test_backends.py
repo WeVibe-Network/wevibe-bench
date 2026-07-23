@@ -3,12 +3,12 @@ from __future__ import annotations
 from wevibe_bench.backends.base import DeliveryVerdict, NeedCard
 from wevibe_bench.backends.none_backend import NoneBackend
 from wevibe_bench.backends.wevibe_backend import WeVibeBackend
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import BenchmarkSchedule, BenchmarkWave, RunConfig
 
 
 def _cfg() -> RunConfig:
     return RunConfig(
-        model_ladder=("model-a",),
+        schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="single", models=("model-a",),),),),
         mcp_recall_url="http://offline.local",
         session_token_path="/tmp/__wevibe_bench_missing_token__",
     )

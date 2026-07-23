@@ -3,6 +3,15 @@
 This module enforces BENCHMARK INTEGRITY (not_scored never counts), TOTAL tokens
 (input+output), and reproducibility (config verbatim + rng_seed + timestamp in
 the manifest of every scorecard).
+
+Per D-BENCH-CONTRACT-2026-07, result fields capture pattern-position effects,
+run-block grouping, injected-memory counts, and execution memory mode (OFF|ON)
+— enabling pattern/quantity-resilience measurement without flooding.
+
+Phase A fields (nullable: when not populated by the current execution path,
+they remain None — this is an honest UNSUPPORTED/UNAVAILABLE status, not mock
+proof). Phase B will populate them from harness-trusted producer+extraction
+evidence and equal-or-lower filtering.
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ class Cell:
     model: str
     task_id: str
     condition: str  # 'OFF' | 'ON' | 'ON_REASONING' | 'ON_DISCOVERY' | ...
-    resolved: bool  # task pass/resolve
+    resolved: bool
     input_tokens: int
     output_tokens: int
     turns: int
@@ -27,6 +36,16 @@ class Cell:
     delivery: str  # DeliveryVerdict value 'YES'|'CALLED'|'NO', or 'N/A' for OFF cells
     scored: bool  # BENCHMARK INTEGRITY: False => not_scored (never counts as a hit)
     not_scored_reason: str | None = None
+
+    # Phase A fields (D-BENCH-CONTRACT-2026-07) — nullable: when not populated
+    # by the current execution path, they remain None (honest UNSUPPORTED/
+    # UNAVAILABLE status, not mock proof). Phase B will populate them from
+    # harness-trusted producer+extraction evidence.
+    pattern_position: str | None = None  # wave_id + position within wave (e.g. "baseline:0")
+    run_block: str | None = None  # session block identifier for grouping
+    injection_count: int | None = None  # number of injected memories
+    memory_mode: str | None = None  # OFF|ON from execution (replaces ambiguous off_injection)
+    # DEFERRED: replaced by memory_mode field
 
     @property
     def total_tokens(self) -> int:
@@ -54,6 +73,11 @@ class Cell:
             "delivery": self.delivery,
             "scored": self.scored,
             "not_scored_reason": self.not_scored_reason,
+            # Phase A fields (nullable — UNSUPPORTED/UNAVAILABLE when None)
+            "pattern_position": self.pattern_position,
+            "run_block": self.run_block,
+            "injection_count": self.injection_count,
+            "memory_mode": self.memory_mode,
         }
 
 

@@ -3,12 +3,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 
-from wevibe_bench.config import RunConfig
+from wevibe_bench.config import BenchmarkSchedule, BenchmarkWave, RunConfig
 from wevibe_bench.scorecard import Cell, Scorecard
 
 
 def _cfg() -> RunConfig:
-    return RunConfig(model_ladder=("model-a",), rng_seed=9001)
+    return RunConfig(
+        schedule=BenchmarkSchedule(
+            waves=(BenchmarkWave(wave_id="single", models=("model-a",)),),
+        ),
+        rng_seed=9001,
+    )
 
 
 def _cell(
