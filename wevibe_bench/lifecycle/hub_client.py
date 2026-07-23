@@ -27,6 +27,18 @@ def _json_value(payload: bytes) -> Any:
         return {}
 
 
+def deny_submission_message(org_id: str, reason: str, signed_by: str, submission_hash: str) -> str:
+    return "\n".join(
+        [
+            "wevibe.deny_submission.v1",
+            f"org_id:{org_id}",
+            f"reason:{reason}",
+            f"signed_by:{signed_by}",
+            f"submission_hash:{submission_hash}",
+        ]
+    )
+
+
 class HubClient:
     def __init__(
         self,
@@ -227,6 +239,49 @@ class HubClient:
             f"/v1/orgs/{org_id}/moderation/queue",
             None,
         )
+
+    def deny_submission(
+        self,
+        leader: Identity,
+        org_id: str,
+        submission_hash: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be non-empty")
+
+        body_signature = leader.sign_hex(
+            deny_submission_message(org_id, reason, leader.ed_pubkey_hex, submission_hash).encode("utf-8")
+        )
+
+        op = "lifecycle.hub.deny_submission"
+        t0 = time.perf_counter_ns()
+        payload = self._request(
+            op,
+            leader,
+            f"/v1/orgs/{org_id}/moderation/{submission_hash}/deny",
+            {
+                "reason": reason,
+                "signed_by": leader.ed_pubkey_hex,
+                "signature": body_signature,
+            },
+        )
+        dur_ms = (time.perf_counter_ns() - t0) // 1_000_000
+        self._log(
+            "info",
+            op,
+            "-",
+            "ok",
+            int(dur_ms),
+            leader_fp=leader.ed_pub_fp(),
+            org=org_id,
+            submission_hash=submission_hash,
+            http_status=200,
+        )
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"hub deny_submission expected object payload, got: {payload}")
+        return payload
 
     def member_orgs(self, identity: Identity) -> Any:
         return self._request(

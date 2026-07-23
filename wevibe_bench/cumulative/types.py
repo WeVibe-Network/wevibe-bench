@@ -1,0 +1,386 @@
+"""Shared contract leaf types for the cumulative benchmark sequencer."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import enum
+import hashlib
+import json
+from typing import Any, Mapping
+
+CUMULATIVE_SCHEMA_VERSION = 1
+# Telemetry seams that DO NOT exist in the current adapter (backgammon.py).
+# These are reported HONESTLY as unavailable rather than faked with nullable columns.
+# Any ProgressVector field left None means "see this list".
+MISSING_TELEMETRY_SEAMS = ("tool_calls", "test_invocations")
+
+
+def _enum_value(value: Any) -> str:
+    if isinstance(value, enum.Enum):
+        return str(value.value)
+    return "" if value is None else str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            out.append(dict(item))
+    return out
+
+
+def _normalize_missing_telemetry_seams(
+    provided: list[str] | None,
+    *,
+    seam_values: Mapping[str, Any],
+) -> list[str]:
+    normalized: list[str] = []
+    for seam in provided or []:
+        seam_name = str(seam).strip()
+        if seam_name and seam_name not in normalized:
+            normalized.append(seam_name)
+
+    for seam in MISSING_TELEMETRY_SEAMS:
+        if seam not in normalized:
+            normalized.append(seam)
+
+    for seam_name, seam_value in seam_values.items():
+        if seam_value is None and seam_name not in normalized:
+            normalized.append(seam_name)
+
+    return normalized
+
+
+class SessionPhase(str, enum.Enum):
+    PREPARE_FIXTURE = "PREPARE_FIXTURE"
+    RUN_SESSION = "RUN_SESSION"
+    EXTRACT_NORMAL_PIPELINE = "EXTRACT_NORMAL_PIPELINE"
+    AWAIT_COORDINATOR_REVIEW = "AWAIT_COORDINATOR_REVIEW"
+    LEADER_DECISION_APPLY = "LEADER_DECISION_APPLY"
+    COMMIT_INDEX_READY = "COMMIT_INDEX_READY"
+    NEXT_SESSION = "NEXT_SESSION"
+    DONE = "DONE"
+
+
+class PhaseGroup(str, enum.Enum):
+    OFF_BASELINE = "off_baseline"
+    ON = "on"
+
+
+PHASE_ORDER: tuple[SessionPhase, ...] = (
+    SessionPhase.PREPARE_FIXTURE,
+    SessionPhase.RUN_SESSION,
+    SessionPhase.EXTRACT_NORMAL_PIPELINE,
+    SessionPhase.AWAIT_COORDINATOR_REVIEW,
+    SessionPhase.LEADER_DECISION_APPLY,
+    SessionPhase.COMMIT_INDEX_READY,
+    SessionPhase.NEXT_SESSION,
+)
+
+
+_PHASE_INDEX: dict[SessionPhase, int] = {
+    phase: index for index, phase in enumerate(PHASE_ORDER)
+}
+
+
+def next_phase(phase: SessionPhase) -> SessionPhase | None:
+    index = _PHASE_INDEX.get(phase)
+    if index is None:
+        return None
+    next_index = index + 1
+    if next_index >= len(PHASE_ORDER):
+        return None
+    return PHASE_ORDER[next_index]
+
+
+@dataclass(frozen=True)
+class RosterEntry:
+    model: str
+    role: str
+    provider_pin: str
+    # Dict fields are mutable; do not rely on dataclass hashing for this type.
+    config_identity: dict[str, Any] = field(default_factory=dict)
+
+    def canonical(self) -> list[Any]:
+        return [
+            self.model,
+            self.role,
+            self.provider_pin,
+            json.dumps(self.config_identity, sort_keys=True, separators=(",", ":")),
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "role": self.role,
+            "provider_pin": self.provider_pin,
+            "config_identity": dict(self.config_identity),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> RosterEntry:
+        raw_identity = d.get("config_identity")
+        config_identity = dict(raw_identity) if isinstance(raw_identity, Mapping) else {}
+        return cls(
+            model=str(d["model"]),
+            role=str(d["role"]),
+            provider_pin=str(d.get("provider_pin", "")),
+            config_identity=config_identity,
+        )
+
+
+@dataclass(frozen=True)
+class ScheduledSession:
+    sequence_index: int
+    model: str
+    provider_pin: str
+    memory_mode: str
+    phase_group: str
+    roster_index: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence_index": self.sequence_index,
+            "model": self.model,
+            "provider_pin": self.provider_pin,
+            "memory_mode": self.memory_mode,
+            "phase_group": self.phase_group,
+            "roster_index": self.roster_index,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> ScheduledSession:
+        return cls(
+            sequence_index=int(d["sequence_index"]),
+            model=str(d["model"]),
+            provider_pin=str(d.get("provider_pin", "")),
+            memory_mode=str(d["memory_mode"]),
+            phase_group=_enum_value(d["phase_group"]),
+            roster_index=int(d["roster_index"]),
+        )
+
+
+@dataclass
+class ProgressVector:
+    """None means telemetry is unavailable for this run (see missing_telemetry_seams), not zero."""
+
+    problems_before: int | None = None
+    problems_after: int | None = None
+    resolved_count: int | None = None
+    remaining_count: int | None = None
+    full_green: bool = False
+    attempts_to_green: int | None = None
+    turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    wall_seconds: float = 0.0
+    wall_cost_usd: float = 0.0
+    injected_count: int | None = None
+    extraction_candidate_count: int | None = None
+    accepted_count: int | None = None
+    rejected_count: int | None = None
+    rejected_reasons: list[str] = field(default_factory=list)
+    termination_reason: str = ""
+    failed_gates: list[str] = field(default_factory=list)
+    missing_telemetry_seams: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.missing_telemetry_seams = _normalize_missing_telemetry_seams(
+            self.missing_telemetry_seams,
+            seam_values={
+                "problems_before": self.problems_before,
+                "problems_after": self.problems_after,
+                "resolved_count": self.resolved_count,
+                "remaining_count": self.remaining_count,
+                "attempts_to_green": self.attempts_to_green,
+                "injected_count": self.injected_count,
+                "extraction_candidate_count": self.extraction_candidate_count,
+                "accepted_count": self.accepted_count,
+                "rejected_count": self.rejected_count,
+            },
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        missing_telemetry_seams = _normalize_missing_telemetry_seams(
+            self.missing_telemetry_seams,
+            seam_values={
+                "problems_before": self.problems_before,
+                "problems_after": self.problems_after,
+                "resolved_count": self.resolved_count,
+                "remaining_count": self.remaining_count,
+                "attempts_to_green": self.attempts_to_green,
+                "injected_count": self.injected_count,
+                "extraction_candidate_count": self.extraction_candidate_count,
+                "accepted_count": self.accepted_count,
+                "rejected_count": self.rejected_count,
+            },
+        )
+        return {
+            "problems_before": self.problems_before,
+            "problems_after": self.problems_after,
+            "resolved_count": self.resolved_count,
+            "remaining_count": self.remaining_count,
+            "full_green": self.full_green,
+            "attempts_to_green": self.attempts_to_green,
+            "turns": self.turns,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "wall_seconds": self.wall_seconds,
+            "wall_cost_usd": self.wall_cost_usd,
+            "injected_count": self.injected_count,
+            "extraction_candidate_count": self.extraction_candidate_count,
+            "accepted_count": self.accepted_count,
+            "rejected_count": self.rejected_count,
+            "rejected_reasons": list(self.rejected_reasons),
+            "termination_reason": self.termination_reason,
+            "failed_gates": list(self.failed_gates),
+            "missing_telemetry_seams": missing_telemetry_seams,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> ProgressVector:
+        return cls(
+            problems_before=_optional_int(d.get("problems_before")),
+            problems_after=_optional_int(d.get("problems_after")),
+            resolved_count=_optional_int(d.get("resolved_count")),
+            remaining_count=_optional_int(d.get("remaining_count")),
+            full_green=bool(d.get("full_green", False)),
+            attempts_to_green=_optional_int(d.get("attempts_to_green")),
+            turns=int(d.get("turns", 0)),
+            input_tokens=int(d.get("input_tokens", 0)),
+            output_tokens=int(d.get("output_tokens", 0)),
+            total_tokens=int(d.get("total_tokens", 0)),
+            wall_seconds=float(d.get("wall_seconds", 0.0)),
+            wall_cost_usd=float(d.get("wall_cost_usd", 0.0)),
+            injected_count=_optional_int(d.get("injected_count")),
+            extraction_candidate_count=_optional_int(d.get("extraction_candidate_count")),
+            accepted_count=_optional_int(d.get("accepted_count")),
+            rejected_count=_optional_int(d.get("rejected_count")),
+            rejected_reasons=_string_list(d.get("rejected_reasons")),
+            termination_reason=str(d.get("termination_reason", "")),
+            failed_gates=_string_list(d.get("failed_gates")),
+            missing_telemetry_seams=_string_list(d.get("missing_telemetry_seams")),
+        )
+
+
+@dataclass
+class SessionRecord:
+    sequence_index: int
+    model: str
+    provider_pin: str
+    memory_mode: str
+    phase_group: str
+    phase: str
+    run_id: str | None = None
+    run_label: str | None = None
+    session_id: str | None = None
+    org_id: str | None = None
+    extraction_job_id: str | None = None
+    session_fp: str | None = None
+    candidate_refs: list[dict[str, Any]] = field(default_factory=list)
+    extraction_candidate_count: int | None = None
+    progress: dict[str, Any] | None = None
+    decision_applied: bool = False
+    committed_ids: list[str] = field(default_factory=list)
+    corpus_delta: int | None = None
+    retry_count: int = 0
+    resume_marker: str | None = None
+    error: str | None = None
+    started_at: str | None = None
+    updated_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence_index": self.sequence_index,
+            "model": self.model,
+            "provider_pin": self.provider_pin,
+            "memory_mode": self.memory_mode,
+            "phase_group": self.phase_group,
+            "phase": self.phase,
+            "run_id": self.run_id,
+            "run_label": self.run_label,
+            "session_id": self.session_id,
+            "org_id": self.org_id,
+            "extraction_job_id": self.extraction_job_id,
+            "session_fp": self.session_fp,
+            "candidate_refs": [dict(candidate) for candidate in self.candidate_refs],
+            "extraction_candidate_count": self.extraction_candidate_count,
+            "progress": dict(self.progress) if isinstance(self.progress, Mapping) else self.progress,
+            "decision_applied": self.decision_applied,
+            "committed_ids": list(self.committed_ids),
+            "corpus_delta": self.corpus_delta,
+            "retry_count": self.retry_count,
+            "resume_marker": self.resume_marker,
+            "error": self.error,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> SessionRecord:
+        progress_value = d.get("progress")
+        progress_dict = dict(progress_value) if isinstance(progress_value, Mapping) else None
+        return cls(
+            sequence_index=int(d["sequence_index"]),
+            model=str(d["model"]),
+            provider_pin=str(d.get("provider_pin", "")),
+            memory_mode=str(d.get("memory_mode", "off")),
+            phase_group=_enum_value(d.get("phase_group", PhaseGroup.OFF_BASELINE.value)),
+            phase=_enum_value(d.get("phase", SessionPhase.PREPARE_FIXTURE.value)),
+            run_id=d.get("run_id"),
+            run_label=d.get("run_label"),
+            session_id=d.get("session_id"),
+            org_id=d.get("org_id"),
+            extraction_job_id=d.get("extraction_job_id"),
+            session_fp=d.get("session_fp"),
+            candidate_refs=_dict_list(d.get("candidate_refs")),
+            extraction_candidate_count=_optional_int(d.get("extraction_candidate_count")),
+            progress=progress_dict,
+            decision_applied=bool(d.get("decision_applied", False)),
+            committed_ids=_string_list(d.get("committed_ids")),
+            corpus_delta=_optional_int(d.get("corpus_delta")),
+            retry_count=int(d.get("retry_count", 0)),
+            resume_marker=d.get("resume_marker"),
+            error=d.get("error"),
+            started_at=d.get("started_at"),
+            updated_at=d.get("updated_at"),
+        )
+
+    def set_phase(self, phase: SessionPhase) -> None:
+        self.phase = phase.value
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def session_fp_of(session_id: str) -> str:
+        return hashlib.sha256(session_id.encode()).hexdigest()[:8]
+
+
+__all__ = [
+    "CUMULATIVE_SCHEMA_VERSION",
+    "MISSING_TELEMETRY_SEAMS",
+    "SessionPhase",
+    "PhaseGroup",
+    "PHASE_ORDER",
+    "next_phase",
+    "RosterEntry",
+    "ScheduledSession",
+    "ProgressVector",
+    "SessionRecord",
+]

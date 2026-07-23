@@ -304,3 +304,103 @@ Resumed/parked jobs may carry `episode_metadata: "unavailable_on_resume"`. A
 (`resolved_problem_count`/`unresolved_problem_count`/`coincidental_count`) or
 lacks `invariant_violation` is uncorrelatable-for-invariant and therefore
 abort-worthy under the missing-record rule above.
+
+## Smart-leader review (post-extraction, at the AWAIT_COORDINATOR_REVIEW boundary)
+
+**Scope + ordering:** this is a coordinator post-pass at the durable
+`AWAIT_COORDINATOR_REVIEW` checkpoint. It does NOT supersede the
+extraction-integrity gate above. That gate is unchanged, runs first, and stays
+binding.
+
+1. **Boundary and control handoff (durable checkpoint)**
+   - `scripts/run_cumulative.py run --until-review` advances one session to
+     `AWAIT_COORDINATOR_REVIEW`, then pauses and returns:
+     `{sequence_index, job_id, session_fp, candidate_count}` (plus
+     `status="awaiting_coordinator_review"`).
+   - At that boundary, the sequencer yields to the external coordinator.
+   - Resume only with `scripts/run_cumulative.py resume --decision <path>`.
+
+2. **Extraction-integrity gate still runs first (unchanged hard-abort rule)**
+   - The coordinator MUST perform the existing integrity check against
+     `extraction.integrity` first, before any leader verify/commit action.
+   - Correlate by `job_id` and/or `session_fp`, scoped by `org_id`, using the
+     terminal record in
+     `<WEVIBE_LOG_DIR, else <workspace>/wevibe-meta>/.logs/ops/extraction.integrity-<YYYYMMDD>.log`.
+   - If the matching terminal record is missing/uncorrelatable, or if
+     `resolved_problem_count == 0 && emitted_memory_count > 0`
+     (`invariant_violation == true`), the coordinator MUST HARD-ABORT the whole
+     benchmark before `m2_proof.leader_verify_and_commit`.
+   - Smart-leader `deny_final` does NOT supersede this abort. Denial is
+     curation; abort is an integrity stop. Both coexist.
+
+3. **Smart-leader review steps (only after the integrity gate passes)**
+   - **RECONCILE:** reconcile authoritative chain/hub committed inventory
+     against the private benchmark catalog via
+     `scripts/run_cumulative.py reconcile-inventory --authoritative <json>`.
+     Any authoritative committed item with no matching private catalog text is
+     reported as `content_unavailable` and MUST NEVER be guessed/fabricated.
+     Pass `--require-complete` to FAIL CLOSED before review when the org's
+     authoritative inventory is non-empty but the catalog is incomplete
+     (`catalog_complete == false`): the command surfaces the `in_chain_not_catalog`
+     discrepancy and exits non-zero, so completeness is never silently assumed.
+     (Denial stays non-fatal and is unrelated to this gate.)
+   - **COMPARE:** compare every new extraction candidate against the private
+     catalog using duplicate signals already implemented in
+     `wevibe_bench.cumulative.catalog.PrivateCatalog.find_duplicates`:
+     exact content-hash match, exact submission-hash match, plus keyword-overlap
+     advisory. Carry duplicate references into the decision evidence.
+     The coordinator obtains the plaintext it needs for this semantic cross-check
+     — the NEW pending candidates' synthetic text AND the prior-accepted committed
+     text — from `scripts/run_cumulative.py review-material`, which writes ONE
+     `0600` private artifact (`*.private.json`, gitignored). The manifest/checkpoint
+     itself stores candidate refs REDACTED to hash-only (`content_hash`, no text);
+     new-candidate synthetic text lives only in the `0600` `*.review.jsonl` review
+     card, and prior-accepted text only in the `0600` `*.catalog.jsonl`.
+   - **DECIDE ALL:** emit a versioned decision manifest
+     (`emit-decision-template` scaffolds it) and set every candidate verdict to
+     `verify` or `deny_final`, each with a non-empty reason (and duplicate refs
+     / evidence as applicable). The manifest MUST also carry integrity
+     attestation: `job_id`, `session_fp`, `resolved_problem_count`,
+     `emitted_memory_count`, `invariant_violation`, `integrity_record_seen`.
+     The manifest-contract gate (`validate-decision`) rejects missing or
+     uncorrelatable attestation, but does NOT re-run the runtime extraction
+     integrity check.
+   - **APPLY (real leader/hub path only):**
+     - `verify` → `m2_proof.leader_verify_and_commit` (real hub
+       moderation queue/embed/keyword verify/batch flow + leader-signer commit).
+     - `deny_final` → real hub leader deny route
+       `POST /v1/orgs/{org}/moderation/{hash}/deny` via
+       `HubClient.deny_submission`, body-signed canonical
+       `wevibe.deny_submission.v1`.
+     - No direct DB/Qdrant/chain writes.
+   - **DENIAL IS NON-FATAL:** denying some or all candidates is normal curation
+     and MUST NOT abort the benchmark. Each denial is recorded in the safe
+     decision ledger (hashes/CIDs/reasons/counts only), then the run continues
+     through `COMMIT_INDEX_READY`/`NEXT_SESSION`. Reapplying the same decision
+     manifest is idempotent; conflicting re-decision is rejected.
+
+4. **Discovery, correlation, and privacy boundaries**
+   - Extraction integrity record discovery path is exactly:
+     `<WEVIBE_LOG_DIR, else <workspace>/wevibe-meta>/.logs/ops/extraction.integrity-<YYYYMMDD>.log`.
+   - In the scored cumulative path, the private committed-memory catalog is
+     under `runs/` (manifest-relative `*.catalog.jsonl`), enforced `0600`,
+     gitignored by suffix, and stores synthetic benchmark comparison text only.
+     It is chain-bound for comparison workflows, but never authoritative.
+   - Private comparison text MUST NOT be copied into logs/reports/git. The
+     safe/public decision ledger carries hashes/CIDs/counts/reasons only
+     (R-37 / D-MISSION-INVARIANT: fingerprints + sizes, never
+     plaintext/secrets/raw keys).
+   - Authoritative identity reconciliation for the authoritative inventory input
+     uses chain `x/org` (`GetMembers` / `GetOrg`) plus hub `ListMembers`. Each
+     accepted catalog entry binds to the committing identity RETURNED by
+     verify/commit when the payload carries it (`committing_leader_pubkey` etc.),
+     else the local leader pubkey; `reconcile` flags any `identity_mismatch`.
+   - **Two distinct "leader" roles (do NOT conflate):** the cryptographic
+     leader-signer on the hub/chain commit path sees NO plaintext (only ciphertext
+     + wrapped DEK + embedding card). The authorized external smart-leader
+     COORDINATOR necessarily DOES read synthetic candidate + prior-accepted catalog
+     comparison text to make semantic verify/deny decisions — this is by design and
+     is NOT a leak. That authorized plaintext lives ONLY in the `0600` private
+     review card (`*.review.jsonl`), catalog (`*.catalog.jsonl`), and the `0600`
+     `review-material` artifact (`*.private.json`) — never in op/decision logs, the
+     manifest checkpoint, reports, or git (all of which stay hash-only).

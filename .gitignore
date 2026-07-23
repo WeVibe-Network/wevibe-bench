@@ -25,6 +25,9 @@ htmlcov/
 # The adapter is open-sourced; the corpus/keys/epoch_sk are NOT.
 *.wevibe-session-token
 runs/
+*.catalog.jsonl
+*.review.jsonl
+*.private.json
 scorecards/
 *.scorecard.json
 
