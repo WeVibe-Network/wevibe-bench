@@ -264,3 +264,43 @@ the three enforcement layers below (physical isolation, cheat-gate invalidation,
   observed output, file paths, or stack traces.
 - Any cheat detection = INVALID cell (never PASS, even if gate outputs pass).
 - Full directive/spec: `docs/ORACLE-ISOLATION-DIRECTIVE.md`.
+
+## Extraction-integrity gate (external coordinator responsibility)
+
+**Binding rule (load before any scored benchmark run):**
+
+Before any scored benchmark run, the external coordinator (the OpenCode
+operator agent driving the benchmark) MUST load this directive.
+
+After **every** extraction completion during that run, the coordinator MUST read
+the matching MCP terminal integrity record in the `extraction.integrity` ops
+log at
+`<WEVIBE_LOG_DIR, else <workspace>/wevibe-meta>/.logs/ops/extraction.integrity-<YYYYMMDD>.log`
+(UTC day), and correlate it by returned `job_id` and/or
+`session_fp = sha256-first8(session_id)`, scoped by `org_id`.
+
+If the matching terminal record is **missing** or **cannot be correlated**, or
+if it reports `resolved_problem_count == 0 && emitted_memory_count > 0`
+(`invariant_violation == true`), the coordinator MUST ABORT the whole benchmark
+BEFORE `m2_proof.leader_verify_and_commit`, preserve the run logfile and
+checkpoint, and escalate with `job_id`, `trace`, session fingerprint, and the
+resolved/emitted counts.
+
+The coordinator MUST NOT continue, MUST NOT self-heal or retry around the
+violation, and MUST NOT approve or commit the memory.
+
+For `failed` or `parked` outcomes, follow existing extraction-failure handling
+and NEVER infer an invariant pass from the absence of a violation flag.
+
+**Correlation limitation (must be handled explicitly):** the outer scored-ladder
+`trace` is not propagated into MCP; each MCP REST call mints its own
+`X-WeVibe-Trace-Id`. Reliable cross-boundary correlation keys are: (1) the
+`job_id` returned in the `POST /v1/extract` 202 response body, and (2) the
+`session_id` sent by the coordinator (matched via `session_fp`). `org_id`
+further scopes matches.
+
+Resumed/parked jobs may carry `episode_metadata: "unavailable_on_resume"`. A
+`completed` record that lacks episode-count fields
+(`resolved_problem_count`/`unresolved_problem_count`/`coincidental_count`) or
+lacks `invariant_violation` is uncorrelatable-for-invariant and therefore
+abort-worthy under the missing-record rule above.

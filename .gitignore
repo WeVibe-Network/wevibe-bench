@@ -44,3 +44,6 @@ tasks/**/test-results/
 tasks/**/playwright-report/
 tasks/**/.last-run.json
 .wevibe/
+
+# Local orchestration docs (never committed)
+AGENTS.md

@@ -43,6 +43,7 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
   `scripts/run_backgammon.py` (single cell/session, `--memory-modes off,on`, NO extraction) →
   `wevibe_bench/adapters/backgammon.py` (spawns headless `opencode run`, feedback loop, gate run, cheat-gate).
 - **Extraction/SxE:** `scripts/backgammon_sxe.py` (extract→submit→leader_verify→commit→prove_delivery).
+- **Coordinator gate (binding):** external operator must load/enforce RUNBOOK "Extraction-integrity gate" + local `AGENTS.md` and abort before `m2_proof.leader_verify_and_commit` on missing/uncorrelatable `extraction.integrity` terminal records or invariant breaches.
 - **Cheat gate:** `wevibe_bench/adapters/cheat_detector.py` (`scan_events_for_oracle_access`, tests in
   `tests/test_cheat_detector.py`).
 - **Task assets:** `tasks/backgammon/` = `scaffold/` (7 stub files seeded into each worktree — patch-to-green,
