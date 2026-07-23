@@ -3,16 +3,39 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 from typing import Callable
 
+from wevibe_bench.config import RunConfig
+
 
 WORKER_IMAGE = "wevibe-bench-worker:v1"
 WORKER_NETWORK = "wevibe-bench-net"
+
+
+def _default_primary_recall_mode() -> str:
+    return str(RunConfig().primary_recall_mode)
+
+
+def _default_primary_recall_relevance_floor() -> float:
+    return float(RunConfig().primary_recall_relevance_floor)
+
+
+def _default_primary_recall_max_injected() -> int:
+    return int(RunConfig().primary_recall_max_injected)
+
+
+def _default_served_memories_host_path() -> str:
+    return str(RunConfig().served_memories_host_path)
+
+
+def _default_served_memories_container_path() -> str:
+    return str(RunConfig().served_memories_container_path)
 
 
 def docker_available() -> tuple[bool, str]:
@@ -143,7 +166,14 @@ class DockerCellConfig:
     network: str = WORKER_NETWORK
     recall_url: str = "http://host.docker.internal:4550"
     hub_url: str = "http://host.docker.internal:4440"
-    recall_mode: str = "test"
+    # Primary scored path defaults to RunConfig.primary_recall_mode (prod).
+    # Diagnostic/non-primary paths can still override this field (for example, test mode).
+    recall_mode: str = field(default_factory=_default_primary_recall_mode)
+    primary_recall_relevance_floor: float = field(default_factory=_default_primary_recall_relevance_floor)
+    primary_recall_max_injected: int = field(default_factory=_default_primary_recall_max_injected)
+    served_memories_host_path: str = field(default_factory=_default_served_memories_host_path)
+    served_memories_container_path: str = field(default_factory=_default_served_memories_container_path)
+    plugin_config_host_path: str = "~/.wevibe/plugin-config.json"
     proxy_base_url: str | None = None
     proxy_token: str | None = None
     home_dir: str = "/home/worker"
@@ -197,6 +227,17 @@ class DockerCell:
             gid=gid,
             memory_mode=mode,
         )
+
+        if mode == "on":
+            self._progress(
+                "PROGRESS recall-primary-config "
+                f"mode={str(self.config.recall_mode).strip().lower()} "
+                f"served_store_host={_resolve_host_path(self.config.served_memories_host_path)} "
+                f"served_store_container={self.config.served_memories_container_path} "
+                f"recall_relevance_floor={float(self.config.primary_recall_relevance_floor):.6g} "
+                f"recall_max_injected={int(self.config.primary_recall_max_injected)}"
+            )
+
         run_env = os.environ.copy()
         run_env["OPENROUTER_API_KEY"] = proxy_token
 
@@ -645,25 +686,51 @@ def _build_run_argv(
         )
 
     if memory_mode == "on":
-        host_token = Path("~/.wevibe/mcp-session-token").expanduser()
+        host_token = _resolve_host_path("~/.wevibe/mcp-session-token")
         if not host_token.is_file():
             raise FileNotFoundError(
                 "memory_mode='on' requires host token ~/.wevibe/mcp-session-token; "
                 "start the wevibe-mcp clone or run bench preflight to mint it"
             )
 
+        recall_mode = str(config.recall_mode).strip().lower()
+        if not recall_mode:
+            raise ValueError("DockerCellConfig.recall_mode must be non-empty when memory_mode='on'")
+
+        host_served_memories = _resolve_host_path(config.served_memories_host_path)
+        _ensure_served_memories_store(host_served_memories)
+
+        host_plugin_config = _resolve_host_path(config.plugin_config_host_path)
+        _merge_plugin_config(
+            host_plugin_config,
+            recall_relevance_floor=config.primary_recall_relevance_floor,
+            recall_max_injected=config.primary_recall_max_injected,
+        )
+
+        token_dest = f"{config.home_dir}/.wevibe/mcp-session-token"
+        plugin_config_dest = f"{config.home_dir}/.wevibe/plugin-config.json"
+
         run_cmd.extend(
             [
                 "-e",
                 f"WEVIBE_MCP_HTTP_URL={config.recall_url}",
                 "-e",
-                f"WEVIBE_RECALL_MODE={config.recall_mode}",
+                f"WEVIBE_RECALL_MODE={recall_mode}",
                 "-e",
                 f"WEVIBE_HUB_URL={config.hub_url}",
+                "-e",
+                f"WEVIBE_SERVED_MEMORIES_PATH={config.served_memories_container_path}",
                 # Vendored wevibe plugin hardcodes ~/.wevibe/mcp-session-token and
                 # the clone API is bearer-gated; mount that token only, read-only.
                 "-v",
-                f"{host_token}:{config.home_dir}/.wevibe/mcp-session-token:ro",
+                f"{host_token}:{token_dest}:ro",
+                # The plugin reads ~/.wevibe/plugin-config.json from homedir(); mount
+                # a host-authored config so primary governor values are explicit.
+                "-v",
+                f"{host_plugin_config}:{plugin_config_dest}:ro",
+                # Shared served-store file bridges container writes back to the host.
+                "-v",
+                f"{host_served_memories}:{config.served_memories_container_path}:rw",
             ]
         )
 
@@ -676,6 +743,56 @@ def _result_detail(completed: subprocess.CompletedProcess[str]) -> str:
     stdout = completed.stdout.strip() if completed.stdout else ""
     detail = stderr or stdout
     return detail or f"exit={completed.returncode}"
+
+
+def _resolve_host_path(raw_path: str) -> Path:
+    return Path(str(raw_path)).expanduser().resolve()
+
+
+def _ensure_served_memories_store(path: Path) -> None:
+    resolved = Path(path).expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    if resolved.exists() and not resolved.is_file():
+        raise RuntimeError(f"served-memories path must be a file: {resolved}")
+
+    if not resolved.exists():
+        resolved.write_text('{"version":1,"memories":{}}', encoding="utf-8")
+
+    resolved.chmod(0o600)
+
+
+def _merge_plugin_config(
+    path: Path,
+    *,
+    recall_relevance_floor: float,
+    recall_max_injected: int,
+) -> None:
+    resolved = Path(path).expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, object] = {}
+    if resolved.exists():
+        if not resolved.is_file():
+            raise RuntimeError(f"plugin-config path must be a file: {resolved}")
+        raw = resolved.read_text(encoding="utf-8").strip()
+        if raw:
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"plugin-config at {resolved} is invalid JSON: {exc}") from exc
+            if not isinstance(decoded, dict):
+                raise RuntimeError(f"plugin-config at {resolved} must decode to a JSON object")
+            payload = dict(decoded)
+
+    payload["recall_relevance_floor"] = float(recall_relevance_floor)
+    payload["recall_max_injected"] = int(recall_max_injected)
+
+    resolved.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    resolved.chmod(0o600)
 
 
 def _host_uid() -> int:

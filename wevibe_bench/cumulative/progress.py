@@ -120,6 +120,7 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         wall_seconds=_float_or_default(_field(result, "wall_seconds"), default=0.0),
         wall_cost_usd=_float_or_default(_field(result, "wall_cost_usd"), default=0.0),
         injected_count=_optional_int(_field(cell, "injection_count")),
+        consumer_injected_count=None,
         termination_reason=_str_or_default(_field(result, "termination_reason"), default=""),
         failed_gates=_str_list(_field(result, "failed_gates")),
         missing_telemetry_seams=list(MISSING_TELEMETRY_SEAMS),

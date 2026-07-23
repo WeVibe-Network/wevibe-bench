@@ -553,8 +553,30 @@ def test_fresh_cell_isolation_between_distinct_worktrees(tmp_path: Path) -> None
 
 
 @REQUIRES_DOCKER
-def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(tmp_path: Path) -> None:
+def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     _require_worker_image()
+
+    fake_home = tmp_path / "fake-home"
+    host_wevibe = fake_home / ".wevibe"
+    host_wevibe.mkdir(parents=True, exist_ok=True)
+
+    token_host_path = host_wevibe / "mcp-session-token"
+    token_host_path.write_text("bench-test-token\n", encoding="utf-8")
+    token_host_path.chmod(0o600)
+
+    plugin_config_host_path = host_wevibe / "plugin-config.json"
+    plugin_config_host_path.write_text(
+        json.dumps({"preserve_me": "still-here", "recall_max_injected": 1}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    primary_cfg = RunConfig()
+    served_store_host_path = Path(primary_cfg.served_memories_host_path)
+    assert not served_store_host_path.exists()
 
     worktree_on = tmp_path / "worktree-on"
     worktree_off = tmp_path / "worktree-off"
@@ -572,25 +594,40 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(tmp_pa
     with _started_cell(worktree_on, memory_mode="on") as on_cell:
         on_env = _container_env(on_cell)
         assert on_env.get("WEVIBE_MCP_HTTP_URL") == "http://host.docker.internal:4550"
-        assert on_env.get("WEVIBE_RECALL_MODE") == "test"
+        assert on_env.get("WEVIBE_RECALL_MODE") == primary_cfg.primary_recall_mode
         assert on_env.get("WEVIBE_HUB_URL") == "http://host.docker.internal:4440"
+        assert on_env.get("WEVIBE_SERVED_MEMORIES_PATH") == primary_cfg.served_memories_container_path
         for forbidden in forbidden_env_names:
             assert forbidden not in on_env
 
         mounts_on = _inspect_mounts(on_cell.container_name)
         assert mounts_on, "container must expose at least one mount"
         token_destination = "/home/worker/.wevibe/mcp-session-token"
+        plugin_config_destination = "/home/worker/.wevibe/plugin-config.json"
+        served_store_destination = primary_cfg.served_memories_container_path
         destinations_on = {str(mount.get("Destination", "")) for mount in mounts_on}
-        assert destinations_on == {"/work", token_destination}
+        assert destinations_on == {
+            "/work",
+            token_destination,
+            plugin_config_destination,
+            served_store_destination,
+        }
 
         expected_worktree_source = os.path.realpath(str(worktree_on.resolve()))
-        expected_token_source = os.path.realpath(str(Path("~/.wevibe/mcp-session-token").expanduser()))
+        expected_token_source = os.path.realpath(str(token_host_path.resolve()))
+        expected_plugin_config_source = os.path.realpath(str(plugin_config_host_path.resolve()))
+        expected_served_store_source = os.path.realpath(str(served_store_host_path.resolve()))
         source_paths_on = {
             os.path.realpath(str(Path(str(mount.get("Source", ""))).resolve()))
             for mount in mounts_on
             if mount.get("Source")
         }
-        assert source_paths_on == {expected_worktree_source, expected_token_source}
+        assert source_paths_on == {
+            expected_worktree_source,
+            expected_token_source,
+            expected_plugin_config_source,
+            expected_served_store_source,
+        }
         assert os.path.realpath(str(HOST_GOLDEN_PATH)) not in source_paths_on
 
         token_mount = next(
@@ -602,6 +639,49 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(tmp_pa
         if "Mode" in token_mount and token_mount["Mode"] is not None:
             assert "ro" in str(token_mount["Mode"])
 
+        plugin_config_mount = next(
+            mount
+            for mount in mounts_on
+            if str(mount.get("Destination", "")) == plugin_config_destination
+        )
+        assert (
+            os.path.realpath(str(Path(str(plugin_config_mount.get("Source", ""))).resolve()))
+            == expected_plugin_config_source
+        )
+        if "RW" in plugin_config_mount:
+            assert plugin_config_mount["RW"] is False
+        if "Mode" in plugin_config_mount and plugin_config_mount["Mode"] is not None:
+            assert "ro" in str(plugin_config_mount["Mode"])
+
+        served_store_mount = next(
+            mount
+            for mount in mounts_on
+            if str(mount.get("Destination", "")) == served_store_destination
+        )
+        assert (
+            os.path.realpath(str(Path(str(served_store_mount.get("Source", ""))).resolve()))
+            == expected_served_store_source
+        )
+        if "RW" in served_store_mount:
+            assert served_store_mount["RW"] is True
+        if "Mode" in served_store_mount and served_store_mount["Mode"] is not None:
+            assert "ro" not in str(served_store_mount["Mode"])
+
+        assert served_store_host_path.is_file()
+        assert json.loads(served_store_host_path.read_text(encoding="utf-8")) == {
+            "version": 1,
+            "memories": {},
+        }
+        assert (served_store_host_path.stat().st_mode & 0o777) == 0o600
+
+        plugin_payload = json.loads(plugin_config_host_path.read_text(encoding="utf-8"))
+        assert plugin_payload["preserve_me"] == "still-here"
+        assert plugin_payload["recall_relevance_floor"] == pytest.approx(
+            primary_cfg.primary_recall_relevance_floor
+        )
+        assert plugin_payload["recall_max_injected"] == primary_cfg.primary_recall_max_injected
+        assert (plugin_config_host_path.stat().st_mode & 0o777) == 0o600
+
         for mount in mounts_on:
             source_text = str(mount.get("Source", "")).lower()
             assert "keystore" not in source_text
@@ -612,6 +692,7 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(tmp_pa
         assert "WEVIBE_MCP_HTTP_URL" not in off_env
         assert "WEVIBE_RECALL_MODE" not in off_env
         assert "WEVIBE_HUB_URL" not in off_env
+        assert "WEVIBE_SERVED_MEMORIES_PATH" not in off_env
         for forbidden in forbidden_env_names:
             assert forbidden not in off_env
 

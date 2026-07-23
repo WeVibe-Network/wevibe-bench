@@ -1,8 +1,8 @@
 """Benchmark run configuration for WeVibe memory ablation.
 
-Required launch environment for benchmark runs is process-scoped on the MCP side:
-WEVIBE_RECALL_MODE=test and WEVIBE_KEYSTORE_TEST=1 must be set before MCP startup.
-These are not request-body fields, and the harness cannot toggle them per request.
+Recall-mode launch behavior is process-scoped on the MCP/plugin side (not request-body
+fields), so benchmark reproducibility requires explicit config for both primary scored
+and diagnostic paths.
 
 Per D-BENCH-CONTRACT-2026-07: the benchmark measures pattern/quantity resilience and
 capability-direction safety across ordered waves; it is NOT a fixed strong→weak
@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 
@@ -217,6 +218,12 @@ def _default_benchmark_schedule() -> BenchmarkSchedule:
     return _DEFAULT_SCHEDULE
 
 
+def _default_served_memories_host_path() -> str:
+    """Resolved host path for the shared served-memories store JSON."""
+
+    return str(Path("~/.wevibe/served-memories.json").expanduser().resolve())
+
+
 # ---------------------------------------------------------------------------
 # RunConfig — schedule is the single active path (no model_ladder shim)
 # ---------------------------------------------------------------------------
@@ -243,7 +250,15 @@ class RunConfig:
     deterministic_recall_limit: int = 64  # wire limit when deterministic_topn (hub returns full candidate set)
     arm_org_map: dict[str, str] = field(default_factory=dict)  # arm/condition -> org_id override (two-corpora)
     run_label: str = ""  # threaded for per-cell session ids
-    recall_mode: str = "test"  # WEVIBE_RECALL_MODE — set on the MCP PROCESS env, not per-request (documented)
+    recall_mode: str = "test"  # Diagnostic/non-primary WEVIBE_RECALL_MODE seam; retained intentionally.
+    # Per DECISIONS.md D-BENCH-CONTRACT §b, primary scored ON path must not rely on
+    # hidden test-mode auto-accept. Primary path runs recall in prod mode and uses a
+    # declared governor policy (relevance floor + injection budget) via plugin-config.
+    primary_recall_mode: str = "prod"
+    primary_recall_relevance_floor: float = 0.0
+    primary_recall_max_injected: int = 1000
+    served_memories_host_path: str = field(default_factory=_default_served_memories_host_path)
+    served_memories_container_path: str = "/home/worker/.wevibe/served-memories.json"
     require_delivery_verification: bool = True  # BENCHMARK INTEGRITY: refuse to score an ON cell whose delivery != YES
     org_id: str = "wevibe-org-0"  # the single benchmark org (one-org invariant)
     mc_version: int = 1  # MC-1
@@ -278,6 +293,11 @@ class RunConfig:
             "arm_org_map": dict(self.arm_org_map),
             "run_label": self.run_label,
             "recall_mode": self.recall_mode,
+            "primary_recall_mode": self.primary_recall_mode,
+            "primary_recall_relevance_floor": self.primary_recall_relevance_floor,
+            "primary_recall_max_injected": self.primary_recall_max_injected,
+            "served_memories_host_path": self.served_memories_host_path,
+            "served_memories_container_path": self.served_memories_container_path,
             "require_delivery_verification": self.require_delivery_verification,
             "org_id": self.org_id,
             "mc_version": self.mc_version,

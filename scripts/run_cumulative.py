@@ -9,6 +9,7 @@ are diagnostic/historical paths and are **not** the active primary path.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -23,6 +24,20 @@ from typing import Any, Callable, Mapping, NamedTuple
 from wevibe_bench import config
 from wevibe_bench.benv import load_bench_env
 from wevibe_bench.cumulative.catalog import PrivateCatalog, PrivateReviewCard
+from wevibe_bench.cumulative.consumer_decision import (
+    CONSUMER_DECISION_SCHEMA_VERSION,
+    DEFAULT_PRIMARY_POLICY,
+    ConsumerCandidateDecision,
+    ConsumerDecisionManifest,
+    default_primary_manifest,
+    validate_correlation,
+    validate_one_per_candidate,
+    validate_schema,
+)
+from wevibe_bench.cumulative.consumer_gate import (
+    ConsumerGateCoordinator,
+    default_plugin_state_dir,
+)
 from wevibe_bench.cumulative.decision import (
     CandidateDecision,
     DecisionManifest,
@@ -31,7 +46,12 @@ from wevibe_bench.cumulative.decision import (
 from wevibe_bench.cumulative.leader_client import LeaderClient
 from wevibe_bench.cumulative.manifest import roster_hash as cumulative_roster_hash
 from wevibe_bench.cumulative.sequencer import CumulativeSequencer
-from wevibe_bench.cumulative.types import RosterEntry, SessionRecord
+from wevibe_bench.cumulative.types import (
+    ConsumerGateRecord,
+    PhaseGroup,
+    RosterEntry,
+    SessionRecord,
+)
 from wevibe_bench.lifecycle.hub_client import HubClient
 from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
@@ -47,6 +67,9 @@ DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_EXTRACT_TIMEOUT_S = 900
 DEFAULT_SEED = config.RunConfig().rng_seed
 DEFAULT_ON_BUDGET = 0
+
+CONSUMER_STATE_DIR_ENV = "WEVIBE_BENCH_CONSUMER_STATE_DIR"
+CONSUMER_SCOPED_WEVIBE_DIR_ENV = "WEVIBE_BENCH_CONSUMER_SCOPED_WEVIBE_DIR"
 
 
 class PathLayout(NamedTuple):
@@ -208,6 +231,105 @@ def _resolve_extract_api_key() -> tuple[str, str]:
 def _load_json_file(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _resolve_optional_path_env(name: str) -> Path | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def _resolve_consumer_gate_state_dir(run_cfg: config.RunConfig) -> Path:
+    explicit_state_dir = _resolve_optional_path_env(CONSUMER_STATE_DIR_ENV)
+    if explicit_state_dir is not None:
+        return explicit_state_dir
+
+    scoped_wevibe_dir = _resolve_optional_path_env(CONSUMER_SCOPED_WEVIBE_DIR_ENV)
+    if scoped_wevibe_dir is None:
+        served_store_parent = Path(run_cfg.served_memories_host_path).expanduser().resolve().parent
+        scoped_wevibe_dir = served_store_parent
+
+    return default_plugin_state_dir(scoped_wevibe_dir)
+
+
+def _load_consumer_decision_manifest(decision_path: str) -> ConsumerDecisionManifest:
+    path = Path(decision_path).expanduser().resolve()
+    payload = _load_json_file(path)
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"consumer decision manifest must decode to object: {path}")
+    manifest = ConsumerDecisionManifest.from_dict(payload)
+    validate_schema(manifest)
+    validate_one_per_candidate(manifest)
+    return manifest
+
+
+def _consumer_decision_template_manifest() -> ConsumerDecisionManifest:
+    run_id = "YOUR_RUN_ID"
+    session_id = "YOUR_SESSION_ID"
+    coordinator_trace = "trace://your-coordinator-trace"
+    template = ConsumerDecisionManifest(
+        schema_version=CONSUMER_DECISION_SCHEMA_VERSION,
+        run_id=run_id,
+        policy_id=DEFAULT_PRIMARY_POLICY,
+        default_fate="accept",
+        decisions=(
+            ConsumerCandidateDecision(
+                run_id=run_id,
+                session_id=session_id,
+                candidate_cid="cid-example-accept",
+                fate="accept",
+                coordinator_trace=coordinator_trace,
+                reason="",
+                note="example explicit accept decision (optional)",
+            ),
+            ConsumerCandidateDecision(
+                run_id=run_id,
+                session_id=session_id,
+                candidate_cid="cid-example-deny",
+                fate="deny",
+                coordinator_trace=coordinator_trace,
+                reason="not useful for this session",
+                note="",
+            ),
+            ConsumerCandidateDecision(
+                run_id=run_id,
+                session_id=session_id,
+                candidate_cid="cid-example-block",
+                fate="block",
+                coordinator_trace=coordinator_trace,
+                reason="unsafe memory",
+                note="",
+            ),
+            ConsumerCandidateDecision(
+                run_id=run_id,
+                session_id=session_id,
+                candidate_cid="cid-example-report",
+                fate="report",
+                coordinator_trace=coordinator_trace,
+                reason="policy issue",
+                note="",
+            ),
+        ),
+        coordinator_trace=coordinator_trace,
+    )
+    validate_schema(template)
+    validate_one_per_candidate(template)
+    return template
+
+
+def _parse_recalled_cids_arg(raw: str) -> list[str]:
+    chunks = [part.strip() for part in raw.split(",")]
+    recalled: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        if not chunk:
+            continue
+        if chunk in seen:
+            continue
+        seen.add(chunk)
+        recalled.append(chunk)
+    return recalled
 
 
 def _write_text_file(path: Path, content: str) -> None:
@@ -373,6 +495,9 @@ class RealSessionRunner:
         extract_base_url: str | None,
         extract_num_ctx: int | None,
         extract_timeout_s: int,
+        consumer_gate_coordinator: ConsumerGateCoordinator,
+        consumer_decision_manifest: ConsumerDecisionManifest | None,
+        served_store_host_path: Path,
     ) -> None:
         self._task = task
         self._org_id = org_id
@@ -387,6 +512,17 @@ class RealSessionRunner:
         self._extract_base_url = extract_base_url
         self._extract_num_ctx = extract_num_ctx
         self._extract_timeout_s = extract_timeout_s
+
+        if not isinstance(consumer_gate_coordinator, ConsumerGateCoordinator):
+            raise TypeError("consumer_gate_coordinator must be a ConsumerGateCoordinator")
+        if not isinstance(served_store_host_path, Path):
+            raise TypeError("served_store_host_path must be a pathlib.Path")
+        if consumer_decision_manifest is not None:
+            validate_schema(consumer_decision_manifest)
+            validate_one_per_candidate(consumer_decision_manifest)
+        self._consumer_gate_coordinator = consumer_gate_coordinator
+        self._consumer_decision_manifest = consumer_decision_manifest
+        self._served_store_host_path = served_store_host_path.expanduser().resolve()
 
         self._task_dir = self._repo_root / "tasks" / "backgammon"
         if not self._task_dir.is_dir():
@@ -467,6 +603,149 @@ class RealSessionRunner:
             "api_key_source": self._extract_api_key_source,
         }
 
+    @staticmethod
+    def _recalled_candidate_cids(recalled_candidates: list[dict[str, Any]]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for index, entry in enumerate(recalled_candidates):
+            cid_raw = entry.get("cid")
+            if cid_raw is None:
+                cid_raw = entry.get("id")
+            if not isinstance(cid_raw, str) or not cid_raw.strip():
+                raise RuntimeError(
+                    "consumer gate queue entry missing cid/id: "
+                    f"index={index} keys={sorted(entry.keys())}"
+                )
+            cid = cid_raw.strip()
+            if cid in seen:
+                continue
+            seen.add(cid)
+            ordered.append(cid)
+        return ordered
+
+    @staticmethod
+    def _partition_decisions_by_fate(
+        decisions: list[tuple[str, str]],
+    ) -> tuple[list[str], list[str], list[str], list[str]]:
+        accepted: list[str] = []
+        denied: list[str] = []
+        blocked: list[str] = []
+        reported: list[str] = []
+
+        for raw_cid, raw_fate in decisions:
+            cid = str(raw_cid).strip()
+            fate = str(raw_fate).strip()
+            if not cid:
+                raise RuntimeError("consumer gate outcome produced empty candidate cid")
+            if fate == "accept":
+                accepted.append(cid)
+            elif fate == "deny":
+                denied.append(cid)
+            elif fate == "block":
+                blocked.append(cid)
+            elif fate == "report":
+                reported.append(cid)
+            else:
+                raise RuntimeError(f"consumer gate outcome produced unsupported fate {fate!r}")
+
+        return accepted, denied, blocked, reported
+
+    def _resolve_run_and_session_ids(
+        self,
+        session: SessionRecord,
+        *,
+        state: _SessionRunState,
+    ) -> tuple[str, str]:
+        run_id = str(session.run_id or state.run_label).strip()
+        if not run_id:
+            raise RuntimeError(
+                f"unable to resolve run_id for consumer gate outcome sequence_index={session.sequence_index}"
+            )
+
+        if isinstance(state.last_session_id, str) and state.last_session_id.strip():
+            session_id = state.last_session_id.strip()
+        elif isinstance(session.session_id, str) and session.session_id.strip():
+            session_id = session.session_id.strip()
+        else:
+            raise RuntimeError(
+                "unable to resolve raw session_id for consumer gate outcome; "
+                "run_session/extract session id plumbing is incomplete"
+            )
+
+        return run_id, session_id
+
+    def _manifest_for_consumer_gate(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        recalled_cids: list[str],
+    ) -> ConsumerDecisionManifest:
+        if self._consumer_decision_manifest is not None:
+            return self._consumer_decision_manifest
+
+        coordinator_trace = f"consumer-gate://{run_id}/{session_id}"
+        return default_primary_manifest(
+            run_id,
+            session_id,
+            recalled_cids,
+            coordinator_trace=coordinator_trace,
+        )
+
+    def consumer_gate_outcome(self, session: SessionRecord) -> ConsumerGateRecord | None:
+        if str(session.phase_group).strip().lower() != PhaseGroup.ON.value:
+            return None
+
+        state = self._state_for_session(session)
+        run_id, raw_session_id = self._resolve_run_and_session_ids(session, state=state)
+
+        session.run_label = state.run_label
+        session.run_id = run_id
+        session.session_id = raw_session_id
+
+        recalled_candidates = self._consumer_gate_coordinator.read_recalled_candidates()
+        recalled_cids = self._recalled_candidate_cids(recalled_candidates)
+        manifest = self._manifest_for_consumer_gate(
+            run_id=run_id,
+            session_id=raw_session_id,
+            recalled_cids=recalled_cids,
+        )
+
+        # LIVE timing note: in the eventual live benchmark daemon, apply_manifest+
+        # heartbeat must run *during* the worker session so the plugin transform
+        # drains decisions before injection. That runtime timing bridge is deferred
+        # (out of this zero-provider scope). This hook currently performs durable
+        # correlation + benchmark recording for the session checkpoint.
+        outcome = self._consumer_gate_coordinator.apply_manifest(
+            manifest,
+            run_id=run_id,
+            session_id=raw_session_id,
+        )
+
+        accepted_cids, denied_cids, blocked_cids, reported_cids = self._partition_decisions_by_fate(
+            outcome.decisions
+        )
+        reconcile = self._consumer_gate_coordinator.served_store_reconcile(
+            self._served_store_host_path,
+            session_id=raw_session_id,
+            accepted_cids=accepted_cids,
+            denied_cids=denied_cids,
+            blocked_cids=blocked_cids,
+            reported_cids=reported_cids,
+        )
+
+        record = ConsumerGateRecord.from_outcome(
+            outcome,
+            reconcile,
+            serve_receipt_status=None,
+            serve_receipt_ids=None,
+            denial_signal_status=None,
+            report_signal_status=None,
+        )
+        if record.policy_id != manifest.policy_id:
+            record = dataclass_replace(record, policy_id=manifest.policy_id)
+        return record
+
     def prepare_fixture(self, session: SessionRecord) -> None:
         state = self._state_for_session(session)
         worktree = state.run_dir / "worktree"
@@ -486,6 +765,9 @@ class RealSessionRunner:
     def run_session(self, session: SessionRecord) -> object:
         state = self._state_for_session(session)
         state.run_dir.mkdir(parents=True, exist_ok=True)
+        session.run_label = state.run_label
+        if not isinstance(session.run_id, str) or not session.run_id.strip():
+            session.run_id = state.run_label
 
         runner = self._runner_cls(
             task_dir=self._task_dir,
@@ -680,6 +962,17 @@ def _build_real_runner_and_leader_client(
 
     repo_root = Path(__file__).resolve().parents[1]
     cfg = LifecycleConfig()
+    run_cfg = config.RunConfig()
+
+    consumer_state_dir = _resolve_consumer_gate_state_dir(run_cfg)
+    consumer_gate_coordinator = ConsumerGateCoordinator(state_dir=consumer_state_dir)
+    consumer_decision_arg = str(getattr(args, "consumer_decision", "") or "").strip()
+    consumer_decision_manifest = (
+        _load_consumer_decision_manifest(consumer_decision_arg)
+        if consumer_decision_arg
+        else None
+    )
+    served_store_host_path = Path(run_cfg.served_memories_host_path).expanduser().resolve()
 
     leader = Identity.from_hex(_required_env("WEVIBE_BENCH_LEADER_SEED_HEX"))
     contributor = Identity.from_hex(_required_env("WEVIBE_BENCH_CONTRIB_SEED_HEX"))
@@ -725,6 +1018,9 @@ def _build_real_runner_and_leader_client(
         extract_base_url=_resolve_extract_base_url(),
         extract_num_ctx=_resolve_extract_num_ctx(),
         extract_timeout_s=_resolve_extract_timeout_s(),
+        consumer_gate_coordinator=consumer_gate_coordinator,
+        consumer_decision_manifest=consumer_decision_manifest,
+        served_store_host_path=served_store_host_path,
     )
 
     catalog = PrivateCatalog(str(layout.catalog_path))
@@ -1010,6 +1306,17 @@ def _handle_emit_decision_template(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_emit_consumer_decision_template(args: argparse.Namespace) -> int:
+    template = _consumer_decision_template_manifest()
+    rendered = json.dumps(template.to_dict(), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    out_arg = str(getattr(args, "out", "") or "").strip()
+    if out_arg:
+        out_path = Path(out_arg).expanduser().resolve()
+        _write_text_file(out_path, rendered)
+    print(rendered, end="")
+    return 0
+
+
 def _handle_validate_decision(args: argparse.Namespace) -> int:
     context = _build_context(args, require_runtime=False)
     session = _current_session_or_raise(context.sequencer)
@@ -1023,11 +1330,70 @@ def _handle_validate_decision(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_validate_consumer_decision(args: argparse.Namespace) -> int:
+    try:
+        manifest = _load_consumer_decision_manifest(str(args.file))
+
+        run_id = str(getattr(args, "run_id", "") or "").strip()
+        session_id = str(getattr(args, "session_id", "") or "").strip()
+        recalled_cids_arg = str(getattr(args, "recalled_cids", "") or "").strip()
+
+        correlation_requested = bool(run_id or session_id or recalled_cids_arg)
+        pass_reason = "schema + one_per_candidate validated"
+
+        if correlation_requested:
+            missing: list[str] = []
+            if not run_id:
+                missing.append("--run-id")
+            if not session_id:
+                missing.append("--session-id")
+            if not recalled_cids_arg:
+                missing.append("--recalled-cids")
+            if missing:
+                raise ValueError(
+                    "correlation validation requires all of "
+                    "--run-id, --session-id, --recalled-cids; missing "
+                    + ", ".join(missing)
+                )
+
+            recalled_cids = _parse_recalled_cids_arg(recalled_cids_arg)
+            if not recalled_cids:
+                raise ValueError("--recalled-cids must include at least one candidate cid")
+
+            uncovered = validate_correlation(
+                manifest,
+                run_id=run_id,
+                session_id=session_id,
+                recalled_cids=recalled_cids,
+            )
+            if uncovered:
+                pass_reason = (
+                    "schema + one_per_candidate + correlation validated; "
+                    f"uncovered_recalled_cids={','.join(sorted(uncovered))}"
+                )
+            else:
+                pass_reason = "schema + one_per_candidate + correlation validated"
+
+    except Exception as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+    print(f"PASS: {pass_reason}")
+    return 0
+
+
 def assert_primary_path() -> None:
     """Raise if this module is not marked as the canonical primary path."""
 
     if IS_PRIMARY_SCORED_PATH is not True:
         raise AssertionError("run_cumulative.py lost primary-path marker")
+
+    primary_recall_mode = str(config.RunConfig().primary_recall_mode).strip().lower()
+    if primary_recall_mode != "prod":
+        raise AssertionError(
+            "run_cumulative.py primary scored path requires RunConfig.primary_recall_mode='prod' "
+            "(declared consumer policy; no hidden env auto-accept)"
+        )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -1075,6 +1441,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--until-review",
         action="store_true",
         help="Required marker: execute phase machine until AWAIT_COORDINATOR_REVIEW.",
+    )
+    run_parser.add_argument(
+        "--consumer-decision",
+        default="",
+        help=(
+            "Optional ConsumerDecisionManifest JSON path for ON-session consumer gate "
+            "(for conformance deny/block/report runs)."
+        ),
     )
 
     resume_parser = subparsers.add_parser(
@@ -1136,11 +1510,52 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional file path to also write the emitted template JSON.",
     )
 
+    emit_consumer_parser = subparsers.add_parser(
+        "emit-consumer-decision-template",
+        help=(
+            "Emit ConsumerDecisionManifest scaffold with explicit default_fate=accept "
+            "and one example decision per fate."
+        ),
+    )
+    emit_consumer_parser.add_argument(
+        "--out",
+        default="",
+        help="Optional file path to also write the emitted consumer decision template JSON.",
+    )
+
     validate_parser = subparsers.add_parser(
         "validate-decision",
         help="Validate a coordinator DecisionManifest against current session.",
     )
     validate_parser.add_argument("--decision", required=True, help="Path to decision JSON.")
+
+    validate_consumer_parser = subparsers.add_parser(
+        "validate-consumer-decision",
+        help=(
+            "Validate ConsumerDecisionManifest JSON schema/uniqueness and optional "
+            "run/session/recalled-cids correlation."
+        ),
+    )
+    validate_consumer_parser.add_argument(
+        "--file",
+        required=True,
+        help="Path to consumer decision manifest JSON.",
+    )
+    validate_consumer_parser.add_argument(
+        "--run-id",
+        default="",
+        help="Optional expected run_id for correlation validation.",
+    )
+    validate_consumer_parser.add_argument(
+        "--session-id",
+        default="",
+        help="Optional expected session_id for correlation validation.",
+    )
+    validate_consumer_parser.add_argument(
+        "--recalled-cids",
+        default="",
+        help="Optional comma-separated recalled candidate CIDs for correlation validation.",
+    )
 
     return parser
 
@@ -1163,7 +1578,9 @@ def main() -> int:
         "reconcile-inventory": _handle_reconcile_inventory,
         "review-material": _handle_review_material,
         "emit-decision-template": _handle_emit_decision_template,
+        "emit-consumer-decision-template": _handle_emit_consumer_decision_template,
         "validate-decision": _handle_validate_decision,
+        "validate-consumer-decision": _handle_validate_consumer_decision,
     }
     handler = handlers.get(str(args.command))
     if handler is None:

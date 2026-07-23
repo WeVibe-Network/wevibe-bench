@@ -24,6 +24,14 @@ from .decision import (
     DecisionManifest,
     VERIFY,
 )
+from .consumer_decision import (
+    CONSUMER_DECISION_SCHEMA_VERSION,
+    DEFAULT_PRIMARY_POLICY,
+    ConflictError as ConsumerConflictError,
+    ConsumerCandidateDecision,
+    ConsumerDecisionManifest,
+    VALID_FATES,
+)
 from .catalog import (
     PrivateCatalog,
     PrivateReviewCard,
@@ -53,6 +61,12 @@ __all__ = [
     "VERIFY",
     "DENY_FINAL",
     "ConflictError",
+    "ConsumerDecisionManifest",
+    "ConsumerCandidateDecision",
+    "ConsumerConflictError",
+    "CONSUMER_DECISION_SCHEMA_VERSION",
+    "VALID_FATES",
+    "DEFAULT_PRIMARY_POLICY",
     "PrivateCatalog",
     "PrivateReviewCard",
     "SafeDecisionLedger",

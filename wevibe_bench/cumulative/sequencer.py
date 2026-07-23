@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, runtime_checkable
 
 from .catalog import PrivateReviewCard, redacted_candidate_ref
 from .decision import DENY_FINAL, DecisionManifest
@@ -20,7 +20,7 @@ from .leader_client import ApplyResult, LeaderClient
 from .manifest import atomic_write, resume_or_create, roster_hash
 from .ordering import build_schedule
 from .progress import progress_from_cell_result
-from .types import RosterEntry, SessionPhase, SessionRecord
+from .types import ConsumerGateRecord, PhaseGroup, RosterEntry, SessionPhase, SessionRecord
 
 _LOG = logging.getLogger(__name__)
 
@@ -66,6 +66,14 @@ class SessionRunner(Protocol):
 
     def index_ready(self, session: SessionRecord) -> bool:
         """Return True once committed memories are visible/indexed for this session."""
+
+    if TYPE_CHECKING:
+
+        def consumer_gate_outcome(
+            self,
+            session: SessionRecord,
+        ) -> ConsumerGateRecord | None:
+            """Optional ON-session hook returning post-session consumer-gate outcome."""
 
 
 class CumulativeSequencer:
@@ -222,6 +230,7 @@ class CumulativeSequencer:
                 )
                 telemetry = self._runner.run_session(session)
                 session.progress = progress_from_cell_result(telemetry).to_dict()
+                self._record_consumer_gate_outcome(session)
                 session.set_phase(SessionPhase.EXTRACT_NORMAL_PIPELINE)
                 self._checkpoint()
                 continue
@@ -408,6 +417,32 @@ class CumulativeSequencer:
     def _checkpoint(self) -> None:
         self._manifest.updated_at = self._utc_now_iso()
         atomic_write(self._manifest_path, self._manifest)
+
+    def _record_consumer_gate_outcome(self, session: SessionRecord) -> None:
+        consumer_gate_record: ConsumerGateRecord | None = None
+
+        if session.phase_group == PhaseGroup.ON.value:
+            consumer_gate_hook = getattr(self._runner, "consumer_gate_outcome", None)
+            if consumer_gate_hook is not None:
+                if not callable(consumer_gate_hook):
+                    raise ValueError("runner.consumer_gate_outcome must be callable when provided")
+                candidate = consumer_gate_hook(session)
+                if candidate is not None and not isinstance(candidate, ConsumerGateRecord):
+                    raise ValueError(
+                        "runner.consumer_gate_outcome must return ConsumerGateRecord or None"
+                    )
+                consumer_gate_record = candidate
+
+        session.consumer_gate = consumer_gate_record
+
+        if isinstance(session.progress, Mapping):
+            progress = dict(session.progress)
+            progress["consumer_injected_count"] = (
+                consumer_gate_record.consumer_injected_count
+                if consumer_gate_record is not None
+                else None
+            )
+            session.progress = progress
 
     def _phase_of(self, session: SessionRecord) -> SessionPhase:
         try:
