@@ -173,6 +173,8 @@ class DockerCellConfig:
     primary_recall_max_injected: int = field(default_factory=_default_primary_recall_max_injected)
     served_memories_host_path: str = field(default_factory=_default_served_memories_host_path)
     served_memories_container_path: str = field(default_factory=_default_served_memories_container_path)
+    plugin_state_host_path: str = "~/.wevibe/state"
+    plugin_state_container_path: str = "/home/worker/.wevibe/state"
     plugin_config_host_path: str = "~/.wevibe/plugin-config.json"
     proxy_base_url: str | None = None
     proxy_token: str | None = None
@@ -234,6 +236,8 @@ class DockerCell:
                 f"mode={str(self.config.recall_mode).strip().lower()} "
                 f"served_store_host={_resolve_host_path(self.config.served_memories_host_path)} "
                 f"served_store_container={self.config.served_memories_container_path} "
+                f"plugin_state_host={_resolve_host_path(self.config.plugin_state_host_path)} "
+                f"plugin_state_container={self.config.plugin_state_container_path} "
                 f"recall_relevance_floor={float(self.config.primary_recall_relevance_floor):.6g} "
                 f"recall_max_injected={int(self.config.primary_recall_max_injected)}"
             )
@@ -700,6 +704,9 @@ def _build_run_argv(
         host_served_memories = _resolve_host_path(config.served_memories_host_path)
         _ensure_served_memories_store(host_served_memories)
 
+        host_plugin_state = _resolve_host_path(config.plugin_state_host_path)
+        _ensure_plugin_state_dir(host_plugin_state)
+
         host_plugin_config = _resolve_host_path(config.plugin_config_host_path)
         _merge_plugin_config(
             host_plugin_config,
@@ -731,6 +738,9 @@ def _build_run_argv(
                 # Shared served-store file bridges container writes back to the host.
                 "-v",
                 f"{host_served_memories}:{config.served_memories_container_path}:rw",
+                # Shared plugin-state directory bridges queue/decisions/heartbeat.
+                "-v",
+                f"{host_plugin_state}:{config.plugin_state_container_path}:rw",
             ]
         )
 
@@ -760,6 +770,16 @@ def _ensure_served_memories_store(path: Path) -> None:
         resolved.write_text('{"version":1,"memories":{}}', encoding="utf-8")
 
     resolved.chmod(0o600)
+
+
+def _ensure_plugin_state_dir(path: Path) -> None:
+    resolved = Path(path).expanduser().resolve()
+
+    if resolved.exists() and not resolved.is_dir():
+        raise RuntimeError(f"plugin-state path must be a directory: {resolved}")
+
+    resolved.mkdir(parents=True, exist_ok=True)
+    resolved.chmod(0o700)
 
 
 def _merge_plugin_config(

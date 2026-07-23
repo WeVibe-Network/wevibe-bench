@@ -605,18 +605,23 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(
         token_destination = "/home/worker/.wevibe/mcp-session-token"
         plugin_config_destination = "/home/worker/.wevibe/plugin-config.json"
         served_store_destination = primary_cfg.served_memories_container_path
+        state_store_destination = "/home/worker/.wevibe/state"
         destinations_on = {str(mount.get("Destination", "")) for mount in mounts_on}
         assert destinations_on == {
             "/work",
             token_destination,
             plugin_config_destination,
             served_store_destination,
+            state_store_destination,
         }
 
         expected_worktree_source = os.path.realpath(str(worktree_on.resolve()))
         expected_token_source = os.path.realpath(str(token_host_path.resolve()))
         expected_plugin_config_source = os.path.realpath(str(plugin_config_host_path.resolve()))
         expected_served_store_source = os.path.realpath(str(served_store_host_path.resolve()))
+        expected_state_store_source = os.path.realpath(
+            str((Path(str(fake_home)) / ".wevibe" / "state").resolve())
+        )
         source_paths_on = {
             os.path.realpath(str(Path(str(mount.get("Source", ""))).resolve()))
             for mount in mounts_on
@@ -627,6 +632,7 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(
             expected_token_source,
             expected_plugin_config_source,
             expected_served_store_source,
+            expected_state_store_source,
         }
         assert os.path.realpath(str(HOST_GOLDEN_PATH)) not in source_paths_on
 
@@ -667,12 +673,30 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(
         if "Mode" in served_store_mount and served_store_mount["Mode"] is not None:
             assert "ro" not in str(served_store_mount["Mode"])
 
+        state_store_mount = next(
+            mount
+            for mount in mounts_on
+            if str(mount.get("Destination", "")) == state_store_destination
+        )
+        assert (
+            os.path.realpath(str(Path(str(state_store_mount.get("Source", ""))).resolve()))
+            == expected_state_store_source
+        )
+        if "RW" in state_store_mount:
+            assert state_store_mount["RW"] is True
+        if "Mode" in state_store_mount and state_store_mount["Mode"] is not None:
+            assert "ro" not in str(state_store_mount["Mode"])
+
         assert served_store_host_path.is_file()
         assert json.loads(served_store_host_path.read_text(encoding="utf-8")) == {
             "version": 1,
             "memories": {},
         }
         assert (served_store_host_path.stat().st_mode & 0o777) == 0o600
+
+        state_store_host_path = Path(str(fake_home)) / ".wevibe" / "state"
+        assert state_store_host_path.is_dir()
+        assert (state_store_host_path.stat().st_mode & 0o777) == 0o700
 
         plugin_payload = json.loads(plugin_config_host_path.read_text(encoding="utf-8"))
         assert plugin_payload["preserve_me"] == "still-here"
