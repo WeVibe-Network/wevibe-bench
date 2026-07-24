@@ -26,6 +26,8 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable
+import urllib.error
+import urllib.request
 
 from wevibe_bench.adapters.aider_polyglot import _format_memory
 from wevibe_bench.adapters.cheat_detector import (
@@ -169,9 +171,125 @@ class _OpencodeRunStats:
 class _ProxyBudgetSnapshot:
     hard_cap_usd: float
     accrued_actual_usd: float
+    accrued_derived_usd: float
     committed_unproven_usd: float
     remaining_usd: float
     checkpoint_path: str
+
+
+def fetch_orcarouter_billing_usage_cents(*, api_key: str, timeout: float = 10.0) -> float:
+    """Fetch OrcaRouter cumulative billing counter (total_usage, in cents)."""
+
+    key = str(api_key or "").strip()
+    if not key:
+        raise RuntimeError("orcarouter billing usage fetch failed: empty api key")
+
+    request = urllib.request.Request(
+        "https://www.orcarouter.ai/v1/dashboard/billing/usage",
+        method="GET",
+    )
+    request.add_header("Authorization", f"Bearer {key}")
+    request.add_header("Accept", "application/json")
+
+    try:
+        with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+            status = int(response.getcode() or 0)
+            payload_bytes = response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(
+            "orcarouter billing usage fetch failed: "
+            f"status={int(getattr(exc, 'code', 0))} error_class={exc.__class__.__name__}"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            "orcarouter billing usage fetch failed: "
+            f"status=transport error_class={exc.__class__.__name__}"
+        ) from exc
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "orcarouter billing usage fetch failed: "
+            f"status={status} error_class={exc.__class__.__name__}"
+        ) from exc
+
+    if status != 200:
+        raise RuntimeError(
+            "orcarouter billing usage fetch failed: "
+            f"status={status} error_class=unexpected_http_status"
+        )
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "orcarouter billing usage fetch failed: "
+            "status=200 error_class=invalid_payload_type"
+        )
+
+    try:
+        return float(payload["total_usage"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "orcarouter billing usage fetch failed: "
+            f"status=200 error_class={exc.__class__.__name__}"
+        ) from exc
+
+
+def reconcile_derived_vs_billing(
+    *,
+    settled_usd: float,
+    baseline_cents: float | None,
+    final_cents: float | None,
+    tolerance: float = 0.05,
+) -> dict[str, Any]:
+    """Compare settled USD against OrcaRouter cumulative billing-counter delta."""
+
+    confound_note = (
+        "counter is workspace-aggregate; any concurrent workspace/CLI traffic inflates delta; "
+        "reconciliation requires a quiet workspace"
+    )
+    settled_value = float(settled_usd)
+    baseline_value = None if baseline_cents is None else float(baseline_cents)
+    final_value = None if final_cents is None else float(final_cents)
+
+    if baseline_value is None or final_value is None:
+        return {
+            "status": "skipped",
+            "reason": "baseline or final counter unavailable",
+            "settled_usd": settled_value,
+            "delta_counter_usd": None,
+            "divergence_pct": None,
+            "tolerance": float(tolerance),
+            "baseline_cents": baseline_value,
+            "final_cents": final_value,
+            "confound_note": confound_note,
+        }
+
+    delta_usd = (final_value - baseline_value) / 100.0
+    if delta_usd < 0:
+        return {
+            "status": "error",
+            "reason": "counter went backwards",
+            "settled_usd": settled_value,
+            "delta_counter_usd": delta_usd,
+            "divergence_pct": None,
+            "tolerance": float(tolerance),
+            "baseline_cents": baseline_value,
+            "final_cents": final_value,
+            "confound_note": confound_note,
+        }
+
+    denominator = max(delta_usd, settled_value, 1e-9)
+    divergence = abs(settled_value - delta_usd) / denominator
+    return {
+        "status": "ok" if divergence <= float(tolerance) else "diverged",
+        "settled_usd": settled_value,
+        "delta_counter_usd": delta_usd,
+        "divergence_pct": divergence * 100.0,
+        "tolerance": float(tolerance),
+        "baseline_cents": baseline_value,
+        "final_cents": final_value,
+        "confound_note": confound_note,
+    }
 
 
 @dataclass
@@ -1632,6 +1750,7 @@ class BackgammonRunner(AgentRunner):
             f"PROGRESS run_label={run_label} step=budget-decision attempt={attempt} decision={decision} "
             f"remaining_usd={snapshot.remaining_usd:.6f} estimate_attempt_usd={estimate_usd:.6f} "
             f"hard_cap_usd={snapshot.hard_cap_usd:.6f} accrued_actual_usd={snapshot.accrued_actual_usd:.6f} "
+            f"accrued_derived_usd={snapshot.accrued_derived_usd:.6f} "
             f"committed_unproven_usd={snapshot.committed_unproven_usd:.6f} cost_limit_usd={configured_cap} "
             f"checkpoint={snapshot.checkpoint_path}"
         )
@@ -1664,11 +1783,15 @@ class BackgammonRunner(AgentRunner):
                     raise RuntimeError("proxy checkpoint payload is not an object")
                 hard_cap_usd = float(payload["hard_cap_usd"])
                 accrued_actual_usd = float(payload["accrued_actual_usd"])
+                accrued_derived_usd = float(payload.get("accrued_derived_usd", 0.0))
                 committed_unproven_usd = float(payload["committed_unproven_usd"])
-                remaining_usd = hard_cap_usd - accrued_actual_usd - committed_unproven_usd
+                remaining_usd = (
+                    hard_cap_usd - accrued_actual_usd - accrued_derived_usd - committed_unproven_usd
+                )
                 return _ProxyBudgetSnapshot(
                     hard_cap_usd=hard_cap_usd,
                     accrued_actual_usd=accrued_actual_usd,
+                    accrued_derived_usd=accrued_derived_usd,
                     committed_unproven_usd=committed_unproven_usd,
                     remaining_usd=remaining_usd,
                     checkpoint_path=str(checkpoint_path),

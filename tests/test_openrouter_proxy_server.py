@@ -20,6 +20,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     DEFAULT_PROFILES,
     OPENCODE_ZEN_UPSTREAM_URL,
     ORCAROUTER_UPSTREAM_URL,
+    PricingGateError,
     ProfileRegistry,
     ProxyLogger,
     UPSTREAM_CHAT_COMPLETIONS_URLS,
@@ -115,6 +116,23 @@ def _model_selector_for_profile(profile_name: str) -> str:
     return f"openrouter/{model_id}"
 
 
+def _valid_orcarouter_payload() -> dict[str, Any]:
+    return {
+        "pricing_version": "c58e194db3f6a20e7d41b8c9e2f05a17",
+        "model_discounts": {},
+        "workspace_discount": 1,
+        "effective_group_ratio": 1,
+        "group_ratio": {"default": 1, "vip": 1},
+        "data": [
+            {
+                "model_name": "openai/gpt-4o-mini",
+                "model_ratio": 0.075,
+                "completion_ratio": 4.0,
+            }
+        ],
+    }
+
+
 def _run_main_with_fake_server(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> ProxyServer:
     captured: dict[str, Any] = {}
 
@@ -192,6 +210,8 @@ def test_main_authorize_with_live_pricing_unblocks_profile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(proxy_server, "fetch_orcarouter_pricing", lambda: _valid_orcarouter_payload())
+
     auth_path = _write_auth_json(tmp_path)
     argv = _main_argv(tmp_path, auth_path) + [
         "--authorize",
@@ -215,6 +235,80 @@ def test_main_authorize_with_live_pricing_unblocks_profile(
         "cache_read": pytest.approx(0.2),
         "cache_write": pytest.approx(1.3),
     }
+
+
+def test_main_authorize_orcarouter_pricing_gate_logs_ok(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(proxy_server, "fetch_orcarouter_pricing", lambda: _valid_orcarouter_payload())
+
+    auth_path = _write_auth_json(tmp_path)
+    argv = _main_argv(tmp_path, auth_path) + [
+        "--authorize",
+        "--pricing-input",
+        "1.0",
+        "--pricing-output",
+        "3.0",
+    ]
+    proxy = _run_main_with_fake_server(monkeypatch, argv)
+
+    log_text = Path(proxy.logger.log_path).read_text(encoding="utf-8")
+    assert 'event="pricing_gate"' in log_text
+    assert 'status="ok"' in log_text
+
+
+def test_main_authorize_orcarouter_pricing_gate_failure_refuses_paid_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    auth_path = _write_auth_json(tmp_path)
+    argv = _main_argv(tmp_path, auth_path) + [
+        "--authorize",
+        "--pricing-input",
+        "1.0",
+        "--pricing-output",
+        "3.0",
+    ]
+
+    make_server_calls = 0
+
+    def _fake_make_server(_proxy: ProxyServer, host: str = "127.0.0.1", port: int = 0) -> _MainTestServer:
+        nonlocal make_server_calls
+        make_server_calls += 1
+        return _MainTestServer()
+
+    monkeypatch.setattr(proxy_server, "make_server", _fake_make_server)
+
+    def _fake_fetch() -> dict[str, Any]:
+        raise PricingGateError("orcarouter pricing gate failed: pricing_version pin mismatch")
+
+    monkeypatch.setattr(proxy_server, "fetch_orcarouter_pricing", _fake_fetch)
+
+    assert proxy_server.main(argv) == 2
+    assert make_server_calls == 0
+    assert "refusing paid calls" in capsys.readouterr().err
+
+    log_text = (tmp_path / "main-proxy.log").read_text(encoding="utf-8")
+    assert 'event="pricing_gate"' in log_text
+    assert 'status="failed"' in log_text
+
+
+def test_main_without_authorize_does_not_consult_orcarouter_pricing_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _unexpected_fetch() -> dict[str, Any]:
+        raise AssertionError("fetch_orcarouter_pricing should not be called without --authorize")
+
+    monkeypatch.setattr(proxy_server, "fetch_orcarouter_pricing", _unexpected_fetch)
+
+    auth_path = _write_auth_json(tmp_path)
+    proxy = _run_main_with_fake_server(monkeypatch, _main_argv(tmp_path, auth_path))
+
+    log_text = Path(proxy.logger.log_path).read_text(encoding="utf-8")
+    assert 'event="pricing_gate"' not in log_text
 
 
 def test_main_without_authorize_keeps_profile_blocked(
@@ -698,6 +792,29 @@ def _non_stream_success_response(cost: float, *, model: str = "glm-5.2") -> Upst
     )
 
 
+def _non_stream_derived_response(*, model: str = "glm-5.2") -> UpstreamResponse:
+    payload = {
+        "id": "chatcmpl-fake",
+        "object": "chat.completion",
+        "model": model,
+        "provider": {"slug": "fireworks"},
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {
+            "prompt_tokens": 16,
+            "completion_tokens": 8,
+            "total_tokens": 24,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 0},
+        },
+    }
+    return UpstreamResponse(
+        status=200,
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        stream_lines=None,
+    )
+
+
 def _non_stream_response_without_usage() -> UpstreamResponse:
     payload = {
         "id": "chatcmpl-fake",
@@ -750,6 +867,40 @@ def _stream_lines_with_usage(cost: float) -> list[bytes]:
             "completion_tokens": 6,
             "completion_tokens_details": {"reasoning_tokens": 1},
             "cost": cost,
+        },
+    }
+    return [
+        f"data: {json.dumps(first, separators=(',', ':'))}\n".encode("utf-8"),
+        f"data: {json.dumps(second, separators=(',', ':'))}\n".encode("utf-8"),
+        f"data: {json.dumps(final, separators=(',', ':'))}\n".encode("utf-8"),
+        b"data: [DONE]\n",
+    ]
+
+
+def _stream_lines_derived() -> list[bytes]:
+    first = {
+        "id": "chatcmpl-fake",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.2",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "o"}}],
+    }
+    second = {
+        "id": "chatcmpl-fake",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.2",
+        "choices": [{"index": 0, "delta": {"content": "k"}}],
+    }
+    final = {
+        "id": "chatcmpl-fake",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.2",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 16,
+            "completion_tokens": 8,
+            "total_tokens": 24,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 0},
         },
     }
     return [
@@ -1009,6 +1160,41 @@ def test_non_stream_usage_cost_settles_actual_and_relays_body(tmp_path: Path) ->
     assert snapshot["outstanding_total"] == pytest.approx(0.0)
 
 
+def test_non_stream_usage_without_cost_settles_derived_and_logs_settle_state(tmp_path: Path) -> None:
+    fake = _FakeUpstream([_non_stream_derived_response()])
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
+        before = running.ledger.snapshot()
+        trace_id = "trace-non-stream-derived"
+        status, _, _ = _post_json(
+            running,
+            _glm_request_body(),
+            token=running.run_token,
+            trace_id=trace_id,
+        )
+        snapshot = running.ledger.snapshot()
+        log_text = running.log_path.read_text(encoding="utf-8")
+
+    expected_derived = 3.0e-6
+    assert status == 200
+    assert snapshot["accrued_derived"] == pytest.approx(expected_derived)
+    assert snapshot["accrued"] == pytest.approx(0.0)
+    assert snapshot["committed_unproven"] == pytest.approx(0.0)
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+    assert snapshot["remaining"] == pytest.approx(before["remaining"] - expected_derived)
+
+    line = next(
+        (
+            entry
+            for entry in log_text.splitlines()
+            if f'trace_id="{trace_id}"' in entry and 'settle_state="derived"' in entry
+        ),
+        None,
+    )
+    assert line is not None
+    assert "accrued_derived_usd=" in line
+
+
 def test_stream_usage_cost_settles_actual_and_relays_sse_lines(tmp_path: Path) -> None:
     lines = _stream_lines_with_usage(cost=0.03)
     fake = _FakeUpstream(
@@ -1041,6 +1227,45 @@ def test_stream_usage_cost_settles_actual_and_relays_sse_lines(tmp_path: Path) -
     assert relayed == lines
     assert snapshot["accrued"] == pytest.approx(0.03)
     assert snapshot["committed_unproven"] == pytest.approx(0.0)
+
+
+def test_stream_usage_without_cost_settles_derived_and_relays_sse_lines(tmp_path: Path) -> None:
+    lines = _stream_lines_derived()
+    fake = _FakeUpstream(
+        [
+            UpstreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body=None,
+                stream_lines=lines,
+            )
+        ]
+    )
+
+    with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
+        before = running.ledger.snapshot()
+        conn, response = _open_stream_request(
+            running,
+            _glm_request_body(stream=True),
+            token=running.run_token,
+        )
+        try:
+            assert response.status == 200
+            relayed = [response.readline() for _ in range(len(lines))]
+        finally:
+            response.close()
+            conn.close()
+
+        assert _wait_until(lambda: running.ledger.snapshot()["outstanding_total"] == 0.0)
+        snapshot = running.ledger.snapshot()
+
+    expected_derived = 3.0e-6
+    assert relayed == lines
+    assert snapshot["accrued_derived"] == pytest.approx(expected_derived)
+    assert snapshot["accrued"] == pytest.approx(0.0)
+    assert snapshot["committed_unproven"] == pytest.approx(0.0)
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+    assert snapshot["remaining"] == pytest.approx(before["remaining"] - expected_derived)
 
 
 def test_stream_downstream_disconnect_still_drains_and_accounts_spend(tmp_path: Path) -> None:

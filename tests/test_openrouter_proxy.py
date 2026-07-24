@@ -16,6 +16,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     ModelMismatchError,
     ORCAROUTER_UPSTREAM_URL,
     OPENROUTER_UPSTREAM_URL,
+    PricingGateError,
     PolicyMismatchError,
     ProfileBlockedError,
     ProtectedFieldError,
@@ -23,9 +24,12 @@ from wevibe_bench.adapters.openrouter_proxy import (
     UPSTREAM_CHAT_COMPLETIONS_URLS,
     DEFAULT_PROFILES,
     apply_policy,
+    derived_cost_usd,
+    fetch_orcarouter_pricing,
     input_token_upper_bound,
     key_fingerprint,
     load_upstream_key,
+    verify_orcarouter_pricing_gate,
     worst_case_usd,
 )
 
@@ -760,3 +764,326 @@ def test_bigpickle_profile_pins_expected_upstream_identity() -> None:
     assert profiles["kimicode"].expected_upstream_model == "kimi-k2.7-code"
     for name in ("glm", "hy3", "kimicode"):
         assert profiles[name].expected_upstream_key_fp is None
+
+
+def test_derived_cost_usd_exact_value_cases() -> None:
+    assert derived_cost_usd(
+        prompt_tokens=16,
+        cached_tokens=0,
+        completion_tokens=8,
+        pricing={"input": 0.18, "output": 0.59, "cache_read": 0.059},
+    ) == pytest.approx(7.6e-6)
+
+    assert derived_cost_usd(
+        prompt_tokens=1000,
+        cached_tokens=400,
+        completion_tokens=100,
+        pricing={"input": 1.4, "output": 4.4, "cache_read": 0.26},
+    ) == pytest.approx(1384e-6)
+
+    assert derived_cost_usd(
+        prompt_tokens=10,
+        cached_tokens=0,
+        completion_tokens=50,
+        pricing={"input": 0.95, "output": 4.0, "cache_read": 0.19},
+    ) == pytest.approx(209.5e-6)
+
+    assert derived_cost_usd(
+        prompt_tokens=10,
+        cached_tokens=10,
+        completion_tokens=0,
+        pricing={"input": 0.18, "output": 0.59, "cache_read": 0.059},
+    ) == pytest.approx(0.59e-6)
+
+    assert derived_cost_usd(
+        prompt_tokens=0,
+        cached_tokens=0,
+        completion_tokens=0,
+        pricing={"input": 0.18, "output": 0.59, "cache_read": 0.059},
+    ) == pytest.approx(0.0)
+
+    assert derived_cost_usd(
+        prompt_tokens=10,
+        cached_tokens=4,
+        completion_tokens=0,
+        pricing={"input": 2.0, "output": 3.0},
+    ) == pytest.approx(20e-6)
+
+
+@pytest.mark.parametrize("pricing", [{}, None])
+def test_derived_cost_usd_rejects_missing_pricing(pricing: dict | None) -> None:
+    with pytest.raises(ValueError):
+        derived_cost_usd(
+            prompt_tokens=1,
+            cached_tokens=0,
+            completion_tokens=1,
+            pricing=pricing,
+        )
+
+
+def test_derived_cost_usd_missing_output_key_raises_keyerror() -> None:
+    with pytest.raises(KeyError):
+        derived_cost_usd(
+            prompt_tokens=1,
+            cached_tokens=0,
+            completion_tokens=1,
+            pricing={"input": 1.0},
+        )
+
+
+def _valid_orcarouter_payload() -> dict:
+    return {
+        "pricing_version": "c58e194db3f6a20e7d41b8c9e2f05a17",
+        "model_discounts": {},
+        "workspace_discount": 1,
+        "effective_group_ratio": 1,
+        "group_ratio": {"default": 1, "vip": 1},
+        "data": [
+            {
+                "model_name": "openai/gpt-4o-mini",
+                "model_ratio": 0.075,
+                "completion_ratio": 4.0,
+            }
+        ],
+    }
+
+
+def test_verify_orcarouter_pricing_gate_accepts_minimal_valid_payload() -> None:
+    verify_orcarouter_pricing_gate(_valid_orcarouter_payload())
+
+
+@pytest.mark.parametrize("group_ratio", [1, 1.0])
+def test_verify_orcarouter_pricing_gate_accepts_neutral_scalar_group_ratio(group_ratio: float) -> None:
+    payload = _valid_orcarouter_payload()
+    payload["group_ratio"] = group_ratio
+
+    verify_orcarouter_pricing_gate(payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.update({"pricing_version": "wrong"}),
+        lambda payload: payload.update({"model_discounts": {"openai/gpt-4o-mini": 0.5}}),
+        lambda payload: payload.update({"workspace_discount": 0.9}),
+        lambda payload: payload.update({"effective_group_ratio": 2}),
+        lambda payload: payload.update({"group_ratio": 2}),
+        lambda payload: payload.update({"group_ratio": {"default": 1, "vip": 2}}),
+        lambda payload: payload.update({"group_ratio": {"default": "high"}}),
+        lambda payload: payload.update({"group_ratio": "high"}),
+        lambda payload: payload.update({"data": {}}),
+        lambda payload: payload.update({"data": []}),
+        lambda payload: payload["data"][0].update({"model_ratio": "cheap"}),
+        lambda payload: payload["data"][0].update({"model_ratio": 0.08}),
+        lambda payload: payload["data"][0].update({"completion_ratio": 5.0}),
+    ],
+)
+def test_verify_orcarouter_pricing_gate_fail_closed_cases(mutate) -> None:
+    payload = _valid_orcarouter_payload()
+    mutate(payload)
+
+    with pytest.raises(PricingGateError):
+        verify_orcarouter_pricing_gate(payload)
+
+
+def test_fetch_orcarouter_pricing_returns_dict_on_http_200_json_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"pricing_version": "x"}'
+
+    def _fake_urlopen(*args, **kwargs):
+        return _FakeResponse()
+
+    monkeypatch.setattr(
+        "wevibe_bench.adapters.openrouter_proxy.urllib_request.urlopen",
+        _fake_urlopen,
+    )
+
+    assert fetch_orcarouter_pricing(timeout=0.1) == {"pricing_version": "x"}
+
+
+def test_fetch_orcarouter_pricing_wraps_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+
+    def _fake_urlopen(*args, **kwargs):
+        raise urllib.error.HTTPError("https://x", 500, "err", {}, None)
+
+    monkeypatch.setattr(
+        "wevibe_bench.adapters.openrouter_proxy.urllib_request.urlopen",
+        _fake_urlopen,
+    )
+
+    with pytest.raises(PricingGateError):
+        fetch_orcarouter_pricing(timeout=0.1)
+
+
+def test_fetch_orcarouter_pricing_rejects_bad_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b"not json"
+
+    monkeypatch.setattr(
+        "wevibe_bench.adapters.openrouter_proxy.urllib_request.urlopen",
+        lambda *args, **kwargs: _FakeResponse(),
+    )
+
+    with pytest.raises(PricingGateError):
+        fetch_orcarouter_pricing(timeout=0.1)
+
+
+def test_fetch_orcarouter_pricing_rejects_non_200_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResponse:
+        status = 503
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"pricing_version": "x"}'
+
+    monkeypatch.setattr(
+        "wevibe_bench.adapters.openrouter_proxy.urllib_request.urlopen",
+        lambda *args, **kwargs: _FakeResponse(),
+    )
+
+    with pytest.raises(PricingGateError):
+        fetch_orcarouter_pricing(timeout=0.1)
+
+
+def test_fetch_orcarouter_pricing_rejects_non_dict_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b"[1]"
+
+    monkeypatch.setattr(
+        "wevibe_bench.adapters.openrouter_proxy.urllib_request.urlopen",
+        lambda *args, **kwargs: _FakeResponse(),
+    )
+
+    with pytest.raises(PricingGateError):
+        fetch_orcarouter_pricing(timeout=0.1)
+
+
+def test_budget_ledger_settle_derived_releases_reservation_and_accrues_derived(
+    tmp_path: Path,
+) -> None:
+    hard_cap = 0.10
+    checkpoint = tmp_path / "ledger-derived.json"
+    ledger = BudgetLedger(
+        run_id="run-derived",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=hard_cap,
+        checkpoint_path=str(checkpoint),
+    )
+
+    ledger.reserve("r1", 0.05)
+    ledger.settle_derived("r1", 0.001)
+
+    snapshot = ledger.snapshot()
+    assert snapshot["accrued_derived"] == pytest.approx(0.001)
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+    assert ledger.remaining() == pytest.approx(hard_cap - 0.001)
+
+
+def test_budget_ledger_settle_derived_negative_clamps_to_zero_and_releases(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "ledger-derived-negative.json"
+    ledger = BudgetLedger(
+        run_id="run-derived-negative",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=0.10,
+        checkpoint_path=str(checkpoint),
+    )
+
+    ledger.reserve("r1", 0.05)
+    ledger.settle_derived("r1", -5.0)
+
+    snapshot = ledger.snapshot()
+    assert snapshot["accrued_derived"] == pytest.approx(0.0)
+    assert snapshot["outstanding_total"] == pytest.approx(0.0)
+    assert ledger.remaining() == pytest.approx(0.10)
+
+
+def test_budget_ledger_checkpoint_round_trip_persists_derived_accrual(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "ledger-derived-round-trip.json"
+    ledger = BudgetLedger(
+        run_id="run-derived-round-trip",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=0.10,
+        checkpoint_path=str(checkpoint),
+    )
+
+    ledger.reserve("r1", 0.05)
+    ledger.settle_derived("r1", 0.001)
+
+    resumed = BudgetLedger(
+        run_id="run-derived-round-trip",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=0.10,
+        checkpoint_path=str(checkpoint),
+    )
+    assert resumed.snapshot()["accrued_derived"] == pytest.approx(0.001)
+
+
+def test_budget_ledger_v1_checkpoint_loads_with_zero_derived(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "ledger-v1.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "run-v1",
+                "model_id": "z-ai/glm-5.2",
+                "profile_name": "glm",
+                "hard_cap_usd": 0.5,
+                "accrued_actual_usd": 0.25,
+                "committed_unproven_usd": 0.20,
+                "outstanding": {},
+                "updated_at": "2026-07-22T00:00:00+00:00",
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    resumed = BudgetLedger(
+        run_id="run-v1",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=0.5,
+        checkpoint_path=str(checkpoint),
+    )
+    assert resumed.snapshot()["accrued_derived"] == pytest.approx(0.0)

@@ -14,6 +14,7 @@ from wevibe_bench.adapters.backgammon import (
     DEFAULT_RUN_TIMEOUT_S,
     BackgammonRunner,
     _OpencodeRunStats,
+    reconcile_derived_vs_billing,
 )
 from wevibe_bench.adapters.docker_worker import DockerCellConfig, _build_run_argv
 from wevibe_bench.config import RunConfig
@@ -337,3 +338,92 @@ def test_opencode_run_stats_has_budget_stop_fields() -> None:
     assert stats.cost_usd == pytest.approx(1.25)
     assert stats.budget_stop_detected is False
     assert stats.budget_stop_signature is None
+
+
+def test_reconcile_derived_vs_billing_ok_case() -> None:
+    result = reconcile_derived_vs_billing(
+        settled_usd=0.001,
+        baseline_cents=1000.0,
+        final_cents=1000.1,
+    )
+
+    assert result["status"] == "ok"
+    assert result["divergence_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_reconcile_derived_vs_billing_ok_at_tolerance_boundary() -> None:
+    result = reconcile_derived_vs_billing(
+        settled_usd=0.001,
+        baseline_cents=1000.0,
+        final_cents=1000.095,
+        tolerance=0.05,
+    )
+
+    assert result["status"] == "ok"
+    assert result["divergence_pct"] == pytest.approx(5.0)
+
+
+def test_reconcile_derived_vs_billing_diverged_case() -> None:
+    result = reconcile_derived_vs_billing(
+        settled_usd=0.001,
+        baseline_cents=1000.0,
+        final_cents=1000.2,
+    )
+
+    assert result["status"] == "diverged"
+    assert result["divergence_pct"] == pytest.approx(50.0)
+
+
+def test_reconcile_derived_vs_billing_skipped_when_baseline_missing() -> None:
+    result = reconcile_derived_vs_billing(
+        settled_usd=0.001,
+        baseline_cents=None,
+        final_cents=1000.1,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["delta_counter_usd"] is None
+
+
+def test_reconcile_derived_vs_billing_error_when_counter_backwards() -> None:
+    result = reconcile_derived_vs_billing(
+        settled_usd=0.001,
+        baseline_cents=1000.1,
+        final_cents=1000.0,
+    )
+
+    assert result["status"] == "error"
+    assert "backwards" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        reconcile_derived_vs_billing(
+            settled_usd=0.001,
+            baseline_cents=1000.0,
+            final_cents=1000.1,
+        ),
+        reconcile_derived_vs_billing(
+            settled_usd=0.001,
+            baseline_cents=1000.0,
+            final_cents=1000.2,
+        ),
+        reconcile_derived_vs_billing(
+            settled_usd=0.001,
+            baseline_cents=None,
+            final_cents=1000.1,
+        ),
+        reconcile_derived_vs_billing(
+            settled_usd=0.001,
+            baseline_cents=1000.1,
+            final_cents=1000.0,
+        ),
+    ],
+)
+def test_reconcile_derived_vs_billing_always_sets_workspace_aggregate_confound_note(
+    result: dict,
+) -> None:
+    assert isinstance(result["confound_note"], str)
+    assert result["confound_note"]
+    assert "workspace-aggregate" in result["confound_note"]

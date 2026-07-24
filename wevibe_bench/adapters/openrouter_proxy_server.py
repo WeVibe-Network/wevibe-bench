@@ -1,7 +1,8 @@
 """HTTP transport + CLI for the OpenRouter benchmark proxy.
 
 This module is stdlib-only and depends on ``openrouter_proxy`` for policy,
-pricing, budgeting, and logging primitives.
+pricing, budgeting, and logging primitives, including actual/derived/retained
+reservation settlement.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import os
 import secrets
 import socketserver
+import sys
 import threading
 import urllib.request
 import uuid
@@ -27,7 +29,9 @@ from wevibe_bench.adapters.openrouter_proxy import (
     DEFAULT_OPENCODE_AUTH_PATH,
     DEFAULT_PROFILES,
     ModelMismatchError,
+    ORCAROUTER_PRICING_VERSION_PIN,
     OPENROUTER_UPSTREAM_URL,
+    PricingGateError,
     UPSTREAM_CHAT_COMPLETIONS_URLS,
     ProfileBlockedError,
     ProfileRegistry,
@@ -35,10 +39,13 @@ from wevibe_bench.adapters.openrouter_proxy import (
     ProxyLogger,
     UnknownModelError,
     apply_policy,
+    derived_cost_usd,
+    fetch_orcarouter_pricing,
     input_token_upper_bound,
     key_fingerprint,
     load_upstream_key,
     normalize_model_selector,
+    verify_orcarouter_pricing_gate,
     worst_case_usd,
 )
 
@@ -202,17 +209,42 @@ def _provider_evidence(provider_obj: Any) -> tuple[list[str], list[str]]:
     return slugs, quantizations
 
 
-def _usage_evidence(usage_obj: Any) -> tuple[int, int, float | None]:
+class _UsageEvidence(NamedTuple):
+    completion_tokens: int
+    reasoning_tokens: int
+    cost: float | None
+    prompt_tokens: int
+    cached_tokens: int
+
+
+def _usage_evidence(usage_obj: Any) -> _UsageEvidence:
     if not isinstance(usage_obj, dict):
-        return 0, 0, None
+        return _UsageEvidence(
+            completion_tokens=0,
+            reasoning_tokens=0,
+            cost=None,
+            prompt_tokens=0,
+            cached_tokens=0,
+        )
 
     completion_tokens = _as_int(usage_obj.get("completion_tokens"))
     reasoning_tokens = 0
     details = usage_obj.get("completion_tokens_details")
     if isinstance(details, dict):
         reasoning_tokens = _as_int(details.get("reasoning_tokens"))
+    prompt_tokens = _as_int(usage_obj.get("prompt_tokens"))
+    cached_tokens = 0
+    prompt_details = usage_obj.get("prompt_tokens_details")
+    if isinstance(prompt_details, dict):
+        cached_tokens = _as_int(prompt_details.get("cached_tokens"))
     cost = _as_float_or_none(usage_obj.get("cost"))
-    return completion_tokens, reasoning_tokens, cost
+    return _UsageEvidence(
+        completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cost=cost,
+        prompt_tokens=prompt_tokens,
+        cached_tokens=cached_tokens,
+    )
 
 
 def _parse_sse_data_json(line: bytes) -> dict[str, Any] | None:
@@ -287,11 +319,12 @@ class ProxyServer:
         self._ordinal_lock = threading.Lock()
         self._upstream_key_fp = key_fingerprint(upstream_key)
 
-        # High-water input-token upper bound across PROVEN-billed requests
-        # (settled with upstream ``usage.cost``). This is the established
-        # prompt-cache prefix bound for reservation pricing; retained-unproven
-        # requests never establish it. In-process only by design: a proxy
-        # restart forgets the prefix and reservations degrade to conservative.
+        # High-water input-token upper bound across proven-billed requests
+        # (settled via upstream ``usage.cost`` OR derived from upstream token
+        # usage with authorized pricing). This is the established prompt-cache
+        # prefix bound for reservation pricing; retained-unproven requests
+        # never establish it. In-process only by design: a proxy restart
+        # forgets the prefix and reservations degrade to conservative.
         self._proven_billed_input_ub = 0
         self._billed_ub_lock = threading.Lock()
 
@@ -453,15 +486,43 @@ class ProxyServer:
         reserved: bool,
         trace_id: str,
         proven_cost: float | None,
+        profile: Any,
+        usage: _UsageEvidence,
         billed_input_ub: int = 0,
-    ) -> None:
+    ) -> str:
         if not reserved:
-            return
+            return "none"
         if proven_cost is not None:
             self.ledger.settle_actual(trace_id, proven_cost)
             self._record_proven_billed_input_ub(billed_input_ub)
-        else:
-            self.ledger.retain_unproven(trace_id)
+            return "actual"
+
+        pricing = getattr(profile, "pricing", None)
+        has_authorized_pricing = (
+            bool(getattr(profile, "authorized", False))
+            and isinstance(pricing, dict)
+            and bool(pricing)
+            and _is_number(pricing.get("input"))
+            and _is_number(pricing.get("output"))
+        )
+        has_usage_evidence = usage.prompt_tokens > 0 or usage.completion_tokens > 0
+        if has_authorized_pricing and has_usage_evidence:
+            try:
+                derived = derived_cost_usd(
+                    prompt_tokens=usage.prompt_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    pricing=pricing,
+                )
+                self.ledger.settle_derived(trace_id, derived)
+                # Derived settles are proven billed-usage evidence for prefix tracking.
+                self._record_proven_billed_input_ub(billed_input_ub)
+                return "derived"
+            except Exception:  # noqa: BLE001 - fail closed to retain path.
+                pass
+
+        self.ledger.retain_unproven(trace_id)
+        return "retained_unproven"
 
     def _handle_post(self, handler: http.server.BaseHTTPRequestHandler) -> None:
         started_at = datetime.datetime.now(datetime.timezone.utc)
@@ -484,6 +545,9 @@ class ProxyServer:
 
         reserved = False
         proven_cost: float | None = None
+        prompt_tokens = 0
+        cached_prompt_tokens = 0
+        settle_state = "none"
 
         try:
             if handler.path != self._CHAT_PATH:
@@ -740,13 +804,17 @@ class ProxyServer:
                                 provider_slugs, quantizations = _provider_evidence(resp_provider)
 
                             usage = payload.get("usage")
-                            completion, reasoning, cost = _usage_evidence(usage)
-                            if completion:
-                                out_tokens = completion
-                            if reasoning:
-                                reasoning_tokens = reasoning
-                            if cost is not None:
-                                proven_cost = cost
+                            ev = _usage_evidence(usage)
+                            if ev.completion_tokens:
+                                out_tokens = ev.completion_tokens
+                            if ev.reasoning_tokens:
+                                reasoning_tokens = ev.reasoning_tokens
+                            if ev.prompt_tokens:
+                                prompt_tokens = ev.prompt_tokens
+                            if ev.cached_tokens:
+                                cached_prompt_tokens = ev.cached_tokens
+                            if ev.cost is not None:
+                                proven_cost = ev.cost
 
                         if client_connected:
                             try:
@@ -768,16 +836,24 @@ class ProxyServer:
                     status=status,
                 )
 
-                self._finalize_reservation(
+                settle_state = self._finalize_reservation(
                     reserved=reserved,
                     trace_id=trace_id,
                     proven_cost=proven_cost,
+                    profile=profile,
+                    usage=_UsageEvidence(
+                        completion_tokens=out_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                        cost=proven_cost,
+                        prompt_tokens=prompt_tokens,
+                        cached_tokens=cached_prompt_tokens,
+                    ),
                     billed_input_ub=in_tokens_ub,
                 )
                 reserved = False
                 return
 
-            # 8a) non-stream settle/retain from usage.cost then relay status+body.
+            # 8a) non-stream settle using actual/derived evidence, else retain.
             status = int(upstream.status)
             response_body = upstream.body if upstream.body is not None else b""
 
@@ -789,17 +865,23 @@ class ProxyServer:
                 provider_slugs, quantizations = _provider_evidence(response_payload.get("provider"))
 
             usage_payload = response_payload.get("usage")
-            completion, reasoning, cost = _usage_evidence(usage_payload)
-            if completion:
-                out_tokens = completion
-            if reasoning:
-                reasoning_tokens = reasoning
-            proven_cost = cost
+            ev = _usage_evidence(usage_payload)
+            if ev.completion_tokens:
+                out_tokens = ev.completion_tokens
+            if ev.reasoning_tokens:
+                reasoning_tokens = ev.reasoning_tokens
+            if ev.prompt_tokens:
+                prompt_tokens = ev.prompt_tokens
+            if ev.cached_tokens:
+                cached_prompt_tokens = ev.cached_tokens
+            proven_cost = ev.cost
 
-            self._finalize_reservation(
+            settle_state = self._finalize_reservation(
                 reserved=reserved,
                 trace_id=trace_id,
                 proven_cost=proven_cost,
+                profile=profile,
+                usage=ev,
                 billed_input_ub=in_tokens_ub,
             )
             reserved = False
@@ -821,6 +903,7 @@ class ProxyServer:
             if reserved:
                 try:
                     self.ledger.retain_unproven(trace_id)
+                    settle_state = "retained_unproven"
                 except Exception as retain_exc:  # noqa: BLE001
                     if error_text:
                         error_text = f"{error_text}; retain_unproven_failed={retain_exc}"
@@ -851,6 +934,7 @@ class ProxyServer:
             if reserved:
                 try:
                     self.ledger.retain_unproven(trace_id)
+                    settle_state = "retained_unproven"
                 except Exception as retain_exc:  # noqa: BLE001
                     if error_text:
                         error_text = f"{error_text}; retain_unproven_failed={retain_exc}"
@@ -874,8 +958,10 @@ class ProxyServer:
                 reasoning_tokens=reasoning_tokens,
                 reserved_usd=reserved_usd,
                 accrued_usd=snapshot.get("accrued", 0.0),
+                accrued_derived_usd=snapshot.get("accrued_derived", 0.0),
                 committed_unproven_usd=snapshot.get("committed_unproven", 0.0),
                 remaining_usd=snapshot.get("remaining", 0.0),
+                settle_state=settle_state,
                 status=status,
                 duration_ms=duration_ms,
                 error=error_text,
@@ -1077,6 +1163,33 @@ def main(argv: list[str] | None = None) -> int:
         reject_on_equality=bool(args.reject_on_equality),
     )
     logger = ProxyLogger(args.log)
+    if args.authorize and selected_profile.upstream == "orcarouter":
+        try:
+            pricing_payload = fetch_orcarouter_pricing()
+            verify_orcarouter_pricing_gate(pricing_payload)
+        except PricingGateError as exc:
+            logger.event(
+                event="pricing_gate",
+                status="failed",
+                upstream="orcarouter",
+                pricing_version_pin=ORCAROUTER_PRICING_VERSION_PIN,
+                upstream_key_fp=upstream_key_fp,
+                error=str(exc),
+            )
+            print(
+                f"orcarouter pricing gate FAILED; refusing paid calls: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        logger.event(
+            event="pricing_gate",
+            status="ok",
+            upstream="orcarouter",
+            pricing_version=ORCAROUTER_PRICING_VERSION_PIN,
+            upstream_key_fp=upstream_key_fp,
+        )
+
     proxy = ProxyServer(
         registry=registry,
         profile_name=args.profile,

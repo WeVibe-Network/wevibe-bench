@@ -14,11 +14,19 @@ import json
 import os
 import threading
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 
 OPENROUTER_UPSTREAM_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENCODE_ZEN_UPSTREAM_URL = "https://opencode.ai/zen/v1/chat/completions"
 ORCAROUTER_UPSTREAM_URL = "https://www.orcarouter.ai/v1/chat/completions"
+ORCAROUTER_PRICING_URL = "https://www.orcarouter.ai/api/pricing"
+ORCAROUTER_PRICING_VERSION_PIN = "c58e194db3f6a20e7d41b8c9e2f05a17"
+ORCAROUTER_ANCHOR_MODEL = "openai/gpt-4o-mini"
+ORCAROUTER_ANCHOR_INPUT_USD_PER_1M = 0.15
+ORCAROUTER_ANCHOR_OUTPUT_USD_PER_1M = 0.60
+PRICING_ANCHOR_ABS_TOL_USD = 1e-6
 UPSTREAM_CHAT_COMPLETIONS_URLS = {
     "openrouter": OPENROUTER_UPSTREAM_URL,
     "opencode": OPENCODE_ZEN_UPSTREAM_URL,
@@ -31,7 +39,7 @@ RESERVATION_SAFETY_FACTOR = 1.10
 FEE_RATE = 0.06
 FLAT_FEE_USD = 0.001
 PER_MESSAGE_OVERHEAD_TOKENS = 16
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 class ProxyError(Exception):
@@ -87,6 +95,10 @@ class PolicyMismatchError(ProxyError):
     """Raised when checkpoint policy binding mismatches the current run binding."""
 
     default_reason = "policy_mismatch"
+
+
+class PricingGateError(RuntimeError):
+    """Raised when live OrcaRouter pricing cannot be fetched/verified."""
 
 
 @dataclass(frozen=True)
@@ -347,6 +359,13 @@ def apply_policy(client_body: dict[str, Any], profile: ProviderProfile, max_toke
     else:
         body["max_tokens"] = max_tokens_cap
 
+    if profile.upstream == "orcarouter" and body.get("stream"):
+        stream_options = body.get("stream_options")
+        if stream_options is None:
+            body["stream_options"] = {"include_usage": True}
+        elif isinstance(stream_options, dict) and "include_usage" not in stream_options:
+            stream_options["include_usage"] = True
+
     return body
 
 
@@ -397,11 +416,171 @@ def worst_case_usd(
     return subtotal * (1.0 + FEE_RATE) * RESERVATION_SAFETY_FACTOR + FLAT_FEE_USD
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _as_int(value: Any) -> int:
+    if _is_number(value):
+        return int(value)
+    return 0
+
+
+def derived_cost_usd(
+    *,
+    prompt_tokens: int,
+    cached_tokens: int,
+    completion_tokens: int,
+    pricing: dict,
+) -> float:
+    """Estimate billed spend from usage evidence and authorized price rows.
+
+    This is the honest billed estimate (no reservation padding, fees, or safety
+    factors): ``input + cache_read + output`` at per-1M token prices.
+    """
+
+    if not pricing:
+        raise ValueError("missing pricing row")
+
+    prompt_n = max(0, _as_int(prompt_tokens))
+    cached_n = max(0, _as_int(cached_tokens))
+    completion_n = max(0, _as_int(completion_tokens))
+
+    input_rate = float(pricing["input"])
+    cache_read_rate = float(pricing.get("cache_read", pricing["input"]))
+    output_rate = float(pricing["output"])
+
+    fresh_prompt_tokens = max(0, prompt_n - cached_n)
+    subtotal_per_m = (
+        (float(fresh_prompt_tokens) * input_rate)
+        + (float(cached_n) * cache_read_rate)
+        + (float(completion_n) * output_rate)
+    )
+    return subtotal_per_m / 1_000_000
+
+
+def fetch_orcarouter_pricing(*, timeout: float = 10.0) -> dict:
+    """Fetch live OrcaRouter pricing payload or raise ``PricingGateError``."""
+
+    req = urllib_request.Request(ORCAROUTER_PRICING_URL, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=float(timeout)) as response:
+            status = int(getattr(response, "status", 200))
+            raw = response.read()
+    except urllib_error.HTTPError as exc:
+        raise PricingGateError(
+            f"orcarouter pricing fetch failed: {exc.__class__.__name__}: http_status={int(exc.code)}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced as pricing-gate failure.
+        raise PricingGateError(
+            f"orcarouter pricing fetch failed: {exc.__class__.__name__}: {exc}"
+        ) from exc
+
+    if status != 200:
+        raise PricingGateError(f"orcarouter pricing fetch failed: http_status={status}")
+
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PricingGateError(
+            f"orcarouter pricing payload parse failed: {exc.__class__.__name__}: {exc}"
+        ) from exc
+
+    if not isinstance(parsed, dict):
+        raise PricingGateError("orcarouter pricing payload invalid: expected JSON object")
+
+    return parsed
+
+
+def verify_orcarouter_pricing_gate(pricing_payload: dict) -> None:
+    """Verify pricing payload pin + anchor integrity before deriving spend."""
+
+    if not isinstance(pricing_payload, dict):
+        raise PricingGateError("orcarouter pricing gate failed: payload must be a JSON object")
+
+    if pricing_payload.get("pricing_version") != ORCAROUTER_PRICING_VERSION_PIN:
+        raise PricingGateError(
+            "orcarouter pricing gate failed: pricing_version pin mismatch"
+        )
+
+    model_discounts = pricing_payload.get("model_discounts")
+    if model_discounts is None:
+        pass
+    elif isinstance(model_discounts, list):
+        if model_discounts:
+            raise PricingGateError("orcarouter pricing gate failed: model_discounts must be neutral")
+    elif isinstance(model_discounts, dict):
+        if model_discounts:
+            raise PricingGateError("orcarouter pricing gate failed: model_discounts must be neutral")
+    else:
+        raise PricingGateError("orcarouter pricing gate failed: model_discounts must be neutral")
+
+    workspace_discount = pricing_payload.get("workspace_discount")
+    if workspace_discount not in (None, 1, 1.0):
+        raise PricingGateError(
+            "orcarouter pricing gate failed: workspace_discount must be neutral"
+        )
+
+    effective_group_ratio = pricing_payload.get("effective_group_ratio")
+    if effective_group_ratio not in (None, 1, 1.0):
+        raise PricingGateError(
+            "orcarouter pricing gate failed: effective_group_ratio must be neutral"
+        )
+
+    group_ratio_value = pricing_payload.get("group_ratio", 1.0)
+    if _is_number(group_ratio_value):
+        if float(group_ratio_value) != 1.0:
+            raise PricingGateError("orcarouter pricing gate failed: group_ratio must be neutral")
+    elif isinstance(group_ratio_value, dict):
+        for ratio in group_ratio_value.values():
+            if not _is_number(ratio) or float(ratio) != 1.0:
+                raise PricingGateError("orcarouter pricing gate failed: group_ratio must be neutral")
+    else:
+        raise PricingGateError("orcarouter pricing gate failed: group_ratio must be neutral")
+
+    rows = pricing_payload.get("data")
+    if not isinstance(rows, list):
+        raise PricingGateError("orcarouter pricing gate failed: data must be a list")
+
+    anchor_row = None
+    for row in rows:
+        if isinstance(row, dict) and row.get("model_name") == ORCAROUTER_ANCHOR_MODEL:
+            anchor_row = row
+            break
+
+    if anchor_row is None:
+        raise PricingGateError(
+            f"orcarouter pricing gate failed: missing anchor model {ORCAROUTER_ANCHOR_MODEL}"
+        )
+
+    model_ratio = anchor_row.get("model_ratio")
+    completion_ratio = anchor_row.get("completion_ratio")
+    if not _is_number(model_ratio) or not _is_number(completion_ratio):
+        raise PricingGateError(
+            "orcarouter pricing gate failed: anchor ratios must be numeric"
+        )
+
+    # group_ratio is per-group metadata; effective_group_ratio is the resolved scalar for this workspace.
+    effective_group_ratio_scalar = 1.0 if effective_group_ratio is None else float(effective_group_ratio)
+    derived_input = float(model_ratio) * 2.0 * effective_group_ratio_scalar
+    derived_output = derived_input * float(completion_ratio)
+
+    if abs(derived_input - ORCAROUTER_ANCHOR_INPUT_USD_PER_1M) > PRICING_ANCHOR_ABS_TOL_USD:
+        raise PricingGateError(
+            "orcarouter pricing gate failed: anchor input derivation mismatch"
+        )
+    if abs(derived_output - ORCAROUTER_ANCHOR_OUTPUT_USD_PER_1M) > PRICING_ANCHOR_ABS_TOL_USD:
+        raise PricingGateError(
+            "orcarouter pricing gate failed: anchor output derivation mismatch"
+        )
+
+
 class BudgetLedger:
     """Hard-ceiling budget authority for proxy requests.
 
-    Reservations are conservative upper bounds; uncertainty is retained and never
-    released (R-13 budget enforcement with no fallback path).
+    Reservations are conservative upper bounds; settlement has three outcomes:
+    proven ``usage.cost`` actuals, derived billed estimates from usage × authorized
+    pricing, or committed-unproven retention when no usable evidence exists.
     """
 
     def __init__(
@@ -426,6 +605,7 @@ class BudgetLedger:
         self.reject_on_equality = bool(reject_on_equality)
 
         self._accrued_actual = 0.0
+        self._accrued_derived = 0.0
         self._committed_unproven = 0.0
         self._outstanding: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -452,7 +632,7 @@ class BudgetLedger:
             raise PolicyMismatchError(reason="checkpoint_invalid")
 
         schema_version = int(data.get("schema_version", 0))
-        if schema_version != CHECKPOINT_SCHEMA_VERSION:
+        if schema_version not in (1, CHECKPOINT_SCHEMA_VERSION):
             raise PolicyMismatchError(reason="checkpoint_schema_mismatch")
 
         checkpoint_binding = (
@@ -469,6 +649,10 @@ class BudgetLedger:
             raise PolicyMismatchError(reason="checkpoint_invalid")
 
         self._accrued_actual = max(0.0, float(data.get("accrued_actual_usd", 0.0)))
+        if schema_version == 1:
+            self._accrued_derived = 0.0
+        else:
+            self._accrued_derived = max(0.0, float(data.get("accrued_derived_usd", 0.0)))
         self._committed_unproven = max(0.0, float(data.get("committed_unproven_usd", 0.0)))
         self._outstanding = {str(req_id): max(0.0, float(value)) for req_id, value in outstanding.items()}
 
@@ -483,6 +667,7 @@ class BudgetLedger:
         with self._lock:
             projected = (
                 self._accrued_actual
+                + self._accrued_derived
                 + self._committed_unproven
                 + sum(self._outstanding.values())
                 + reservation
@@ -507,6 +692,13 @@ class BudgetLedger:
             self._accrued_actual += max(0.0, float(actual_usd))
             self._persist()
 
+    def settle_derived(self, req_id: str, derived_usd: float) -> None:
+        """Settle a request using derived billed usage × authorized pricing."""
+        with self._lock:
+            self._outstanding.pop(req_id, None)
+            self._accrued_derived += max(0.0, float(derived_usd))
+            self._persist()
+
     def retain_unproven(self, req_id: str) -> None:
         """Move reserved amount to committed-unproven (never release uncertainty)."""
         with self._lock:
@@ -520,6 +712,7 @@ class BudgetLedger:
             return (
                 self.hard_cap
                 - self._accrued_actual
+                - self._accrued_derived
                 - self._committed_unproven
                 - sum(self._outstanding.values())
             )
@@ -530,10 +723,12 @@ class BudgetLedger:
             outstanding_total = sum(self._outstanding.values())
             return {
                 "accrued": self._accrued_actual,
+                "accrued_derived": self._accrued_derived,
                 "committed_unproven": self._committed_unproven,
                 "outstanding_total": outstanding_total,
                 "remaining": self.hard_cap
                 - self._accrued_actual
+                - self._accrued_derived
                 - self._committed_unproven
                 - outstanding_total,
                 "hard_cap": self.hard_cap,
@@ -548,6 +743,7 @@ class BudgetLedger:
             "profile_name": self.profile_name,
             "hard_cap_usd": self.hard_cap,
             "accrued_actual_usd": self._accrued_actual,
+            "accrued_derived_usd": self._accrued_derived,
             "committed_unproven_usd": self._committed_unproven,
             "outstanding": self._outstanding,
             "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -628,11 +824,18 @@ __all__ = [
     "DEFAULT_OPENCODE_AUTH_PATH",
     "FEE_RATE",
     "FLAT_FEE_USD",
+    "ORCAROUTER_ANCHOR_INPUT_USD_PER_1M",
+    "ORCAROUTER_ANCHOR_MODEL",
+    "ORCAROUTER_ANCHOR_OUTPUT_USD_PER_1M",
+    "ORCAROUTER_PRICING_URL",
+    "ORCAROUTER_PRICING_VERSION_PIN",
     "ModelMismatchError",
     "OPENCODE_ZEN_UPSTREAM_URL",
     "ORCAROUTER_UPSTREAM_URL",
     "OPENROUTER_UPSTREAM_URL",
     "PER_MESSAGE_OVERHEAD_TOKENS",
+    "PRICING_ANCHOR_ABS_TOL_USD",
+    "PricingGateError",
     "PROTECTED_BODY_FIELDS",
     "PolicyMismatchError",
     "ProfileBlockedError",
@@ -645,9 +848,12 @@ __all__ = [
     "UPSTREAM_CHAT_COMPLETIONS_URLS",
     "UnknownModelError",
     "apply_policy",
+    "derived_cost_usd",
+    "fetch_orcarouter_pricing",
     "input_token_upper_bound",
     "key_fingerprint",
     "load_upstream_key",
     "normalize_model_selector",
+    "verify_orcarouter_pricing_gate",
     "worst_case_usd",
 ]

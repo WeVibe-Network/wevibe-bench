@@ -40,7 +40,17 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from wevibe_bench.adapters.backgammon import DEFAULT_ATTEMPT_HARD_CEILING
+from wevibe_bench.adapters.backgammon import (
+    DEFAULT_ATTEMPT_HARD_CEILING,
+    fetch_orcarouter_billing_usage_cents,
+    reconcile_derived_vs_billing,
+)
+from wevibe_bench.adapters.openrouter_proxy import (
+    DEFAULT_OPENCODE_AUTH_PATH,
+    DEFAULT_PROFILES,
+    key_fingerprint,
+    load_upstream_key,
+)
 from wevibe_bench.config import (
     BACKGAMMON_LADDER_SCHEMA_VERSION,
     LadderRung,
@@ -1258,6 +1268,28 @@ def _entry_accrued_usd(entry: dict[str, Any]) -> float | None:
         return None
 
 
+def _entry_settled_usd(entry: dict[str, Any]) -> float:
+    stats = entry.get("stats") if isinstance(entry.get("stats"), dict) else {}
+    actual = stats.get("cost_actual_usd")
+    derived = stats.get("cost_derived_usd")
+    if isinstance(actual, bool) or isinstance(derived, bool):
+        return 0.0
+    try:
+        return float(actual or 0.0) + float(derived or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cell_routes_orcarouter(*, cell: dict[str, Any], params: dict[str, Any]) -> bool:
+    profile_name = str(params.get("profile") or "").strip()
+    if not profile_name:
+        return False
+    profile = DEFAULT_PROFILES().get(profile_name)
+    if profile is None:
+        return False
+    return str(profile.upstream) == "orcarouter"
+
+
 def _summarize_cell(cell: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
     stats_list = [e["stats"] for e in entries if isinstance(e.get("stats"), dict)]
     accrued_costs = [
@@ -1649,6 +1681,7 @@ def _run_cell_rep(
     scorecard_path: Path | None = None
     detail_path: Path | None = None
     accrued: Any = None
+    accrued_derived: Any = 0.0
     committed: Any = None
     stats: dict[str, Any] | None = None
     anomalies: dict[str, Any] | None = None
@@ -1792,17 +1825,32 @@ def _run_cell_rep(
         proxy_cp = _load_json(proxy_checkpoint) if proxy_checkpoint.is_file() else None
         if isinstance(proxy_cp, dict):
             accrued = proxy_cp.get("accrued_actual_usd")
+            accrued_derived = proxy_cp.get("accrued_derived_usd", 0.0)
             committed = proxy_cp.get("committed_unproven_usd")
-            if stats is not None and accrued is not None:
+            if stats is not None:
                 try:
-                    stats["cost_usd"] = float(accrued)
+                    actual_cost = float(accrued or 0.0)
+                    derived_cost = float(accrued_derived or 0.0)
+                    stats["cost_usd"] = actual_cost + derived_cost
+                    stats["cost_actual_usd"] = actual_cost
+                    stats["cost_derived_usd"] = derived_cost
                 except (TypeError, ValueError):
                     pass
 
+        try:
+            progress_cost_actual = float(accrued or 0.0)
+            progress_cost_derived = float(accrued_derived or 0.0)
+            progress_cost_settled = progress_cost_actual + progress_cost_derived
+        except (TypeError, ValueError):
+            progress_cost_actual = 0.0
+            progress_cost_derived = 0.0
+            progress_cost_settled = 0.0
         progress(
             "ok",
             f"verdict={stats['verdict']} tokens={stats['total_tokens']:.0f} "
-            f"cost={float(accrued or 0.0):.4f} dur_s={dur_s:.1f}",
+            f"cost_actual_usd={progress_cost_actual:.4f} "
+            f"cost_derived_usd={progress_cost_derived:.4f} "
+            f"cost_settled_usd={progress_cost_settled:.4f} dur_s={dur_s:.1f}",
         )
 
         return {
@@ -1823,6 +1871,7 @@ def _run_cell_rep(
             "proxy_log": str(proxy_log),
             "proxy_checkpoint": str(proxy_checkpoint),
             "accrued_usd": accrued,
+            "accrued_derived_usd": accrued_derived,
             "committed_unproven_usd": committed,
             "stats": stats,
             "anomalies": anomalies,
@@ -2205,6 +2254,30 @@ def main() -> int:
     if rung_params is None:
         raise RuntimeError("--rung-params is required for a real run")
 
+    any_orcarouter_selected = any(
+        _cell_routes_orcarouter(cell=cell, params=rung_params[str(cell["model"])])
+        for cell in selected
+    )
+    billing_baseline_cents: float | None = None
+    if any_orcarouter_selected:
+        try:
+            orcarouter_api_key = load_upstream_key("orcarouter", DEFAULT_OPENCODE_AUTH_PATH)
+            orcarouter_key_fp = key_fingerprint(orcarouter_api_key)
+            billing_baseline_cents = fetch_orcarouter_billing_usage_cents(api_key=orcarouter_api_key)
+            _emit(
+                logfile_path,
+                f"[{_utc_iso()}] BILLING-BASELINE trace={trace} upstream=orcarouter "
+                f"auth_path={DEFAULT_OPENCODE_AUTH_PATH} key_fp={orcarouter_key_fp} "
+                f"baseline_cents={billing_baseline_cents:.4f}",
+            )
+        except Exception as exc:
+            _emit(
+                logfile_path,
+                f"[{_utc_iso()}] WARNING trace={trace} event=billing_baseline_fetch_failed "
+                f"upstream=orcarouter status=non_fatal error_class={exc.__class__.__name__} "
+                f"detail={str(exc)}",
+            )
+
     # Plan-level budget projection: refuse to START if the selected reps'
     # caps cannot fit under the stage/global caps (stop BEFORE overrunning).
     projected = 0.0
@@ -2233,10 +2306,12 @@ def main() -> int:
 
     executed = 0
     skipped = 0
+    settled_total_usd = 0.0
     try:
         for cell in selected:
             model = str(cell["model"])
             params = rung_params[model]
+            cell_is_orcarouter = _cell_routes_orcarouter(cell=cell, params=params)
             run_number = int(cell["run_number"])
 
             if only_reps is not None:
@@ -2258,6 +2333,8 @@ def main() -> int:
                             cell=cell, rep=int(rep), params=params, args=args, trace=trace, logfile_path=logfile_path,
                         )
                         executed += 1
+                        if cell_is_orcarouter:
+                            settled_total_usd += _entry_settled_usd(entry)
                     except LadderAbort:
                         raise
                     except CellRunUnexpectedError as exc:
@@ -2304,6 +2381,8 @@ def main() -> int:
                         cell=cell, rep=1, params=params, args=args, trace=trace, logfile_path=logfile_path,
                     )
                     executed += 1
+                    if cell_is_orcarouter:
+                        settled_total_usd += _entry_settled_usd(entry)
                     rep1 = entry
 
                     # Variance triggers: evaluated ONCE, immediately after the N=1 run.
@@ -2361,6 +2440,8 @@ def main() -> int:
                         cell=cell, rep=rep, params=params, args=args, trace=trace, logfile_path=logfile_path,
                     )
                     executed += 1
+                    if cell_is_orcarouter:
+                        settled_total_usd += _entry_settled_usd(entry)
                 except LadderAbort:
                     raise
                 except CellRunUnexpectedError as exc:
@@ -2400,7 +2481,47 @@ def main() -> int:
         _emit_summary(runs_dir, plan, checkpoint, trace)
         return 3
 
+    if any_orcarouter_selected:
+        billing_final_cents: float | None = None
+        try:
+            orcarouter_api_key = load_upstream_key("orcarouter", DEFAULT_OPENCODE_AUTH_PATH)
+            orcarouter_key_fp = key_fingerprint(orcarouter_api_key)
+            billing_final_cents = fetch_orcarouter_billing_usage_cents(api_key=orcarouter_api_key)
+            _emit(
+                logfile_path,
+                f"[{_utc_iso()}] BILLING-FINAL trace={trace} upstream=orcarouter "
+                f"auth_path={DEFAULT_OPENCODE_AUTH_PATH} key_fp={orcarouter_key_fp} "
+                f"final_cents={billing_final_cents:.4f}",
+            )
+        except Exception as exc:
+            _emit(
+                logfile_path,
+                f"[{_utc_iso()}] WARNING trace={trace} event=billing_final_fetch_failed "
+                f"upstream=orcarouter status=non_fatal error_class={exc.__class__.__name__} "
+                f"detail={str(exc)}",
+            )
+
+        reconciliation = reconcile_derived_vs_billing(
+            settled_usd=settled_total_usd,
+            baseline_cents=billing_baseline_cents,
+            final_cents=billing_final_cents,
+        )
+        _emit(
+            logfile_path,
+            f"[{_utc_iso()}] BILLING-RECONCILE trace={trace} "
+            f"result={json.dumps(reconciliation, sort_keys=True, separators=(',', ':'))}",
+        )
+
     summary_path = _emit_summary(runs_dir, plan, checkpoint, trace)
+    if any_orcarouter_selected and str(reconciliation.get("status") or "") == "diverged":
+        _emit(
+            logfile_path,
+            f"[{_utc_iso()}] WARNING trace={trace} SUMMARY billing_reconciliation=diverged "
+            f"settled_usd={float(reconciliation.get('settled_usd') or 0.0):.6f} "
+            f"delta_counter_usd={float(reconciliation.get('delta_counter_usd') or 0.0):.6f} "
+            f"divergence_pct={float(reconciliation.get('divergence_pct') or 0.0):.4f} "
+            f"confound_note={json.dumps(str(reconciliation.get('confound_note') or ''), ensure_ascii=False)}",
+        )
     _emit(
         logfile_path,
         f"[{_utc_iso()}] SUMMARY trace={trace} status=ok total_cells={len(plan)} executed_reps={executed} "
