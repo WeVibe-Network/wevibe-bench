@@ -82,16 +82,18 @@ cd scaffold/wevibe-mcp-clone && \
   WEVIBE_HUB_URL=http://127.0.0.1:4440 \
   nohup node dist/server.js < /dev/null > ../../runs/clone4550.log 2>&1 &
 ```
-**CLEAN-START (wipe) INVARIANT — reproducible, not a one-off:** a full chain wipe (`make docker-down`
-= `docker compose down -v`) destroys the on-chain org + its epoch key, so the LOCAL K_master in the
-bench keystores becomes STALE and MUST be cleared IN THE SAME STEP, else the next `register-org`
-creates a fresh org whose epoch key mismatches the stale K_master → `decrypt_failed`. The correct
-clean-start sequence is therefore:
+**CLEAN-START (wipe) INVARIANT — ONCE at benchmark start (not per run):** a full chain wipe destroys the
+on-chain org + its epoch key, so the LOCAL K_master in the bench keystores becomes STALE and MUST be
+cleared IN THE SAME STEP, else the next `register-org` creates a fresh org whose epoch key mismatches
+the stale K_master → `decrypt_failed`. Use the all-inclusive benchmark-start wipe path in
+`Wipe cadence — ONE-WIPE at benchmark start, NEVER per run (Walter-locked 2026-07-24)` below.
 ```
-make docker-down && make docker-up          # (from wevibe-meta) wipe chain/pg/qdrant + served-cache
+make redeploy                               # (from wevibe-meta) ONE benchmark-start wipe: chain/pg/qdrant + served-cache
 rm -rf "$WEVIBE_BENCH_LEADER_KEYSTORE" "$WEVIBE_BENCH_CONTRIB_KEYSTORE"   # clear STALE bench K_master (NEVER ~/.wevibe/keys)
-# then start :4550 (above) — its /v1/org-setup/finalize regenerates a fresh matching K_master into $WEVIBE_BENCH_LEADER_KEYSTORE
+# then run the residue check in the wipe-cadence section; any residue = STOP & FIX
+# then start :4550 (above) — /v1/org-setup/finalize regenerates a fresh matching K_master into $WEVIBE_BENCH_LEADER_KEYSTORE
 ```
+Per-run reset is CODE FIXTURE ONLY; do NOT re-wipe chain/pg/qdrant and do NOT reset the memory corpus.
 `WEVIBE_BENCH_ENDPOINTS=1` enables the bench-only `/v1/submit` + `/v1/identity/pubkeys` endpoints.
 The `/v1/health` route is always present (no bench flag needed).
 
@@ -246,6 +248,37 @@ ledger enforcement. This remains paid execution (Walter-authorized), not routine
 1. Read the PreflightError — it names the down tier and the fix.
 2. Bring the named service up with the command above (hub: `make redeploy`; clone: the `node dist/server.js` command).
 3. If you cannot, STOP and report. Do NOT improvise infrastructure, do NOT compile a new hub/mcp, do NOT invent a fallback.
+
+## Wipe cadence — ONE-WIPE at benchmark start, NEVER per run (Walter-locked 2026-07-24)
+
+**INVARIANT (extends `D-BENCH-CUMULATIVE-LOOP-2026-07-23`):** wipe the benchmark stack EXACTLY ONCE at benchmark start.
+Run the all-inclusive wipe from `wevibe-meta` via `make redeploy`, pair it with bench keystore clear
+(`rm -rf "$WEVIBE_BENCH_LEADER_KEYSTORE" "$WEVIBE_BENCH_CONTRIB_KEYSTORE"`), then run residue verification before
+any scored run. This is the only wipe/reset event for that benchmark campaign.
+
+After that one wipe, subsequent runs MUST NEVER restart chain/pg/qdrant and MUST NEVER reset corpus state.
+Each run reuses accumulated memories already in storage; only the run-local code fixture resets.
+
+**Residue check (mandatory, immediately after the one wipe):** verify all of the following are true before proceeding:
+1. Qdrant memory collections are empty or absent (no leftover benchmark vectors/documents).
+2. Chain + Postgres state is fresh (new org/session state expected after redeploy).
+3. Served cache is cleared.
+4. Bench keystore residue is gone (`$WEVIBE_BENCH_LEADER_KEYSTORE`, `$WEVIBE_BENCH_CONTRIB_KEYSTORE` removed).
+If any residue exists, STOP and FIX it before bringing benchmark flow back up.
+
+**Re-baseline bar:** only a TRUE REGRESSION or TOTAL BENCHMARK FAILURE justifies re-baselining (going back to
+drawing board). That action is deliberate + declared, never a casual re-wipe.
+
+**Success/failure framing:** success is visible convergence across ON runs (more problems resolved and fewer
+cycles/tool calls/tests/tokens/time, attempts-to-green trending down); failure is no demonstrable improvement
+or integrity collapse.
+
+**CAVEAT (required with this rule):** the provider-slug provenance → capability-eligibility path is canonized
+(`D-PRODUCER-MODEL-PROVENANCE`, `D-CAPABILITY-ELIGIBILITY`) but UNBUILT/unproven in transport today
+(`prod` attestation is `null`; provenance does not reach Qdrant), so this persistence ideology is design
+INTENT until that path is proven through the real transport. Once proven, enforcement is permanent.
+
+For the full canonical statement, see `BENCHMARK-DIARY.md` §18.
 
 ## Backgammon oracle-isolation invariant (measurement integrity)
 

@@ -60,7 +60,7 @@ memories" help a coding model? Structure = task × model-ladder × {OFF=no-recal
   ephemeral per-run worker tokens, and persists checkpoint+R-37 logs under `runs/openrouter-proxy/`.
 - **Config/runbook:** `config/bench.env` (durable env: umbral+guard bins, keystore paths, recall-mode, endpoints),
   `RUNBOOK.md` (clone launch + two-tier topology + clean-start), `docs/` (proposal + directive, see §6).
-- **Clean-start:** `make docker-down && docker-up` (full wipe chain/pg/qdrant) PAIRED with
+- **Benchmark-start clean-start (one-time per benchmark envelope):** all-inclusive `make redeploy` from `wevibe-meta` (full wipe chain/pg/qdrant + served cache; see §2E) PAIRED with
   `rm /tmp bench keystores` (NOT `~/.wevibe/keys`); then start :4550 clone with FULL env
   (`WEVIBE_KEYSTORE_PATH=$WEVIBE_BENCH_LEADER_KEYSTORE`, umbral/guard bins, `WEVIBE_MCP_HTTP_ONLY=1`, `< /dev/null`,
   `WEVIBE_RECALL_MODE=test`). org-0 self-seeds on cell 1 (genesis-fresh chain → first register-org = wevibe-org-0).
@@ -176,6 +176,24 @@ untouched; stage-7 cells are historical evidence only, never merged. Reports:
 - **Harvest observation:** need-harvest fired on all ON-cell recalls (incl. intent=debug) but
   buildFailing/testFailing/errorStrings stayed unpopulated (worker session events are not clone-side) — populated
   case remains suite-tested only (observation: NOT observed, structurally expected).
+
+### 2E. Wipe cadence directive (2026-07-24, Walter-locked)
+- EXTENDS canon `D-BENCH-CUMULATIVE-LOOP-2026-07-23` (do not reinterpret as per-run wipe); full canonical statement lives in `BENCHMARK-DIARY.md` §18.
+- **ONE-WIPE / PERSISTENT-CORPUS:** wipe EXACTLY ONCE at benchmark start via all-inclusive `make redeploy`
+  (from `wevibe-meta`, wiping chain/pg/qdrant + served cache), then run a residue check; ANY residue = STOP & FIX
+  before benchmark execution.
+- After that benchmark-start wipe, subsequent scored runs NEVER restart the chain and NEVER reset the memory corpus;
+  each run resets only the code fixture to the same failing state while the corpus persists cumulatively in storage.
+- Re-wipe/re-baseline is allowed ONLY on declared TRUE REGRESSION or TOTAL BENCHMARK FAILURE, and must be explicit,
+  deliberate, and documented (never casual).
+- Success/failure framing (Walter pragmatic bar): success means visible convergence across ON runs (more problems
+  resolved; fewer cycles/tool calls/tests/tokens/time; attempts-to-green down); failure means no demonstrable
+  improvement or integrity collapse.
+- **CAVEAT (MUST TRAVEL WITH THIS RULE):** the producer-model-provenance → hub capability-eligibility provider-slug
+  path (`D-PRODUCER-MODEL-PROVENANCE` / `D-CAPABILITY-ELIGIBILITY`) is canonized but UNBUILT and unproven through
+  real transport (prod `attestation:null`; provenance does not reach Qdrant) and has never been measured/used as a
+  recall filter; therefore this persistence enforcement is design INTENT until that path is proven in real transport,
+  then enforcement is permanent.
 
 
 ## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
@@ -297,6 +315,12 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   docs/ORACLE-ISOLATION-DIRECTIVE.md, RUNBOOK oracle stanza) — mgr-verified, awaiting Walter approval; stage ONLY
   those (working tree has unrelated pre-existing WIP: golden/*, other scripts, config/bench.env, RUNBOOK env chunk).
 - Add a skip-past-extraction-failure option to the ladder (avoids whole-run abort on one self-extract miss).
+- **Provider-slug caveat (current-state truth):** the producer-model-provenance → hub capability-eligibility filter
+  path (provider slug; `D-PRODUCER-MODEL-PROVENANCE` / `D-CAPABILITY-ELIGIBILITY`, consolidated by
+  `D-PROVENANCE-ADMISSIBILITY-2026-07-23`) is canonized but UNBUILT/unproven (prod `attestation:null`; provenance
+  does not reach Qdrant) and has NEVER been measured/used as a recall filter; consequence: the 2026-07-24
+  persistence directive is design INTENT until this path is proven through real transport, then enforcement is
+  permanent.
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
 - **22-07-22 (post-stage8 + disclosed D6 rerun):** qdrant `org_wevibe-org-0_memories` = **6 memories** (stage-8
@@ -310,7 +334,7 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   `runs/backgammon/ladder-checkpoint.json` will resume-skip cells off 13-07-era history — the stage-8 false-start
   failure mode). Disclosed rerun run-dirs: `runs/backgammon-scored-ladder-stage8-rerun-d6/` + inner
   `runs/backgammon-stage8-rerun-d6-fix1/`.
-- Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run should CLEAN-WIPE first (§2 clean-start).
+- Postgres org-0 = committed rows; chain org-0 exists. A fresh scored run follows §2E: one benchmark-start CLEAN-WIPE (all-inclusive `make redeploy` + residue check), then per-run fixture reset only while corpus persists; re-wipe only on declared true-regression/total-failure re-baseline.
 
 ## 10. ⚠ FOR-WALTER CARRY ITEM (unresolved)
 A mis-configured clone earlier wrote a bench `org-wevibe-org-0-master` envelope into `~/.wevibe/keys/keys.json`
