@@ -117,6 +117,9 @@ def test_m2_proof_run_result_and_m2_result_json_are_content_free() -> None:
             }
 
     class FakeHubClient:
+        def __init__(self) -> None:
+            self._commit_status_calls = 0
+
         def moderation_queue(self, identity: Identity, org_id: str) -> Any:
             assert identity is leader
             assert org_id == "org-77"
@@ -185,7 +188,26 @@ def test_m2_proof_run_result_and_m2_result_json_are_content_free() -> None:
         def commit_status(self, identity: Identity, org_id: str) -> Any:
             assert identity is leader
             assert org_id == "org-77"
-            return {"status": "committed"}
+            self._commit_status_calls += 1
+            if self._commit_status_calls == 1:
+                return {
+                    "submissions": [
+                        {
+                            "submission_hash": "sub-1",
+                            "status": "pending",
+                            "commit_error": "",
+                        }
+                    ]
+                }
+            return {
+                "submissions": [
+                    {
+                        "submission_hash": "sub-1",
+                        "status": "committed",
+                        "commit_error": "",
+                    }
+                ]
+            }
 
     contributor_rest = FakeContributorRest()
     leader_rest = FakeLeaderRest()
@@ -606,3 +628,317 @@ def test_m2_proof_prove_delivery_all_matched_is_yes() -> None:
     assert all(entry["matched"] is True for entry in per_memory)
     assert all(entry["delivery_mode"] == "matched" for entry in per_memory)
     assert all(isinstance(entry["fragment_fp"], str) and len(entry["fragment_fp"]) == 8 for entry in per_memory)
+
+
+def test_leader_verify_and_commit_precheck_committed_short_circuits_without_broadcast() -> None:
+    logger, _ = _capture_logger("test.lifecycle.m2.precheck.committed")
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+    )
+    leader = Identity.from_hex("99" * 32)
+    contributor = Identity.from_hex("aa" * 32)
+
+    class FakeOrchestrator:
+        org_id = "org-1"
+
+    class FakeHubClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def commit_status(self, identity: Identity, org_id: str) -> Any:
+            self.calls.append("commit_status")
+            assert identity is leader
+            assert org_id == "org-1"
+            return {
+                "submissions": [
+                    {
+                        "submission_hash": "sub-1",
+                        "status": "committed",
+                        "commit_error": "",
+                    }
+                ]
+            }
+
+        def moderation_queue(self, identity: Identity, org_id: str) -> Any:
+            raise AssertionError("moderation_queue must not run for already committed submissions")
+
+    hub_client = FakeHubClient()
+    proof = M2Proof(
+        cfg=cfg,
+        orchestrator=FakeOrchestrator(),
+        leader=leader,
+        contributor=contributor,
+        logger=logger,
+        mcp_rest_factory=lambda _base_url: object(),
+        hub_client=hub_client,
+    )
+
+    commit_batch_called = False
+
+    def _unexpected_commit_batch(_org_id: str, _batch_payload: Any) -> dict[str, Any]:
+        nonlocal commit_batch_called
+        commit_batch_called = True
+        raise AssertionError("_commit_batch must not run for already committed submissions")
+
+    proof._commit_batch = _unexpected_commit_batch  # type: ignore[method-assign]
+
+    result = proof.leader_verify_and_commit("org-1", "sub-1", ["python"])
+
+    assert hub_client.calls == ["commit_status"]
+    assert commit_batch_called is False
+    assert result["hops"] == ["commit_precheck"]
+    assert result["queue_item"] is None
+    assert result["embed_card"] is None
+    assert result["submit_keyword_results"] is None
+    assert result["verify_keywords"] is None
+    assert result["batch_submit"] is None
+    assert result["commit_batch"] is None
+    assert result["already_committed"] is True
+    assert result["commit_status"] == {
+        "submissions": [
+            {
+                "submission_hash": "sub-1",
+                "status": "committed",
+                "commit_error": "",
+            }
+        ]
+    }
+
+
+def test_leader_verify_and_commit_precheck_non_committed_runs_full_flow() -> None:
+    logger, _ = _capture_logger("test.lifecycle.m2.precheck.non-committed")
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+    )
+    leader = Identity.from_hex("bb" * 32)
+    contributor = Identity.from_hex("cc" * 32)
+    calls: list[str] = []
+
+    class FakeOrchestrator:
+        org_id = "org-1"
+
+    class FakeLeaderRest:
+        def mod_embed_retrieval_card(self, items: list[dict[str, Any]], org_id: str | None = None) -> list[dict[str, Any]]:
+            calls.append("mod_embed_retrieval_card")
+            assert org_id == "org-1"
+            assert items[0]["id"] == "sub-1"
+            return [
+                {
+                    "id": "sub-1",
+                    "vector": [0.1, 0.2],
+                    "embedding_model_id": "nomic-embed-text:v1.5",
+                    "embedding_schema_version": 1,
+                    "umbral_capsule": "cap-1",
+                    "umbral_ciphertext": "cipher-1",
+                }
+            ]
+
+    class FakeHubClient:
+        def __init__(self) -> None:
+            self.commit_status_calls = 0
+
+        def commit_status(self, identity: Identity, org_id: str) -> Any:
+            calls.append("commit_status")
+            assert identity is leader
+            assert org_id == "org-1"
+            self.commit_status_calls += 1
+            if self.commit_status_calls == 1:
+                return {
+                    "submissions": [
+                        {
+                            "submission_hash": "sub-1",
+                            "status": "pending",
+                            "commit_error": "",
+                        }
+                    ]
+                }
+            return {
+                "submissions": [
+                    {
+                        "submission_hash": "sub-1",
+                        "status": "committed",
+                        "commit_error": "",
+                    }
+                ]
+            }
+
+        def moderation_queue(self, identity: Identity, org_id: str) -> Any:
+            calls.append("moderation_queue")
+            assert identity is leader
+            assert org_id == "org-1"
+            return [
+                {
+                    "submission_hash": "sub-1",
+                    "ciphertext_hex": "cafe",
+                    "wrapped_dek_mod": "babe",
+                    "epoch_id": 0,
+                    "stack_hint": "python",
+                }
+            ]
+
+        def submit_keyword_results(
+            self,
+            identity: Identity,
+            org_id: str,
+            submission_hash: str,
+            classified: list[dict[str, Any]],
+        ) -> Any:
+            calls.append("submit_keyword_results")
+            assert identity is leader
+            assert org_id == "org-1"
+            assert submission_hash == "sub-1"
+            assert classified
+            return {
+                "verified": 1,
+                "results": [
+                    {
+                        "submission_hash": "sub-1",
+                        "passed": True,
+                        "code": "ok",
+                        "error": "",
+                    }
+                ],
+            }
+
+        def verify_keywords(self, identity: Identity, org_id: str, entries: list[dict[str, Any]]) -> Any:
+            calls.append("verify_keywords")
+            assert identity is leader
+            assert org_id == "org-1"
+            assert entries[0]["submission_hash"] == "sub-1"
+            return {
+                "verified": 1,
+                "results": [
+                    {
+                        "submission_hash": "sub-1",
+                        "passed": True,
+                        "code": "ok",
+                        "error": "",
+                    }
+                ],
+            }
+
+        def batch_submit(self, identity: Identity, org_id: str) -> Any:
+            calls.append("batch_submit")
+            assert identity is leader
+            assert org_id == "org-1"
+            return {
+                "batch": [
+                    {
+                        "submission_hash": "sub-1",
+                        "vector": [0.1, 0.2],
+                    }
+                ],
+                "verification": {"status": "ok"},
+            }
+
+    hub_client = FakeHubClient()
+    proof = M2Proof(
+        cfg=cfg,
+        orchestrator=FakeOrchestrator(),
+        leader=leader,
+        contributor=contributor,
+        logger=logger,
+        mcp_rest_factory=lambda _base_url: FakeLeaderRest(),
+        hub_client=hub_client,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    commit_batch_payloads: list[dict[str, Any]] = []
+
+    def _fake_commit_batch(_org_id: str, batch_payload: Any) -> dict[str, Any]:
+        calls.append("commit_batch")
+        assert isinstance(batch_payload, dict)
+        commit_batch_payloads.append(batch_payload)
+        return {"tx_hash": "tx-1", "code": 0, "msg_count": 1}
+
+    proof._commit_batch = _fake_commit_batch  # type: ignore[method-assign]
+
+    result = proof.leader_verify_and_commit("org-1", "sub-1", ["python"])
+
+    assert calls == [
+        "commit_status",
+        "moderation_queue",
+        "mod_embed_retrieval_card",
+        "submit_keyword_results",
+        "verify_keywords",
+        "batch_submit",
+        "commit_batch",
+        "commit_status",
+    ]
+    assert result["hops"] == [
+        "commit_precheck",
+        "moderation_queue",
+        "mod_embed_retrieval_card",
+        "submit_keyword_results",
+        "verify_keywords",
+        "batch_submit",
+        "commit_batch",
+        "commit_status",
+    ]
+    assert "already_committed" not in result
+    assert commit_batch_payloads and commit_batch_payloads[0]["batch"][0]["submission_hash"] == "sub-1"
+
+
+def test_leader_verify_and_commit_precheck_commit_error_raises_without_broadcast() -> None:
+    logger, _ = _capture_logger("test.lifecycle.m2.precheck.commit-error")
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+    )
+    leader = Identity.from_hex("dd" * 32)
+    contributor = Identity.from_hex("ee" * 32)
+
+    class FakeOrchestrator:
+        org_id = "org-1"
+
+    class FakeHubClient:
+        def __init__(self) -> None:
+            self.moderation_queue_calls = 0
+
+        def commit_status(self, identity: Identity, org_id: str) -> Any:
+            assert identity is leader
+            assert org_id == "org-1"
+            return {
+                "submissions": [
+                    {
+                        "submission_hash": "sub-1",
+                        "status": "failed",
+                        "commit_error": "ErrMemoryExists",
+                    }
+                ]
+            }
+
+        def moderation_queue(self, identity: Identity, org_id: str) -> Any:
+            self.moderation_queue_calls += 1
+            raise AssertionError("moderation_queue must not run when commit_error is already recorded")
+
+    hub_client = FakeHubClient()
+    proof = M2Proof(
+        cfg=cfg,
+        orchestrator=FakeOrchestrator(),
+        leader=leader,
+        contributor=contributor,
+        logger=logger,
+        mcp_rest_factory=lambda _base_url: object(),
+        hub_client=hub_client,
+    )
+
+    commit_batch_called = False
+
+    def _unexpected_commit_batch(_org_id: str, _batch_payload: Any) -> dict[str, Any]:
+        nonlocal commit_batch_called
+        commit_batch_called = True
+        raise AssertionError("_commit_batch must not run when precheck has commit_error")
+
+    proof._commit_batch = _unexpected_commit_batch  # type: ignore[method-assign]
+
+    try:
+        proof.leader_verify_and_commit("org-1", "sub-1", ["python"])
+        raise AssertionError("expected RuntimeError for stored commit_error")
+    except RuntimeError as exc:
+        assert "ErrMemoryExists" in str(exc)
+
+    assert hub_client.moderation_queue_calls == 0
+    assert commit_batch_called is False

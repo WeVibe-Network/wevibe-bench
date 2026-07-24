@@ -621,6 +621,9 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
             }
 
     class FakeHubClient:
+        def __init__(self) -> None:
+            self._commit_status_calls = 0
+
         def moderation_queue(self, identity: Identity, org_id: str) -> Any:
             calls.append("moderation_queue")
             assert identity is leader
@@ -695,7 +698,26 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
             calls.append("commit_status")
             assert identity is leader
             assert org_id == "org-77"
-            return {"status": "committed"}
+            self._commit_status_calls += 1
+            if self._commit_status_calls == 1:
+                return {
+                    "submissions": [
+                        {
+                            "submission_hash": "sub-1",
+                            "status": "pending",
+                            "commit_error": "",
+                        }
+                    ]
+                }
+            return {
+                "submissions": [
+                    {
+                        "submission_hash": "sub-1",
+                        "status": "committed",
+                        "commit_error": "",
+                    }
+                ]
+            }
 
     contributor_rest = FakeContributorRest()
     leader_rest = FakeLeaderRest()
@@ -756,6 +778,7 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     assert result["qdrant_delta"]["saw_plus_one"] is True
 
     expected_hops = [
+        "commit_status",
         "moderation_queue",
         "mod_embed_retrieval_card",
         "submit_keyword_results",

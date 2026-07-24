@@ -623,6 +623,24 @@ class M2Proof:
 
     def leader_verify_and_commit(self, org_id: str, submission_hash: str, keywords: list[str]) -> dict[str, Any]:
         hops: list[str] = []
+        precheck_payload = self._hop(
+            hops,
+            "commit_precheck",
+            lambda: self._hub_client.commit_status(self._leader, org_id),
+        )
+        if self._is_committed(precheck_payload, submission_hash):
+            return {
+                "hops": hops,
+                "queue_item": None,
+                "embed_card": None,
+                "submit_keyword_results": None,
+                "verify_keywords": None,
+                "batch_submit": None,
+                "commit_batch": None,
+                "commit_status": precheck_payload,
+                "already_committed": True,
+            }
+
         queue_payload = self._hop(
             hops,
             "moderation_queue",
