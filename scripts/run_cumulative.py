@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
+import hashlib
 import importlib.util
 import json
 import logging
@@ -182,7 +183,13 @@ def _provider_pin_from_model(model: str) -> str:
     return parts[0]
 
 
-def _build_roster() -> tuple[list[RosterEntry], str]:
+def _token_fingerprint8(secret: str | None) -> str:
+    if not secret:
+        return "none"
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+
+
+def _build_roster(*, roster_model: str | None = None) -> tuple[list[RosterEntry], str]:
     roster: list[RosterEntry] = []
     for rung in config.backgammon_scored_ladder_roster():
         model = str(rung.model)
@@ -196,6 +203,25 @@ def _build_roster() -> tuple[list[RosterEntry], str]:
                     "recorded_class": rung.recorded_class,
                 },
             )
+        )
+    roster_model_filter = str(roster_model or "").strip()
+    if roster_model_filter:
+        marker = roster_model_filter.casefold()
+        filtered = [entry for entry in roster if marker in entry.model.casefold()]
+        if not filtered:
+            available = ", ".join(entry.model for entry in roster)
+            print(
+                "error: --roster-model filter matched zero roster entries "
+                f"({roster_model_filter!r}). available models: {available}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        roster = filtered
+        _LOG.info(
+            "run_cumulative.roster_filter filter=%s matched=%d models=%s",
+            roster_model_filter,
+            len(roster),
+            ",".join(entry.model for entry in roster),
         )
     if not roster:
         raise RuntimeError("backgammon_scored_ladder_roster resolved empty")
@@ -548,6 +574,8 @@ class RealSessionRunner:
         extract_base_url: str | None,
         extract_num_ctx: int | None,
         extract_timeout_s: int,
+        proxy_base_url: str | None = None,
+        proxy_token: str | None = None,
         consumer_gate_coordinator: ConsumerGateCoordinator,
         consumer_decision_manifest: ConsumerDecisionManifest | None,
         served_store_host_path: Path,
@@ -566,6 +594,8 @@ class RealSessionRunner:
         self._extract_base_url = extract_base_url
         self._extract_num_ctx = extract_num_ctx
         self._extract_timeout_s = extract_timeout_s
+        self._proxy_base_url = proxy_base_url
+        self._proxy_token = proxy_token
 
         if not isinstance(consumer_gate_coordinator, ConsumerGateCoordinator):
             raise TypeError("consumer_gate_coordinator must be a ConsumerGateCoordinator")
@@ -843,6 +873,8 @@ class RealSessionRunner:
             model=session.model,
             memory_mode=session.memory_mode,
             max_attempts=self._max_attempts,
+            proxy_base_url=self._proxy_base_url,
+            proxy_token=self._proxy_token,
             logger=_LOG,
             progress=self._progress,
         )
@@ -1032,6 +1064,16 @@ def _build_real_runner_and_leader_client(
     cfg = LifecycleConfig()
     run_cfg = config.RunConfig()
     bridge_paths = _bridge_paths(run_cfg, layout.manifest_path)
+    proxy_base_url = str(getattr(args, "proxy_base_url", "") or "").strip() or None
+    proxy_token: str | None = None
+    proxy_token_file = str(getattr(args, "proxy_token_file", "") or "").strip()
+    if proxy_token_file:
+        proxy_token = Path(proxy_token_file).expanduser().read_text(encoding="utf-8").strip()
+        _LOG.info(
+            "run_cumulative.proxy_token_loaded file=%s token_sha256_first8=%s",
+            str(Path(proxy_token_file).expanduser()),
+            _token_fingerprint8(proxy_token),
+        )
 
     consumer_state_dir = bridge_paths.consumer_state_dir
     consumer_gate_coordinator = ConsumerGateCoordinator(state_dir=consumer_state_dir)
@@ -1087,6 +1129,8 @@ def _build_real_runner_and_leader_client(
         extract_base_url=_resolve_extract_base_url(),
         extract_num_ctx=_resolve_extract_num_ctx(),
         extract_timeout_s=_resolve_extract_timeout_s(),
+        proxy_base_url=proxy_base_url,
+        proxy_token=proxy_token,
         consumer_gate_coordinator=consumer_gate_coordinator,
         consumer_decision_manifest=consumer_decision_manifest,
         served_store_host_path=served_store_host_path,
@@ -1111,7 +1155,8 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
     layout.runs_dir.mkdir(parents=True, exist_ok=True)
     review_card = PrivateReviewCard(str(layout.review_card_path))
 
-    roster, _ = _build_roster()
+    roster_model_filter = str(getattr(args, "roster_model", "") or "").strip() or None
+    roster, _ = _build_roster(roster_model=roster_model_filter)
     config_fingerprint = config.backgammon_ladder_roster_fingerprint()
 
     if require_runtime:
@@ -1981,6 +2026,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ORG_ID,
         help=f"Org id for extraction/commit flow (default: {DEFAULT_ORG_ID}).",
     )
+    parser.add_argument(
+        "--roster-model",
+        default=None,
+        help=(
+            "Optional case-insensitive model substring filter for roster selection "
+            "(smoke/diagnostic aid; canonical benchmark runs unfiltered)."
+        ),
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2001,6 +2054,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "(for conformance deny/block/report runs)."
         ),
     )
+    run_parser.add_argument("--proxy-base-url", default=None)
+    run_parser.add_argument("--proxy-token-file", default=None)
 
     resume_parser = subparsers.add_parser(
         "resume",

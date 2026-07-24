@@ -14,9 +14,18 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 class LifecycleConfig:
     """Immutable lifecycle manifest for canonical-message and signing runs."""
 
-    hub_url: str = "http://127.0.0.1:4440"
-    leader_mcp_url: str = "http://127.0.0.1:4450"
-    contributor_mcp_url: str = "http://127.0.0.1:4451"
+    hub_url: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_HUB_URL")
+        or "http://127.0.0.1:4440"
+    )
+    leader_mcp_url: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_MCP_URL")
+        or "http://127.0.0.1:4450"
+    )
+    contributor_mcp_url: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_MCP_URL")
+        or "http://127.0.0.1:4451"
+    )
     org_name: str = "wevibe-bench-lifecycle"
     domain: str = "bench.wevibe.local"
     session_token_path: str = "~/.wevibe/mcp-session-token"
