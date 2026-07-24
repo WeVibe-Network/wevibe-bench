@@ -39,7 +39,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     ProxyLogger,
     UnknownModelError,
     apply_policy,
-    derived_cost_usd,
+    derived_cost_breakdown_usd,
     fetch_orcarouter_pricing,
     input_token_upper_bound,
     key_fingerprint,
@@ -215,6 +215,7 @@ class _UsageEvidence(NamedTuple):
     cost: float | None
     prompt_tokens: int
     cached_tokens: int
+    cache_write_tokens: int
 
 
 def _usage_evidence(usage_obj: Any) -> _UsageEvidence:
@@ -225,6 +226,7 @@ def _usage_evidence(usage_obj: Any) -> _UsageEvidence:
             cost=None,
             prompt_tokens=0,
             cached_tokens=0,
+            cache_write_tokens=0,
         )
 
     completion_tokens = _as_int(usage_obj.get("completion_tokens"))
@@ -234,9 +236,11 @@ def _usage_evidence(usage_obj: Any) -> _UsageEvidence:
         reasoning_tokens = _as_int(details.get("reasoning_tokens"))
     prompt_tokens = _as_int(usage_obj.get("prompt_tokens"))
     cached_tokens = 0
+    cache_write_tokens = 0
     prompt_details = usage_obj.get("prompt_tokens_details")
     if isinstance(prompt_details, dict):
         cached_tokens = _as_int(prompt_details.get("cached_tokens"))
+        cache_write_tokens = _as_int(prompt_details.get("cache_write_tokens"))
     cost = _as_float_or_none(usage_obj.get("cost"))
     return _UsageEvidence(
         completion_tokens=completion_tokens,
@@ -244,6 +248,7 @@ def _usage_evidence(usage_obj: Any) -> _UsageEvidence:
         cost=cost,
         prompt_tokens=prompt_tokens,
         cached_tokens=cached_tokens,
+        cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -489,13 +494,13 @@ class ProxyServer:
         profile: Any,
         usage: _UsageEvidence,
         billed_input_ub: int = 0,
-    ) -> str:
+    ) -> tuple[str, dict[str, float] | None]:
         if not reserved:
-            return "none"
+            return "none", None
         if proven_cost is not None:
             self.ledger.settle_actual(trace_id, proven_cost)
             self._record_proven_billed_input_ub(billed_input_ub)
-            return "actual"
+            return "actual", None
 
         pricing = getattr(profile, "pricing", None)
         has_authorized_pricing = (
@@ -504,25 +509,45 @@ class ProxyServer:
             and bool(pricing)
             and _is_number(pricing.get("input"))
             and _is_number(pricing.get("output"))
+            and _is_number(pricing.get("cache_read"))
         )
         has_usage_evidence = usage.prompt_tokens > 0 or usage.completion_tokens > 0
         if has_authorized_pricing and has_usage_evidence:
             try:
-                derived = derived_cost_usd(
+                derived_breakdown = derived_cost_breakdown_usd(
                     prompt_tokens=usage.prompt_tokens,
                     cached_tokens=usage.cached_tokens,
                     completion_tokens=usage.completion_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
                     pricing=pricing,
                 )
+                derived = float(derived_breakdown["total_usd"])
                 self.ledger.settle_derived(trace_id, derived)
+                self.logger.event(
+                    event="derived_settlement",
+                    trace_id=trace_id,
+                    uncached_input_tokens=int(derived_breakdown["uncached_input_tokens"]),
+                    cached_input_tokens=int(derived_breakdown["cached_prompt_tokens"]),
+                    cache_write_tokens=int(derived_breakdown["cache_write_prompt_tokens"]),
+                    completion_tokens=int(derived_breakdown["completion_tokens"]),
+                    input_rate_per_1m=derived_breakdown["input_rate_per_1m"],
+                    cache_read_rate_per_1m=derived_breakdown["cache_read_rate_per_1m"],
+                    cache_write_rate_per_1m=derived_breakdown["cache_write_rate_per_1m"],
+                    output_rate_per_1m=derived_breakdown["output_rate_per_1m"],
+                    uncached_input_usd=derived_breakdown["uncached_input_usd"],
+                    cache_read_usd=derived_breakdown["cache_read_usd"],
+                    cache_write_usd=derived_breakdown["cache_write_usd"],
+                    output_usd=derived_breakdown["output_usd"],
+                    derived_total_usd=derived,
+                )
                 # Derived settles are proven billed-usage evidence for prefix tracking.
                 self._record_proven_billed_input_ub(billed_input_ub)
-                return "derived"
+                return "derived", derived_breakdown
             except Exception:  # noqa: BLE001 - fail closed to retain path.
                 pass
 
         self.ledger.retain_unproven(trace_id)
-        return "retained_unproven"
+        return "retained_unproven", None
 
     def _handle_post(self, handler: http.server.BaseHTTPRequestHandler) -> None:
         started_at = datetime.datetime.now(datetime.timezone.utc)
@@ -548,6 +573,7 @@ class ProxyServer:
         prompt_tokens = 0
         cached_prompt_tokens = 0
         settle_state = "none"
+        settle_breakdown: dict[str, float] | None = None
 
         try:
             if handler.path != self._CHAT_PATH:
@@ -836,7 +862,7 @@ class ProxyServer:
                     status=status,
                 )
 
-                settle_state = self._finalize_reservation(
+                settle_state, settle_breakdown = self._finalize_reservation(
                     reserved=reserved,
                     trace_id=trace_id,
                     proven_cost=proven_cost,
@@ -847,6 +873,7 @@ class ProxyServer:
                         cost=proven_cost,
                         prompt_tokens=prompt_tokens,
                         cached_tokens=cached_prompt_tokens,
+                        cache_write_tokens=0,
                     ),
                     billed_input_ub=in_tokens_ub,
                 )
@@ -876,7 +903,7 @@ class ProxyServer:
                 cached_prompt_tokens = ev.cached_tokens
             proven_cost = ev.cost
 
-            settle_state = self._finalize_reservation(
+            settle_state, settle_breakdown = self._finalize_reservation(
                 reserved=reserved,
                 trace_id=trace_id,
                 proven_cost=proven_cost,
@@ -961,6 +988,18 @@ class ProxyServer:
                 accrued_derived_usd=snapshot.get("accrued_derived", 0.0),
                 committed_unproven_usd=snapshot.get("committed_unproven", 0.0),
                 remaining_usd=snapshot.get("remaining", 0.0),
+                derived_uncached_input_usd=(
+                    0.0 if settle_breakdown is None else float(settle_breakdown.get("uncached_input_usd", 0.0))
+                ),
+                derived_cache_read_usd=(
+                    0.0 if settle_breakdown is None else float(settle_breakdown.get("cache_read_usd", 0.0))
+                ),
+                derived_cache_write_usd=(
+                    0.0 if settle_breakdown is None else float(settle_breakdown.get("cache_write_usd", 0.0))
+                ),
+                derived_output_usd=(
+                    0.0 if settle_breakdown is None else float(settle_breakdown.get("output_usd", 0.0))
+                ),
                 settle_state=settle_state,
                 status=status,
                 duration_ms=duration_ms,
@@ -1066,8 +1105,12 @@ def main(argv: list[str] | None = None) -> int:
         or args.pricing_input < 0
         or args.pricing_output is None
         or args.pricing_output < 0
+        or args.pricing_cache_read is None
+        or args.pricing_cache_read < 0
     ):
-        parser.error("--authorize requires --pricing-input and --pricing-output >= 0 (live-verified)")
+        parser.error(
+            "--authorize requires --pricing-input, --pricing-output, and --pricing-cache-read >= 0 (live-verified)"
+        )
 
     profiles = DEFAULT_PROFILES()
     selected_profile = profiles[args.profile]
@@ -1128,9 +1171,8 @@ def main(argv: list[str] | None = None) -> int:
         pricing: dict[str, float] = {
             "input": float(args.pricing_input),
             "output": float(args.pricing_output),
+            "cache_read": float(args.pricing_cache_read),
         }
-        if args.pricing_cache_read is not None:
-            pricing["cache_read"] = float(args.pricing_cache_read)
         if args.pricing_cache_write is not None:
             pricing["cache_write"] = float(args.pricing_cache_write)
 
@@ -1166,7 +1208,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.authorize and selected_profile.upstream == "orcarouter":
         try:
             pricing_payload = fetch_orcarouter_pricing()
-            verify_orcarouter_pricing_gate(pricing_payload)
+            verify_orcarouter_pricing_gate(
+                pricing_payload,
+                profile_model=selected_profile.model_id,
+                expected_pricing=selected_profile.pricing,
+            )
         except PricingGateError as exc:
             logger.event(
                 event="pricing_gate",

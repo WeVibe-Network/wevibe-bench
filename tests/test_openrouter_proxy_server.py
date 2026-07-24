@@ -128,7 +128,13 @@ def _valid_orcarouter_payload() -> dict[str, Any]:
                 "model_name": "openai/gpt-4o-mini",
                 "model_ratio": 0.075,
                 "completion_ratio": 4.0,
-            }
+            },
+            {
+                "model_name": "z-ai/glm-5.2",
+                "model_ratio": 0.5,
+                "completion_ratio": 3.0,
+                "cache_ratio": 0.2,
+            },
         ],
     }
 
@@ -250,6 +256,8 @@ def test_main_authorize_orcarouter_pricing_gate_logs_ok(
         "1.0",
         "--pricing-output",
         "3.0",
+        "--pricing-cache-read",
+        "0.2",
     ]
     proxy = _run_main_with_fake_server(monkeypatch, argv)
 
@@ -270,6 +278,8 @@ def test_main_authorize_orcarouter_pricing_gate_failure_refuses_paid_calls(
         "1.0",
         "--pricing-output",
         "3.0",
+        "--pricing-cache-read",
+        "0.2",
     ]
 
     make_server_calls = 0
@@ -350,6 +360,8 @@ def test_main_authorize_accepts_zero_pricing_for_bigpickle(
         "0",
         "--pricing-output",
         "0",
+        "--pricing-cache-read",
+        "0",
     ]
 
     proxy = _run_main_with_fake_server(monkeypatch, argv)
@@ -359,6 +371,7 @@ def test_main_authorize_accepts_zero_pricing_for_bigpickle(
     assert selected_profile.pricing == {
         "input": pytest.approx(0.0),
         "output": pytest.approx(0.0),
+        "cache_read": pytest.approx(0.0),
     }
     assert selected_profile.runnable_reason() is None
 

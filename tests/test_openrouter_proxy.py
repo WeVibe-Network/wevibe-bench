@@ -4,9 +4,11 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import threading
+from typing import Any
 
 import pytest
 
+import wevibe_bench.adapters.openrouter_proxy_server as proxy_server
 from wevibe_bench.adapters.openrouter_proxy import (
     BudgetExceededError,
     BudgetLedger,
@@ -32,6 +34,115 @@ from wevibe_bench.adapters.openrouter_proxy import (
     verify_orcarouter_pricing_gate,
     worst_case_usd,
 )
+
+
+class _MainTestServer:
+    def __init__(self) -> None:
+        self.closed = False
+        self.serve_calls = 0
+
+    def serve_forever(self) -> None:
+        self.serve_calls += 1
+        raise KeyboardInterrupt
+
+    def server_close(self) -> None:
+        self.closed = True
+
+
+def _write_auth_json(tmp_path: Path, *, key: str = "sk-or-test-main") -> Path:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "openrouter": {"type": "api", "key": key},
+                "orcarouter": {"type": "api", "key": key},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return auth_path
+
+
+def _main_argv(tmp_path: Path, auth_path: Path) -> list[str]:
+    return [
+        "--run-id",
+        "run-main-test",
+        "--model",
+        "openrouter/z-ai/glm-5.2",
+        "--profile",
+        "glm",
+        "--cap-usd",
+        "12",
+        "--port",
+        "8789",
+        "--checkpoint",
+        str(tmp_path / "main-ledger.json"),
+        "--log",
+        str(tmp_path / "main-proxy.log"),
+        "--max-output-tokens",
+        "256",
+        "--token-file",
+        str(tmp_path / "main-proxy.token"),
+        "--auth-path",
+        str(auth_path),
+    ]
+
+
+def _run_main_with_fake_server(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> Any:
+    captured: dict[str, Any] = {}
+
+    def _fake_make_server(proxy, host: str = "127.0.0.1", port: int = 0) -> _MainTestServer:
+        server = _MainTestServer()
+        captured["proxy"] = proxy
+        captured["server"] = server
+        captured["host"] = host
+        captured["port"] = port
+        return server
+
+    monkeypatch.setattr(proxy_server, "make_server", _fake_make_server)
+
+    assert proxy_server.main(argv) == 0
+
+    server = captured["server"]
+    assert isinstance(server, _MainTestServer)
+    assert server.serve_calls == 1
+    assert server.closed is True
+
+    proxy = captured["proxy"]
+    proxy.logger._handle.close()
+    return proxy
+
+
+def _valid_orcarouter_payload_with_model_row(
+    *,
+    model_name: str,
+    model_ratio: float,
+    completion_ratio: float,
+    cache_ratio: float,
+) -> dict[str, Any]:
+    return {
+        "pricing_version": "c58e194db3f6a20e7d41b8c9e2f05a17",
+        "model_discounts": {},
+        "workspace_discount": 1,
+        "effective_group_ratio": 1,
+        "group_ratio": {"default": 1, "vip": 1},
+        "data": [
+            {
+                "model_name": "openai/gpt-4o-mini",
+                "model_ratio": 0.075,
+                "completion_ratio": 4.0,
+            },
+            {
+                "model_name": model_name,
+                "model_ratio": model_ratio,
+                "completion_ratio": completion_ratio,
+                "cache_ratio": cache_ratio,
+            },
+        ],
+    }
 
 
 def test_load_upstream_key_returns_stripped_openrouter_key(tmp_path: Path) -> None:
@@ -810,6 +921,28 @@ def test_derived_cost_usd_exact_value_cases() -> None:
     ) == pytest.approx(20e-6)
 
 
+def test_derived_cost_usd_prices_cached_prompt_tokens_at_cache_read_rate() -> None:
+    got = derived_cost_usd(
+        prompt_tokens=2_000_000,
+        cached_tokens=1_000_000,
+        completion_tokens=1_000_000,
+        pricing={"input": 0.18, "output": 0.59, "cache_read": 0.059},
+    )
+
+    assert got == pytest.approx(0.829)
+
+
+def test_derived_cost_usd_zero_cached_tokens_matches_legacy_input_output_formula() -> None:
+    got = derived_cost_usd(
+        prompt_tokens=1_000_000,
+        cached_tokens=0,
+        completion_tokens=1_000_000,
+        pricing={"input": 0.18, "output": 0.59, "cache_read": 0.059},
+    )
+
+    assert got == pytest.approx(0.77)
+
+
 @pytest.mark.parametrize("pricing", [{}, None])
 def test_derived_cost_usd_rejects_missing_pricing(pricing: dict | None) -> None:
     with pytest.raises(ValueError):
@@ -850,6 +983,134 @@ def _valid_orcarouter_payload() -> dict:
 
 def test_verify_orcarouter_pricing_gate_accepts_minimal_valid_payload() -> None:
     verify_orcarouter_pricing_gate(_valid_orcarouter_payload())
+
+
+def test_verify_orcarouter_pricing_gate_verifies_expected_model_pricing_including_cache_read() -> None:
+    payload = _valid_orcarouter_payload_with_model_row(
+        model_name="z-ai/glm-5.2",
+        model_ratio=0.5,
+        completion_ratio=3.0,
+        cache_ratio=0.2,
+    )
+
+    verify_orcarouter_pricing_gate(
+        payload,
+        profile_model="z-ai/glm-5.2",
+        expected_pricing={"input": 1.0, "output": 3.0, "cache_read": 0.2},
+    )
+
+
+def test_verify_orcarouter_pricing_gate_rejects_cache_read_mismatch() -> None:
+    payload = _valid_orcarouter_payload_with_model_row(
+        model_name="z-ai/glm-5.2",
+        model_ratio=0.5,
+        completion_ratio=3.0,
+        cache_ratio=0.21,
+    )
+
+    with pytest.raises(PricingGateError, match="cache_read mismatch"):
+        verify_orcarouter_pricing_gate(
+            payload,
+            profile_model="z-ai/glm-5.2",
+            expected_pricing={"input": 1.0, "output": 3.0, "cache_read": 0.2},
+        )
+
+
+def test_main_authorize_requires_cache_read_pricing_flag(tmp_path: Path) -> None:
+    auth_path = _write_auth_json(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(
+            _main_argv(tmp_path, auth_path)
+            + [
+                "--authorize",
+                "--pricing-input",
+                "1.0",
+                "--pricing-output",
+                "3.0",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_main_authorize_pricing_gate_rejects_wrong_cache_read_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    auth_path = _write_auth_json(tmp_path)
+    argv = _main_argv(tmp_path, auth_path) + [
+        "--authorize",
+        "--pricing-input",
+        "1.0",
+        "--pricing-output",
+        "3.0",
+        "--pricing-cache-read",
+        "0.2",
+    ]
+
+    make_server_calls = 0
+
+    def _fake_make_server(_proxy, host: str = "127.0.0.1", port: int = 0) -> _MainTestServer:
+        nonlocal make_server_calls
+        make_server_calls += 1
+        return _MainTestServer()
+
+    monkeypatch.setattr(proxy_server, "make_server", _fake_make_server)
+    monkeypatch.setattr(
+        proxy_server,
+        "fetch_orcarouter_pricing",
+        lambda: _valid_orcarouter_payload_with_model_row(
+            model_name="z-ai/glm-5.2",
+            model_ratio=0.5,
+            completion_ratio=3.0,
+            cache_ratio=0.21,
+        ),
+    )
+
+    assert proxy_server.main(argv) == 2
+    assert make_server_calls == 0
+    assert "cache_read mismatch" in capsys.readouterr().err
+
+
+def test_main_authorize_pricing_gate_accepts_matching_cache_read_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        proxy_server,
+        "fetch_orcarouter_pricing",
+        lambda: _valid_orcarouter_payload_with_model_row(
+            model_name="z-ai/glm-5.2",
+            model_ratio=0.5,
+            completion_ratio=3.0,
+            cache_ratio=0.2,
+        ),
+    )
+
+    auth_path = _write_auth_json(tmp_path)
+    proxy = _run_main_with_fake_server(
+        monkeypatch,
+        _main_argv(tmp_path, auth_path)
+        + [
+            "--authorize",
+            "--pricing-input",
+            "1.0",
+            "--pricing-output",
+            "3.0",
+            "--pricing-cache-read",
+            "0.2",
+        ],
+    )
+
+    selected_profile = proxy.registry.get("glm")
+    assert selected_profile.authorized is True
+    assert selected_profile.pricing == {
+        "input": pytest.approx(1.0),
+        "output": pytest.approx(3.0),
+        "cache_read": pytest.approx(0.2),
+    }
 
 
 @pytest.mark.parametrize("group_ratio", [1, 1.0])

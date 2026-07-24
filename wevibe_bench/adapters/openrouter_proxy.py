@@ -426,17 +426,21 @@ def _as_int(value: Any) -> int:
     return 0
 
 
-def derived_cost_usd(
+def derived_cost_breakdown_usd(
     *,
     prompt_tokens: int,
     cached_tokens: int,
     completion_tokens: int,
+    cache_write_tokens: int = 0,
     pricing: dict,
-) -> float:
+) -> dict[str, float]:
     """Estimate billed spend from usage evidence and authorized price rows.
 
     This is the honest billed estimate (no reservation padding, fees, or safety
-    factors): ``input + cache_read + output`` at per-1M token prices.
+    factors). OrcaRouter usage exposes prompt/completion plus cached-read prompt
+    tokens. Cache-write token counts are optional and only applied when explicitly
+    present in usage evidence; otherwise uncached prompt tokens are priced at the
+    input rate.
     """
 
     if not pricing:
@@ -445,18 +449,60 @@ def derived_cost_usd(
     prompt_n = max(0, _as_int(prompt_tokens))
     cached_n = max(0, _as_int(cached_tokens))
     completion_n = max(0, _as_int(completion_tokens))
+    cache_write_n = max(0, _as_int(cache_write_tokens))
 
     input_rate = float(pricing["input"])
     cache_read_rate = float(pricing.get("cache_read", pricing["input"]))
+    cache_write_rate = float(pricing.get("cache_write", pricing["input"]))
     output_rate = float(pricing["output"])
 
-    fresh_prompt_tokens = max(0, prompt_n - cached_n)
-    subtotal_per_m = (
-        (float(fresh_prompt_tokens) * input_rate)
-        + (float(cached_n) * cache_read_rate)
-        + (float(completion_n) * output_rate)
+    cached_prompt_tokens = min(prompt_n, cached_n)
+    uncached_prompt_tokens = max(0, prompt_n - cached_prompt_tokens)
+    cache_write_prompt_tokens = min(uncached_prompt_tokens, cache_write_n)
+    uncached_input_prompt_tokens = max(0, uncached_prompt_tokens - cache_write_prompt_tokens)
+
+    uncached_input_usd = (float(uncached_input_prompt_tokens) * input_rate) / 1_000_000
+    cache_read_usd = (float(cached_prompt_tokens) * cache_read_rate) / 1_000_000
+    cache_write_usd = (float(cache_write_prompt_tokens) * cache_write_rate) / 1_000_000
+    output_usd = (float(completion_n) * output_rate) / 1_000_000
+    total_usd = uncached_input_usd + cache_read_usd + cache_write_usd + output_usd
+
+    return {
+        "total_usd": total_usd,
+        "uncached_input_usd": uncached_input_usd,
+        "cache_read_usd": cache_read_usd,
+        "cache_write_usd": cache_write_usd,
+        "output_usd": output_usd,
+        "uncached_input_tokens": float(uncached_input_prompt_tokens),
+        "cached_prompt_tokens": float(cached_prompt_tokens),
+        "cache_write_prompt_tokens": float(cache_write_prompt_tokens),
+        "completion_tokens": float(completion_n),
+        "input_rate_per_1m": input_rate,
+        "cache_read_rate_per_1m": cache_read_rate,
+        "cache_write_rate_per_1m": cache_write_rate,
+        "output_rate_per_1m": output_rate,
+    }
+
+
+def derived_cost_usd(
+    *,
+    prompt_tokens: int,
+    cached_tokens: int,
+    completion_tokens: int,
+    cache_write_tokens: int = 0,
+    pricing: dict,
+) -> float:
+    """Estimate billed spend from usage evidence and authorized price rows."""
+
+    return float(
+        derived_cost_breakdown_usd(
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached_tokens,
+            completion_tokens=completion_tokens,
+            cache_write_tokens=cache_write_tokens,
+            pricing=pricing,
+        )["total_usd"]
     )
-    return subtotal_per_m / 1_000_000
 
 
 def fetch_orcarouter_pricing(*, timeout: float = 10.0) -> dict:
@@ -492,7 +538,35 @@ def fetch_orcarouter_pricing(*, timeout: float = 10.0) -> dict:
     return parsed
 
 
-def verify_orcarouter_pricing_gate(pricing_payload: dict) -> None:
+def _derive_orcarouter_row_prices(*, row: dict[str, Any], effective_group_ratio_scalar: float) -> dict[str, float]:
+    model_ratio = row.get("model_ratio")
+    completion_ratio = row.get("completion_ratio")
+    if not _is_number(model_ratio) or not _is_number(completion_ratio):
+        raise PricingGateError(
+            "orcarouter pricing gate failed: row ratios must be numeric"
+        )
+
+    input_usd = float(model_ratio) * 2.0 * float(effective_group_ratio_scalar)
+    output_usd = input_usd * float(completion_ratio)
+
+    derived: dict[str, float] = {
+        "input": input_usd,
+        "output": output_usd,
+    }
+    cache_ratio = row.get("cache_ratio")
+    if cache_ratio is not None:
+        if not _is_number(cache_ratio):
+            raise PricingGateError("orcarouter pricing gate failed: cache_ratio must be numeric")
+        derived["cache_read"] = input_usd * float(cache_ratio)
+    return derived
+
+
+def verify_orcarouter_pricing_gate(
+    pricing_payload: dict,
+    *,
+    profile_model: str | None = None,
+    expected_pricing: dict[str, float] | None = None,
+) -> None:
     """Verify pricing payload pin + anchor integrity before deriving spend."""
 
     if not isinstance(pricing_payload, dict):
@@ -553,17 +627,14 @@ def verify_orcarouter_pricing_gate(pricing_payload: dict) -> None:
             f"orcarouter pricing gate failed: missing anchor model {ORCAROUTER_ANCHOR_MODEL}"
         )
 
-    model_ratio = anchor_row.get("model_ratio")
-    completion_ratio = anchor_row.get("completion_ratio")
-    if not _is_number(model_ratio) or not _is_number(completion_ratio):
-        raise PricingGateError(
-            "orcarouter pricing gate failed: anchor ratios must be numeric"
-        )
-
     # group_ratio is per-group metadata; effective_group_ratio is the resolved scalar for this workspace.
     effective_group_ratio_scalar = 1.0 if effective_group_ratio is None else float(effective_group_ratio)
-    derived_input = float(model_ratio) * 2.0 * effective_group_ratio_scalar
-    derived_output = derived_input * float(completion_ratio)
+    anchor_prices = _derive_orcarouter_row_prices(
+        row=anchor_row,
+        effective_group_ratio_scalar=effective_group_ratio_scalar,
+    )
+    derived_input = float(anchor_prices["input"])
+    derived_output = float(anchor_prices["output"])
 
     if abs(derived_input - ORCAROUTER_ANCHOR_INPUT_USD_PER_1M) > PRICING_ANCHOR_ABS_TOL_USD:
         raise PricingGateError(
@@ -573,6 +644,45 @@ def verify_orcarouter_pricing_gate(pricing_payload: dict) -> None:
         raise PricingGateError(
             "orcarouter pricing gate failed: anchor output derivation mismatch"
         )
+
+    if expected_pricing is None:
+        return
+
+    expected_model = str(profile_model or "").strip()
+    if not expected_model:
+        raise PricingGateError("orcarouter pricing gate failed: profile model required for row verification")
+
+    for key in ("input", "output", "cache_read"):
+        value = expected_pricing.get(key) if isinstance(expected_pricing, dict) else None
+        if not _is_number(value):
+            raise PricingGateError(f"orcarouter pricing gate failed: expected pricing key missing/invalid: {key}")
+
+    target_row = None
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("model_name", "")).strip() == expected_model:
+            target_row = row
+            break
+
+    if target_row is None:
+        raise PricingGateError(f"orcarouter pricing gate failed: missing row for model {expected_model}")
+
+    target_prices = _derive_orcarouter_row_prices(
+        row=target_row,
+        effective_group_ratio_scalar=effective_group_ratio_scalar,
+    )
+    if "cache_read" not in target_prices:
+        raise PricingGateError(
+            f"orcarouter pricing gate failed: model {expected_model} missing cache_ratio row"
+        )
+
+    for key in ("input", "output", "cache_read"):
+        expected = float(expected_pricing[key])
+        observed = float(target_prices[key])
+        if abs(observed - expected) > PRICING_ANCHOR_ABS_TOL_USD:
+            raise PricingGateError(
+                "orcarouter pricing gate failed: "
+                f"{expected_model} {key} mismatch (expected={expected:.12f}, observed={observed:.12f})"
+            )
 
 
 class BudgetLedger:
@@ -849,6 +959,7 @@ __all__ = [
     "UnknownModelError",
     "apply_policy",
     "derived_cost_usd",
+    "derived_cost_breakdown_usd",
     "fetch_orcarouter_pricing",
     "input_token_upper_bound",
     "key_fingerprint",
