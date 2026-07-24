@@ -1699,6 +1699,25 @@ def _bridge_status_payload(runtime: BridgeRuntimeConfig) -> dict[str, Any]:
     }
 
 
+def _bridge_child_env(repo_root: Path) -> dict[str, str]:
+    """Build the environment for the spawned bridge-daemon child.
+
+    Guarantees the child interpreter can import the repo-local ``wevibe_bench``
+    package even when it is NOT installed for that interpreter, by putting the
+    absolute repo root (derived from ``__file__``) at the front of ``PYTHONPATH``.
+    The rest of the process environment — and any pre-existing ``PYTHONPATH`` —
+    is preserved. This is the single durable spawn path (R-13): no reliance on
+    ``pip install -e``, no cwd assumption, no shell setup.
+    """
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH", "").strip()
+    pythonpath_parts = [str(repo_root)]
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    return env
+
+
 def _spawn_bridge_background(
     args: argparse.Namespace,
     *,
@@ -1760,6 +1779,7 @@ def _spawn_bridge_background(
             cwd=str(repo_root),
             stdout=handle,
             stderr=subprocess.STDOUT,
+            env=_bridge_child_env(repo_root),
         )
     finally:
         handle.close()

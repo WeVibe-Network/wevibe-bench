@@ -607,3 +607,80 @@ def test_primary_path_remains_prod_for_bridge_cli() -> None:
     module = _load_run_cumulative_module()
     module.assert_primary_path()
     assert str(module.config.RunConfig().primary_recall_mode).strip().lower() == "prod"
+
+
+def test_bridge_child_env_prepends_repo_root_to_pythonpath(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_run_cumulative_module()
+    repo_root = Path(__file__).resolve().parents[1]
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    env = module._bridge_child_env(repo_root)
+    assert env["PYTHONPATH"] == str(repo_root)
+
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/preexisting", "/other"]))
+    env = module._bridge_child_env(repo_root)
+    assert env["PYTHONPATH"] == os.pathsep.join(
+        [str(repo_root), "/preexisting", "/other"]
+    )
+    # The rest of the environment is preserved.
+    assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_bridge_start_child_imports_wevibe_bench_without_installed_package(
+    tmp_path: Path,
+    capsys: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Simulate an environment where the package is not importable via any
+    # inherited PYTHONPATH: the spawned child must still start because the spawn
+    # derives the repo root from __file__ and injects it onto the child's
+    # PYTHONPATH. Before the durable fix this child died at startup with
+    # ModuleNotFoundError: No module named 'wevibe_bench'.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    module = _load_run_cumulative_module()
+
+    manifest_path = tmp_path / "runs" / "manifest.json"
+    state_dir = tmp_path / "plugin-state"
+    served_store = tmp_path / "served-store.json"
+
+    start_rc = _invoke_main(
+        module,
+        _bridge_argv(
+            manifest_path=manifest_path,
+            action="start",
+            run_id="run-uninstalled-import",
+            session_id="session-uninstalled-import",
+            state_dir=state_dir,
+            served_store=served_store,
+            lease_ttl_ms=20_000,
+            poll_interval_ms=50,
+            heartbeat_cadence_ms=50,
+        ),
+    )
+    start_payload = _parse_last_json_stdout(capsys)
+    assert start_rc == 0
+
+    state_path = Path(start_payload["state_path"])
+    pidfile = Path(start_payload["pidfile"])
+    pid = int(start_payload["pid"])
+
+    try:
+        # The child imported wevibe_bench and started the daemon: it wrote its
+        # state file and refreshed the plugin heartbeat.
+        assert _wait_until(lambda: state_path.exists(), timeout_s=10.0)
+        heartbeat_path = state_dir / HEARTBEAT_FILENAME
+        assert _wait_until(lambda: heartbeat_path.exists(), timeout_s=10.0)
+        assert _pid_is_alive(pid)
+    finally:
+        _invoke_main(
+            module,
+            _bridge_argv(
+                manifest_path=manifest_path,
+                action="stop",
+                state_dir=state_dir,
+                served_store=served_store,
+            ),
+        )
+        capsys.readouterr()
