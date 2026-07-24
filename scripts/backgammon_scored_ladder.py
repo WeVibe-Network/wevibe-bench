@@ -2,7 +2,7 @@
 
 Runs the scored OFF/ON ladder by invoking scripts/backgammon_ladder.py once per
 cell in strict roster order, deriving the roster from wevibe_bench/config.py
-(``backgammon_scored_ladder_roster()``). The SOURCE rung (Opus) runs session +
+(``backgammon_scored_ladder_roster()``). The SOURCE rung (GLM-5.2) runs session +
 self-extraction to populate the org pool; MEASURE rungs run scored OFF/ON
 session-only cells consuming that pool (no extraction below the source, so the
 pool is frozen for repeats).
@@ -10,7 +10,7 @@ pool is frozen for repeats).
 Per cell this driver owns:
 - stage-ledger admission (stage 8) + prebudget/post-run recording,
 - per-cell OpenRouter proxy lifecycle (pinned profile, live pricing, hard cap),
-- upstream-identity assertion (expected_upstream_model rungs, e.g. big-pickle),
+- upstream-identity assertion (expected_upstream_model rungs, e.g. tencent/hy3),
 - delivery log-assertion for memory-ON cells (clone /v1/recall 200s +
   recall_env_injection=container),
 - variance policy N-logic (docs/VARIANCE-POLICY.md): N=1 baseline, borderline
@@ -349,7 +349,7 @@ def _build_manifest(
         "trace": trace,
     }
     manifest["preregistration"] = {
-        "roster": "opus-4.8 SOURCE (OFF + self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> big-pickle MEASURE OFF/ON; memories flow down",
+        "roster": "GLM-5.2 SOURCE OFF (+ self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> hy3 MEASURE OFF/ON; OrcaRouter upstream via host proxy profiles (glm, kimicode, hy3); memories flow down",
         "task": "locked backgammon prompt/CONTRACT/oracle",
         "feedback": "problems-only",
         "disclosures": disclosures,

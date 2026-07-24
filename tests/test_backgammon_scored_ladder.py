@@ -25,20 +25,32 @@ ALL_MODELS = [r.model for r in ROSTER]
 
 
 def _rung_params_payload() -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    for rung in ROSTER:
-        entry: dict[str, Any] = {
-            "profile": "prof-" + rung.model.rsplit("/", 1)[-1],
-            "pricing_input": 1.0,
-            "pricing_output": 2.0,
+    return {
+        "openrouter/z-ai/glm-5.2": {
+            "profile": "glm",
+            "pricing_input": 1.4,
+            "pricing_output": 4.4,
+            "cap_usd": 12.0,
+            "cost_limit": 12.0,
+            "cost_target": 10.8,
+        },
+        "openrouter/kimi/kimi-k2.7-code": {
+            "profile": "kimicode",
+            "pricing_input": 0.95,
+            "pricing_output": 4.0,
+            "cap_usd": 2.7,
+            "cost_limit": 2.7,
+            "cost_target": 2.4,
+        },
+        "openrouter/tencent/hy3": {
+            "profile": "hy3",
+            "pricing_input": 0.18,
+            "pricing_output": 0.59,
             "cap_usd": 2.0,
-            "cost_limit": 1.8,
-            "cost_target": 1.5,
-        }
-        if "big-pickle" in rung.model:
-            entry["expected_upstream_model"] = "big-pickle"
-        payload[rung.model] = entry
-    return payload
+            "cost_limit": 2.0,
+            "cost_target": 1.8,
+        },
+    }
 
 
 def _write_rung_params(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -279,11 +291,11 @@ def test_exact_roster_a_cell_allocation() -> None:
     assert len(plan) == 5
 
     expected = [
-        (1, "openrouter/anthropic/claude-opus-4.8", "source", "off", "all"),
-        (2, "openrouter/moonshotai/kimi-k2.7-code", "measure", "off", "session"),
-        (3, "openrouter/moonshotai/kimi-k2.7-code", "measure", "on", "session"),
-        (4, "openrouter/opencode/big-pickle", "measure", "off", "session"),
-        (5, "openrouter/opencode/big-pickle", "measure", "on", "session"),
+        (1, "openrouter/z-ai/glm-5.2", "source", "off", "all"),
+        (2, "openrouter/kimi/kimi-k2.7-code", "measure", "off", "session"),
+        (3, "openrouter/kimi/kimi-k2.7-code", "measure", "on", "session"),
+        (4, "openrouter/tencent/hy3", "measure", "off", "session"),
+        (5, "openrouter/tencent/hy3", "measure", "on", "session"),
     ]
     actual = [
         (int(c["run_number"]), str(c["model"]), str(c["role"]), str(c["memory_mode"]), str(c["phase"]))
@@ -1121,7 +1133,7 @@ def test_dry_run_prints_plan_without_execution(tmp_path: pathlib.Path, monkeypat
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--dry-run"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "big-pickle" in out and "claude-opus-4.8" in out
+    assert "glm-5.2" in out and "kimi-k2.7-code" in out and "hy3" in out
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
@@ -1143,7 +1155,7 @@ def test_dry_run_with_rung_params_discloses_binding_budget(tmp_path: pathlib.Pat
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
-    assert all(float(row["binding_budget_usd"]) == pytest.approx(2.0) for row in rows)
+    assert [float(row["binding_budget_usd"]) for row in rows] == pytest.approx([12.0, 2.7, 2.7, 2.0, 2.0])
 
 
 @pytest.mark.parametrize(

@@ -190,19 +190,22 @@ def benchmark_schedule_fingerprint(
 # are HISTORY, not current benchmark truth.
 #
 # Roster:
-#   z-ai/glm-5.2   pinned FriendliAI   (tier UNKNOWN)
-#   xiaomi/mimo-v2.5-pro  pinned DeepInfra  (tier UNKNOWN)
-#   tencent/hy3    pinned DeepInfra    (tier UNKNOWN)
+#   z-ai/glm-5.2   (tier UNKNOWN)
+#   kimi/kimi-k2.7-code  (tier UNKNOWN)
+#   tencent/hy3    (tier UNKNOWN)
+#
+# OrcaRouter routes upstreams internally; provider pins are void on this substrate.
 #
 # Tiers remain UNKNOWN/UNORDERED until registry evidence (D-BENCH-CONTRACT-2026-07 §10).
-# Prior scored roster (opus-4.8 / kimi-k2.7-code / minimax-m3) → history.
+# Prior scored roster (opus-4.8 / moonshotai/kimi-k2.7-code / opencode/big-pickle)
+# → history.
 _DEFAULT_SCHEDULE: BenchmarkSchedule = BenchmarkSchedule(
     waves=(
         BenchmarkWave(
             wave_id="baseline",
             models=(
                 "z-ai/glm-5.2",
-                "xiaomi/mimo-v2.5-pro",
+                "kimi/kimi-k2.7-code",
                 "tencent/hy3",
             ),
             tier="UNKNOWN",
@@ -332,30 +335,30 @@ class LadderRung:
     recorded_class: str | None = None
 
 
-# Canonical Stage-7 scored-ladder roster A (Walter, 21-07-26) — the single source
-# of truth for the ordered rungs. Knowledge SOURCE = Opus-4.8 (acing model; its
-# fail→fix iteration arcs are the extraction substrate); MEASURE rungs top→bottom:
-# kimi-k2.7-code (pin siliconflow/fp8) → big-pickle (opencode/big-pickle via zen
-# upstream, free/free — upstream is xiaomi/mimo-v2.5; since 2026-07-21T23:50Z Zen
-# echoes alias id `big-pickle`; per-cell identity pin expects that echo + startup
-# key-fingerprint assert `b5ce6e5e`).
-# Paid xiaomi/mimo-v2.5 is DROPPED from the measured roster but RETAINED as the
-# qualified fallback profile ("mimo25") — usable only on Walter's explicit
-# in-thread approval if big-pickle's identity check trips.
+# Canonical Stage-7 scored-ladder roster (Walter-pinned OrcaRouter migration,
+# 2026-07-24) — the single source of truth for the ordered rungs. Knowledge
+# SOURCE = GLM-5.2; MEASURE rungs top→bottom: kimi-k2.7-code (BRACKET) → hy3.
+# Slugs are OrcaRouter-catalog-verified bare ids. The `openrouter/` prefix is
+# only the worker→proxy opencode provider selector; host-side proxy profile
+# `upstream="orcarouter"` selects the real upstream.
+# `xiaomi/mimo-v2.5-pro` is dropped (absent from OrcaRouter catalog; no
+# xiaomi/mimo model exists there). OpenRouter-era scored rungs (opus/big-pickle)
+# are removed. OrcaRouter exposes no upstream provider pins; prior FriendliAI /
+# DeepInfra / novita / siliconflow pins are void on this substrate.
 BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
     LadderRung(
-        model="openrouter/anthropic/claude-opus-4.8",
+        model="openrouter/z-ai/glm-5.2",
         role="source",
         memory_modes=("off",),
     ),
     LadderRung(
-        model="openrouter/moonshotai/kimi-k2.7-code",
+        model="openrouter/kimi/kimi-k2.7-code",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class="BRACKET",
     ),
     LadderRung(
-        model="openrouter/opencode/big-pickle",
+        model="openrouter/tencent/hy3",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class=None,

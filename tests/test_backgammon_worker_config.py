@@ -58,4 +58,6 @@ def test_apply_policy_rejects_aux_model_and_accepts_same_model() -> None:
         glm_profile,
         max_tokens_cap=cap,
     )
-    assert transformed["provider"] == glm_profile.provider_object
+    assert "provider" not in transformed
+    assert transformed["model"] == "z-ai/glm-5.2"
+    assert transformed["max_tokens"] == cap

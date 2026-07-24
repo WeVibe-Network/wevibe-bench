@@ -19,7 +19,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     BudgetLedger,
     DEFAULT_PROFILES,
     OPENCODE_ZEN_UPSTREAM_URL,
-    OPENROUTER_UPSTREAM_URL,
+    ORCAROUTER_UPSTREAM_URL,
     ProfileRegistry,
     ProxyLogger,
     UPSTREAM_CHAT_COMPLETIONS_URLS,
@@ -59,10 +59,14 @@ def _write_auth_json(
     tmp_path: Path,
     *,
     key: str = "sk-or-test-main",
+    orcarouter_key: str | None = None,
     opencode_key: str | None = None,
 ) -> Path:
     auth_path = tmp_path / f"auth-{uuid.uuid4().hex}.json"
-    payload: dict[str, Any] = {"openrouter": {"type": "api", "key": key}}
+    payload: dict[str, Any] = {
+        "openrouter": {"type": "api", "key": key},
+        "orcarouter": {"type": "api", "key": orcarouter_key or key},
+    }
     if opencode_key is not None:
         payload["opencode"] = {"type": "api", "key": opencode_key}
     auth_path.write_text(
@@ -137,11 +141,15 @@ def _run_main_with_fake_server(monkeypatch: pytest.MonkeyPatch, argv: list[str])
 
 
 def test_main_sources_upstream_key_from_auth_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    auth_path = _write_auth_json(tmp_path, key="sk-or-test-main-valid")
+    auth_path = _write_auth_json(
+        tmp_path,
+        key="sk-or-test-main-valid",
+        orcarouter_key="sk-orca-test-main-valid",
+    )
     proxy = _run_main_with_fake_server(monkeypatch, _main_argv(tmp_path, auth_path))
 
-    assert proxy.upstream_key == "sk-or-test-main-valid"
-    assert proxy.upstream_url == OPENROUTER_UPSTREAM_URL
+    assert proxy.upstream_key == "sk-orca-test-main-valid"
+    assert proxy.upstream_url == ORCAROUTER_UPSTREAM_URL
 
 
 def test_main_bigpickle_sources_opencode_key_and_zen_url(
@@ -295,7 +303,7 @@ def test_main_authorize_rejects_negative_pricing_for_bigpickle(
     assert excinfo.value.code == 2
 
 
-@pytest.mark.parametrize("profile_name", ("mimo", "mimo25", "hy3", "kimicode", "ring"))
+@pytest.mark.parametrize("profile_name", ("mimo", "mimo25", "ring"))
 def test_main_requires_provider_order_for_unpinned_profiles(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -317,8 +325,31 @@ def test_main_requires_provider_order_for_unpinned_profiles(
     assert "--provider-order" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("profile_name", ("glm", "opus"))
 def test_main_rejects_provider_order_for_hardcoded_profiles(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    auth_path = _write_auth_json(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        proxy_server.main(
+            _main_argv(
+                tmp_path,
+                auth_path,
+                model=_model_selector_for_profile("opus"),
+                profile="opus",
+            )
+            + ["--provider-order", "novita"]
+        )
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "hardcoded provider pin" in err
+    assert "--provider-order" in err
+
+
+@pytest.mark.parametrize("profile_name", ("glm", "hy3", "kimicode"))
+def test_main_rejects_provider_pin_flags_for_orcarouter_profiles(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     profile_name: str,
@@ -338,15 +369,23 @@ def test_main_rejects_provider_order_for_hardcoded_profiles(
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
-    assert "hardcoded provider pin" in err
-    assert "--provider-order" in err
+    assert "uses upstream 'orcarouter'" in err
+    assert "--provider-order is incompatible" in err
 
 
 def test_main_provider_quant_requires_provider_order(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     auth_path = _write_auth_json(tmp_path)
 
     with pytest.raises(SystemExit) as excinfo:
-        proxy_server.main(_main_argv(tmp_path, auth_path) + ["--provider-quant", "fp8"])
+        proxy_server.main(
+            _main_argv(
+                tmp_path,
+                auth_path,
+                model=_model_selector_for_profile("opus"),
+                profile="opus",
+            )
+            + ["--provider-quant", "fp8"]
+        )
 
     assert excinfo.value.code == 2
     assert "--provider-quant requires --provider-order" in capsys.readouterr().err
@@ -399,7 +438,7 @@ def test_main_rejects_provider_pin_flags_for_zen_profiles(
             },
         ),
         (
-            "hy3",
+            "ring",
             "deepinfra",
             "bf16",
             {
@@ -485,13 +524,12 @@ class _RunningProxy:
     upstream_key: str
     upstream_url: str
     max_tokens_cap: int
-    glm_profile_provider_object: dict[str, Any]
     ledger: BudgetLedger
     log_path: Path
     fake_upstream: _FakeUpstream
 
 
-def _runnable_glm_profiles() -> tuple[dict[str, Any], dict[str, Any]]:
+def _runnable_glm_profiles() -> dict[str, Any]:
     profiles = DEFAULT_PROFILES()
     glm = profiles["glm"]
     runnable_glm = dataclasses.replace(
@@ -500,7 +538,7 @@ def _runnable_glm_profiles() -> tuple[dict[str, Any], dict[str, Any]]:
         authorized=True,
     )
     profiles["glm"] = runnable_glm
-    return profiles, runnable_glm.provider_object or {}
+    return profiles
 
 
 @contextmanager
@@ -513,11 +551,7 @@ def _running_proxy_server(
     max_tokens_cap: int = 64,
     profiles_override: dict[str, Any] | None = None,
 ) -> Iterable[_RunningProxy]:
-    if profiles_override is not None:
-        profiles = profiles_override
-        glm_provider_object = (profiles.get("glm").provider_object if "glm" in profiles else {}) or {}
-    else:
-        profiles, glm_provider_object = _runnable_glm_profiles()
+    profiles = profiles_override if profiles_override is not None else _runnable_glm_profiles()
 
     registry = ProfileRegistry(profiles)
     profile = registry.get(profile_name)
@@ -562,7 +596,6 @@ def _running_proxy_server(
             upstream_key=upstream_key,
             upstream_url=upstream_url,
             max_tokens_cap=int(max_tokens_cap),
-            glm_profile_provider_object=glm_provider_object,
             ledger=ledger,
             log_path=log_path,
             fake_upstream=fake_upstream,
@@ -644,11 +677,11 @@ def _wait_until(predicate: Callable[[], bool], *, timeout_s: float = 3.0) -> boo
     return predicate()
 
 
-def _non_stream_success_response(cost: float) -> UpstreamResponse:
+def _non_stream_success_response(cost: float, *, model: str = "glm-5.2") -> UpstreamResponse:
     payload = {
         "id": "chatcmpl-fake",
         "object": "chat.completion",
-        "model": "z-ai/glm-5.2",
+        "model": model,
         "provider": {"slug": "fireworks"},
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
         "usage": {
@@ -669,7 +702,7 @@ def _non_stream_response_without_usage() -> UpstreamResponse:
     payload = {
         "id": "chatcmpl-fake",
         "object": "chat.completion",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "provider": {"slug": "fireworks"},
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
     }
@@ -699,19 +732,19 @@ def _stream_lines_with_usage(cost: float) -> list[bytes]:
     first = {
         "id": "chatcmpl-fake",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": "o"}}],
     }
     second = {
         "id": "chatcmpl-fake",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {"content": "k"}}],
     }
     final = {
         "id": "chatcmpl-fake",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         "usage": {
             "completion_tokens": 6,
@@ -736,7 +769,7 @@ def _tool_call_stream_lines(
     first = {
         "id": "chatcmpl-tool-fake",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [
             {
                 "index": 0,
@@ -766,7 +799,7 @@ def _tool_call_stream_lines(
     final = {
         "id": "chatcmpl-tool-fake",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
         "usage": {
             "completion_tokens": 5,
@@ -825,7 +858,9 @@ def test_auth_requires_run_token_and_allows_correct_token(tmp_path: Path) -> Non
     assert len(fake.calls) == 1
 
 
-def test_injected_provider_and_max_tokens_clamp_and_protected_provider_rejected(tmp_path: Path) -> None:
+def test_no_provider_injection_for_orcarouter_profile_and_max_tokens_clamp_and_protected_provider_rejected(
+    tmp_path: Path,
+) -> None:
     fake = _FakeUpstream([_non_stream_success_response(cost=0.01)])
 
     with _running_proxy_server(tmp_path, fake_upstream=fake, max_tokens_cap=64) as running:
@@ -841,7 +876,8 @@ def test_injected_provider_and_max_tokens_clamp_and_protected_provider_rejected(
     assert ok_status == 200
     assert len(fake.calls) == 1
     forwarded = fake.calls[0].body_json
-    assert forwarded["provider"] == running.glm_profile_provider_object
+    assert "provider" not in forwarded
+    assert forwarded["model"] == "openrouter/z-ai/glm-5.2"
     assert forwarded["max_tokens"] == 64
 
 
@@ -1120,16 +1156,27 @@ def test_upstream_error_paths_retain_unproven_and_surface_error(
     assert snapshot["committed_unproven"] > 0.0
 
 
-def test_upstream_target_is_openrouter_constant_only(tmp_path: Path) -> None:
+def test_upstream_target_is_orcarouter_constant_for_glm(tmp_path: Path) -> None:
     fake = _FakeUpstream([_non_stream_success_response(cost=0.01)])
 
     with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
-        status, _, _ = _post_json(running, _glm_request_body(), token=running.run_token)
+        status, _, _ = _post_json(
+            running,
+            {
+                "model": "z-ai/glm-5.2",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 999_999,
+            },
+            token=running.run_token,
+        )
 
     assert status == 200
-    assert running.upstream_url == OPENROUTER_UPSTREAM_URL
+    assert running.upstream_url == ORCAROUTER_UPSTREAM_URL
     assert len(fake.calls) == 1
-    assert all(call.url == OPENROUTER_UPSTREAM_URL for call in fake.calls)
+    assert all(call.url == ORCAROUTER_UPSTREAM_URL for call in fake.calls)
+    assert "provider" not in fake.calls[0].body_json
+    assert fake.calls[0].body_json["model"] == "z-ai/glm-5.2"
+    assert fake.calls[0].headers["User-Agent"] == "wevibe-bench-proxy/1.0"
 
 
 def test_upstream_target_is_opencode_zen_for_bigpickle(tmp_path: Path) -> None:
@@ -1458,22 +1505,26 @@ def test_identity_old_echo_now_trips_and_refuses(tmp_path: Path) -> None:
     assert len(fake.calls) == 1
 
 
-def test_identity_check_inactive_without_expected_model(tmp_path: Path) -> None:
-    # glm profile has no expected_upstream_model; a differing response model
-    # must not trip anything.
+def test_identity_mismatch_latches_for_glm_orcarouter_profile(tmp_path: Path) -> None:
     fake = _FakeUpstream(
         [
-            _non_stream_success_response(cost=0.01),
+            _non_stream_success_response(cost=0.01, model="somebody/else-entirely"),
             _non_stream_success_response(cost=0.01),
         ]
     )
     with _running_proxy_server(tmp_path, fake_upstream=fake) as running:
         status_1, _, _ = _post_json(running, _glm_request_body(), token=running.run_token)
-        status_2, _, _ = _post_json(running, _glm_request_body(), token=running.run_token)
+        status_2, _, payload_2 = _post_json(running, _glm_request_body(), token=running.run_token)
         log_text = running.log_path.read_text(encoding="utf-8")
 
-    assert status_1 == 200 and status_2 == 200
-    assert "identity_mismatch" not in log_text
+    assert status_1 == 200
+    assert status_2 == 503
+    error = _decode_json(payload_2)["error"]
+    assert error["code"] == "identity_mismatch"
+    assert 'event="identity_mismatch"' in log_text
+    assert 'expected_upstream_model="glm-5.2"' in log_text
+    assert 'observed_upstream_model="somebody/else-entirely"' in log_text
+    assert len(fake.calls) == 1
 
 
 def test_assert_expected_upstream_key_fp_noop_when_profile_unpinned() -> None:

@@ -18,9 +18,11 @@ from typing import Any
 
 OPENROUTER_UPSTREAM_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENCODE_ZEN_UPSTREAM_URL = "https://opencode.ai/zen/v1/chat/completions"
+ORCAROUTER_UPSTREAM_URL = "https://www.orcarouter.ai/v1/chat/completions"
 UPSTREAM_CHAT_COMPLETIONS_URLS = {
     "openrouter": OPENROUTER_UPSTREAM_URL,
     "opencode": OPENCODE_ZEN_UPSTREAM_URL,
+    "orcarouter": ORCAROUTER_UPSTREAM_URL,
 }
 DEFAULT_OPENCODE_AUTH_PATH = "~/.local/share/opencode/auth.json"
 PROTECTED_BODY_FIELDS = ("provider",)
@@ -163,22 +165,18 @@ def load_upstream_key(provider_id: str, auth_path: str = DEFAULT_OPENCODE_AUTH_P
 
 
 def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
-    """Return the binding default profile map for OpenRouter roster profiles."""
+    """Return the binding default profile map for benchmark roster profiles."""
     return {
         "glm": ProviderProfile(
             name="glm",
             model_id="z-ai/glm-5.2",
-            provider_object={
-                "order": ["novita"],
-                "only": ["novita"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-                "quantizations": ["fp8"],
-            },
+            provider_object=None,
             pricing=None,
             max_output_tokens=8192,
             max_reasoning_tokens=8192,
+            upstream="orcarouter",
             authorized=False,
+            expected_upstream_model="glm-5.2",
         ),
         "mimo": ProviderProfile(
             name="mimo",
@@ -219,30 +217,22 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             pricing=None,
             max_output_tokens=8192,
             max_reasoning_tokens=8192,
+            upstream="orcarouter",
             authorized=False,
-            pin_constraints={
-                "min_max_completion_tokens": 32768,
-                "uptime_tier": "Normal",
-                "quant_preference": ["bf16", "fp8"],
-                "price_sanity_per_m": {"in": 0.14, "out": 0.58},
-                "notes": "Resolve live; prefer gmicloud or deepinfra with bf16/fp8.",
-            },
+            pin_constraints=None,
+            expected_upstream_model="hy3-preview",
         ),
         "kimicode": ProviderProfile(
             name="kimicode",
-            model_id="moonshotai/kimi-k2.7-code",
+            model_id="kimi/kimi-k2.7-code",
             provider_object=None,
             pricing=None,
             max_output_tokens=8192,
             max_reasoning_tokens=8192,
+            upstream="orcarouter",
             authorized=False,
-            pin_constraints={
-                "min_max_completion_tokens": 32768,
-                "uptime_tier": "Normal",
-                "quant_preference": ["fp8", "int4"],
-                "price_sanity_per_m": {"in": 0.72, "out": 3.5},
-                "notes": "Resolve live; prefer siliconflow fp8 endpoints (int4 is common elsewhere).",
-            },
+            pin_constraints=None,
+            expected_upstream_model="kimi-k2.7-code",
         ),
         "ring": ProviderProfile(
             name="ring",
@@ -640,6 +630,7 @@ __all__ = [
     "FLAT_FEE_USD",
     "ModelMismatchError",
     "OPENCODE_ZEN_UPSTREAM_URL",
+    "ORCAROUTER_UPSTREAM_URL",
     "OPENROUTER_UPSTREAM_URL",
     "PER_MESSAGE_OVERHEAD_TOKENS",
     "PROTECTED_BODY_FIELDS",

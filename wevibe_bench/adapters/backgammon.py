@@ -81,11 +81,32 @@ DECLARED_TEST_COMMANDS: tuple[str, ...] = (
     "playwright test",
 )
 
-# Source: published provider pricing cards (USD per 1M tokens), e.g.
+# Source: published provider pricing cards (USD per 1M tokens), including:
+# - https://www.orcarouter.ai/api/pricing
+#   (pricing_version c58e194db3f6a20e7d41b8c9e2f05a17, fetched 2026-07-24T12:45Z;
+#   input USD/Mtok = model_ratio × $2 × group_ratio(=1), output = input × completion_ratio)
 # - https://openrouter.ai/anthropic/claude-opus-4.8 (snapshot used in bench guard reports)
 # - https://opencode.ai/docs/zen-models (Zen free/free row for big-pickle)
 # Walter-pinned: keep the free/free big-pickle row at truthful zero pricing.
 _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
+    "z-ai/glm-5.2": {
+        "input": 1.4,
+        "output": 4.4,
+        "cache_read": 0.26,
+        "cache_write": 1.4,  # OrcaRouter has no cache-write field; use input rate.
+    },
+    "kimi/kimi-k2.7-code": {
+        "input": 0.95,
+        "output": 4.0,
+        "cache_read": 0.19,
+        "cache_write": 0.95,  # OrcaRouter has no cache-write field; use input rate.
+    },
+    "tencent/hy3": {
+        "input": 0.18,
+        "output": 0.59,
+        "cache_read": 0.059,
+        "cache_write": 0.18,  # OrcaRouter has no cache-write field; use input rate.
+    },
     "anthropic/claude-opus-4.8": {
         "input": 5.0,
         "output": 25.0,

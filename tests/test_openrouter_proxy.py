@@ -14,6 +14,7 @@ from wevibe_bench.adapters.openrouter_proxy import (
     CredentialError,
     OPENCODE_ZEN_UPSTREAM_URL,
     ModelMismatchError,
+    ORCAROUTER_UPSTREAM_URL,
     OPENROUTER_UPSTREAM_URL,
     PolicyMismatchError,
     ProfileBlockedError,
@@ -91,9 +92,11 @@ def test_load_upstream_key_rejects_missing_opencode_entry_with_connect_guidance(
 def test_upstream_chat_completion_url_map_is_canonical() -> None:
     assert OPENROUTER_UPSTREAM_URL == "https://openrouter.ai/api/v1/chat/completions"
     assert OPENCODE_ZEN_UPSTREAM_URL == "https://opencode.ai/zen/v1/chat/completions"
+    assert ORCAROUTER_UPSTREAM_URL == "https://www.orcarouter.ai/v1/chat/completions"
     assert UPSTREAM_CHAT_COMPLETIONS_URLS == {
         "openrouter": OPENROUTER_UPSTREAM_URL,
         "opencode": OPENCODE_ZEN_UPSTREAM_URL,
+        "orcarouter": ORCAROUTER_UPSTREAM_URL,
     }
 
 
@@ -110,25 +113,21 @@ def test_apply_policy_rejects_client_provider_override() -> None:
     assert excinfo.value.reason == "provider"
 
 
-def test_apply_policy_injects_exact_glm_provider_object() -> None:
+def test_apply_policy_for_orcarouter_profile_skips_provider_injection() -> None:
     glm = DEFAULT_PROFILES()["glm"]
+    forwarded_selector = f"openrouter/{glm.model_id}"
 
     transformed = apply_policy(
         {
-            "model": f"openrouter/{glm.model_id}",
+            "model": forwarded_selector,
             "messages": [{"role": "user", "content": "hello"}],
         },
         glm,
         max_tokens_cap=1024,
     )
 
-    assert transformed["provider"] == {
-        "order": ["novita"],
-        "only": ["novita"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-        "quantizations": ["fp8"],
-    }
+    assert "provider" not in transformed
+    assert transformed["model"] == forwarded_selector
 
 
 def test_default_profiles_include_roster_candidates_with_constraints() -> None:
@@ -137,10 +136,13 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
     assert set(profiles) == {"glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus", "bigpickle"}
     assert list(profiles.keys())[-1] == "bigpickle"
     assert profiles["glm"].model_id == "z-ai/glm-5.2"
+    assert profiles["glm"].upstream == "orcarouter"
     assert profiles["mimo"].model_id == "xiaomi/mimo-v2.5-pro"
     assert profiles["mimo25"].model_id == "xiaomi/mimo-v2.5"
     assert profiles["hy3"].model_id == "tencent/hy3"
-    assert profiles["kimicode"].model_id == "moonshotai/kimi-k2.7-code"
+    assert profiles["hy3"].upstream == "orcarouter"
+    assert profiles["kimicode"].model_id == "kimi/kimi-k2.7-code"
+    assert profiles["kimicode"].upstream == "orcarouter"
     assert profiles["ring"].model_id == "inclusionai/ring-2.6-1t"
     assert profiles["opus"].model_id == "anthropic/claude-opus-4.8"
     assert profiles["bigpickle"].model_id == "opencode/big-pickle"
@@ -162,14 +164,6 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
             "quant_preference": ["fp8"],
             "price_sanity_per_m": {"in": 0.105, "out": 0.28},
         },
-        "hy3": {
-            "quant_preference": ["bf16", "fp8"],
-            "price_sanity_per_m": {"in": 0.14, "out": 0.58},
-        },
-        "kimicode": {
-            "quant_preference": ["fp8", "int4"],
-            "price_sanity_per_m": {"in": 0.72, "out": 3.5},
-        },
         "ring": {
             "quant_preference": ["any"],
             "price_sanity_per_m": {"in": 0.075, "out": 0.625},
@@ -188,6 +182,8 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
         assert profile.pin_constraints["notes"]
 
     assert profiles["glm"].pin_constraints is None
+    assert profiles["hy3"].pin_constraints is None
+    assert profiles["kimicode"].pin_constraints is None
     assert profiles["opus"].pin_constraints is None
 
 
@@ -755,11 +751,12 @@ def test_proxy_logger_excludes_secrets_prompts_and_rejects_forbidden_fields(tmp_
 
 def test_bigpickle_profile_pins_expected_upstream_identity() -> None:
     profiles = DEFAULT_PROFILES()
-    # 2026-07-22 cosmetic-echo evidence: Zen now echoes the alias "big-pickle"
-    # in response bodies; only bigpickle pins upstream identity + key fingerprint.
+    # bigpickle + orcarouter profiles pin upstream identity; only bigpickle also
+    # pins upstream key fingerprint.
     assert profiles["bigpickle"].expected_upstream_model == "big-pickle"
     assert profiles["bigpickle"].expected_upstream_key_fp == "b5ce6e5e"
-    for name, profile in profiles.items():
-        if name != "bigpickle":
-            assert profile.expected_upstream_model is None
-            assert profile.expected_upstream_key_fp is None
+    assert profiles["glm"].expected_upstream_model == "glm-5.2"
+    assert profiles["hy3"].expected_upstream_model == "hy3-preview"
+    assert profiles["kimicode"].expected_upstream_model == "kimi-k2.7-code"
+    for name in ("glm", "hy3", "kimicode"):
+        assert profiles[name].expected_upstream_key_fp is None

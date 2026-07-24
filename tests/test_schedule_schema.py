@@ -98,7 +98,7 @@ class TestBenchmarkSchedule:
         assert len(sched.waves) == 1
         wave = sched.waves[0]
         assert wave.wave_id == "baseline"
-        assert wave.models == ("z-ai/glm-5.2", "xiaomi/mimo-v2.5-pro", "tencent/hy3")
+        assert wave.models == ("z-ai/glm-5.2", "kimi/kimi-k2.7-code", "tencent/hy3")
         assert wave.tier == "UNKNOWN"
         assert wave.memory_modes == ("off", "on")
         assert sched.schema_version == 1
@@ -276,7 +276,7 @@ class TestActivePathMigration:
         """Default schedule.all_models() returns canon roster."""
         cfg = RunConfig()
         models = cfg.schedule.all_models()
-        assert models == ("z-ai/glm-5.2", "xiaomi/mimo-v2.5-pro", "tencent/hy3")
+        assert models == ("z-ai/glm-5.2", "kimi/kimi-k2.7-code", "tencent/hy3")
 
     def test_runconfig_schedule_all_models_from_custom(self) -> None:
         """Custom schedule.all_models() returns custom models."""

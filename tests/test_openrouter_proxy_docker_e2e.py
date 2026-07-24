@@ -19,9 +19,10 @@ from wevibe_bench.adapters.docker_worker import DockerCell, DockerCellConfig, WO
 from wevibe_bench.adapters.openrouter_proxy import (
     BudgetLedger,
     DEFAULT_PROFILES,
-    OPENROUTER_UPSTREAM_URL,
+    ORCAROUTER_UPSTREAM_URL,
     ProfileRegistry,
     ProxyLogger,
+    UPSTREAM_CHAT_COMPLETIONS_URLS,
 )
 from wevibe_bench.adapters.openrouter_proxy_server import ProxyServer, UpstreamResponse, make_server
 
@@ -85,18 +86,17 @@ class _RunningProxy:
     port: int
     run_token: str
     max_tokens_cap: int
-    glm_provider_object: dict[str, Any]
     ledger: BudgetLedger
     fake_upstream: _FakeUpstream
     log_path: Path
 
 
-def _runnable_glm_profiles() -> tuple[dict[str, Any], dict[str, Any]]:
+def _runnable_glm_profiles() -> dict[str, Any]:
     profiles = DEFAULT_PROFILES()
     glm = profiles["glm"]
     runnable_glm = dataclasses.replace(glm, pricing=TEST_PRICING, authorized=True)
     profiles["glm"] = runnable_glm
-    return profiles, runnable_glm.provider_object or {}
+    return profiles
 
 
 @contextmanager
@@ -107,9 +107,10 @@ def _running_proxy_server(
     max_tokens_cap: int = 64,
     hard_cap_usd: float = 12.0,
 ) -> Iterable[_RunningProxy]:
-    profiles, glm_provider_object = _runnable_glm_profiles()
+    profiles = _runnable_glm_profiles()
     registry = ProfileRegistry(profiles)
     glm_profile = registry.get("glm")
+    upstream_url = UPSTREAM_CHAT_COMPLETIONS_URLS[glm_profile.upstream]
 
     ledger = BudgetLedger(
         run_id=f"run-{uuid.uuid4().hex[:8]}",
@@ -130,6 +131,7 @@ def _running_proxy_server(
         run_token=run_token,
         logger=logger,
         max_tokens_cap=int(max_tokens_cap),
+        upstream_url=upstream_url,
         upstream_transport=fake_upstream,
     )
 
@@ -144,7 +146,6 @@ def _running_proxy_server(
             port=int(port),
             run_token=run_token,
             max_tokens_cap=int(max_tokens_cap),
-            glm_provider_object=glm_provider_object,
             ledger=ledger,
             fake_upstream=fake_upstream,
             log_path=log_path,
@@ -160,13 +161,13 @@ def _stream_lines_with_usage(cost: float) -> list[bytes]:
     first = {
         "id": "chatcmpl-e2e",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": "O"}}],
     }
     final = {
         "id": "chatcmpl-e2e",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {"content": "K"}, "finish_reason": "stop"}],
         "usage": {
             "completion_tokens": 2,
@@ -188,7 +189,7 @@ def _streamed_tool_then_stop_responses() -> list[UpstreamResponse]:
     tool_call_chunk = {
         "id": "chatcmpl-c0probe-1",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [
             {
                 "index": 0,
@@ -212,7 +213,7 @@ def _streamed_tool_then_stop_responses() -> list[UpstreamResponse]:
     tool_call_finish = {
         "id": "chatcmpl-c0probe-1",
         "object": "chat.completion.chunk",
-        "model": "z-ai/glm-5.2",
+        "model": "glm-5.2",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
         "usage": {
             "prompt_tokens": 14,
@@ -465,10 +466,10 @@ def test_openrouter_proxy_serializer_proof_without_docker(tmp_path: Path) -> Non
     assert status == 200
     assert relayed_lines == lines
     assert len(fake.calls) == 1
-    assert fake.calls[0].url == OPENROUTER_UPSTREAM_URL
+    assert fake.calls[0].url == ORCAROUTER_UPSTREAM_URL
 
     forwarded = fake.calls[0].body_json
-    assert forwarded["provider"] == running.glm_provider_object
+    assert "provider" not in forwarded
     assert forwarded["max_tokens"] == 77
     assert snapshot["accrued"] == pytest.approx(usage_cost)
     assert snapshot["committed_unproven"] == pytest.approx(0.0)
@@ -543,8 +544,8 @@ def test_openrouter_proxy_worker_docker_best_effort(tmp_path: Path) -> None:
             )
 
         forwarded = fake.calls[0].body_json
-        assert fake.calls[0].url == OPENROUTER_UPSTREAM_URL
-        assert forwarded["provider"] == running.glm_provider_object
+        assert fake.calls[0].url == ORCAROUTER_UPSTREAM_URL
+        assert "provider" not in forwarded
         assert forwarded["max_tokens"] == 88
 
         assert _wait_until(lambda: running.ledger.snapshot()["outstanding_total"] == 0.0)
@@ -771,7 +772,7 @@ def test_worker_completes_tool_result_continuation_through_fixed_proxy(tmp_path:
             "expected tool-result continuation request through proxy; "
             f"fake upstream saw {len(fake.calls)} calls"
         )
-        assert all(call.url == OPENROUTER_UPSTREAM_URL for call in fake.calls)
+        assert all(call.url == ORCAROUTER_UPSTREAM_URL for call in fake.calls)
         assert all(call.stream for call in fake.calls)
 
         tool_completed = any(_event_has_completed_tool_execution(event) for event in parsed_events)
