@@ -15,6 +15,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, runtime_checkable
 
 from .catalog import PrivateReviewCard, redacted_candidate_ref
+from .convergence import build_convergence_trend
 from .decision import DENY_FINAL, DecisionManifest
 from .leader_client import ApplyResult, LeaderClient
 from .manifest import atomic_write, resume_or_create, roster_hash
@@ -45,6 +46,7 @@ class SessionCommitted(TypedDict):
 
 class DoneState(TypedDict):
     status: Literal["done"]
+    convergence: dict[str, Any]
 
 
 StepUntilReviewResult = AwaitingCoordinatorReview | DoneState
@@ -199,7 +201,7 @@ class CumulativeSequencer:
     def step_until_review(self) -> StepUntilReviewResult:
         session = self.current_session()
         if session is None:
-            return {"status": "done"}
+            return self._done_state()
 
         while True:
             phase = self._phase_of(session)
@@ -271,7 +273,7 @@ class CumulativeSequencer:
                 )
 
             if phase == SessionPhase.DONE:
-                return {"status": "done"}
+                return self._done_state()
 
             raise ValueError(f"unsupported session phase for step_until_review: {phase.value!r}")
 
@@ -281,7 +283,7 @@ class CumulativeSequencer:
     ) -> ResumeWithDecisionResult:
         session = self.current_session()
         if session is None:
-            return {"status": "done"}
+            return self._done_state()
 
         decision_manifest = self._load_decision_manifest(decision_manifest_path)
         phase = self._phase_of(session)
@@ -405,7 +407,7 @@ class CumulativeSequencer:
                 )
 
             if self._manifest.current_index >= len(self._manifest.session_records):
-                return {"status": "done"}
+                return self._done_state()
 
             return self._session_committed_result(
                 session=session,
@@ -623,6 +625,19 @@ class CumulativeSequencer:
             "denied_refs": list(applied_result.denied_refs),
             "all_denied": bool(applied_result.all_denied),
             "next_index": self._manifest.current_index,
+        }
+
+    def _done_state(self) -> DoneState:
+        convergence = build_convergence_trend(self._manifest.session_records).to_dict()
+        _LOG.info(
+            "cumulative.sequencer.done sessions_completed=%d sessions_green=%d trend_hash=%s",
+            int(convergence.get("sessions_completed", 0)),
+            int(convergence.get("sessions_green", 0)),
+            str(convergence.get("trend_hash", "none")),
+        )
+        return {
+            "status": "done",
+            "convergence": convergence,
         }
 
     @staticmethod

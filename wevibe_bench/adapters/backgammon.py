@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import datetime as _dt
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -42,6 +43,9 @@ from wevibe_bench.backends.base import NeedCard, RecalledMemory
 from wevibe_bench.runner import AgentRunner, TaskOutcome
 
 
+_LOG = logging.getLogger(__name__)
+
+
 BACKGAMMON_PROMPT = (
     "Build me a fully functioning backgammon game that runs on localhost. "
     "When the server is started I should be able to navigate to the URL, start "
@@ -61,6 +65,20 @@ BACKGAMMON_REQUIREMENTS: tuple[str, ...] = (
     "Implement full turn flow including doubles -> 4 moves, use-both-dice, hitting -> bar, bar re-entry before other moves, and bear-off.",
     "Detect and show win/gammon/backgammon, and allow starting a new game without reload.",
     "Run on PORT 8002 and fail with a clear message if the port is taken.",
+)
+
+# Harness-declared verification/test commands for the backgammon task.
+# Gate runner = `node report.mjs` (tasks/backgammon/gates/). Worker-invoked
+# test commands are observed via bash tool_use events. test_invocations counts
+# bash tool_use events whose command contains any declared string.
+DECLARED_TEST_COMMANDS: tuple[str, ...] = (
+    "node report.mjs",
+    "npx vitest",
+    "npx playwright",
+    "npm test",
+    "npm run test",
+    "vitest",
+    "playwright test",
 )
 
 # Source: published provider pricing cards (USD per 1M tokens), e.g.
@@ -156,6 +174,10 @@ class BackgammonCellResult:
     wall_cost_usd: float = 0.0
     cheated: bool = False
     cheat_detail: str = ""
+    tool_calls: int | None = None
+    test_invocations: int | None = None
+    agentic_cycles: int | None = None
+    problems_before: int | None = None
 
 
 def _default_progress(message: str) -> None:
@@ -766,6 +788,14 @@ class BackgammonRunner(AgentRunner):
         if attempt_reports:
             attempt_reports[-1]["termination_reason"] = termination_reason
 
+        tool_calls_count, test_invocations_count = self._extract_event_counts(events_path)
+        agentic_cycles_count = self._extract_agentic_cycles(user_events_path)
+        problems_before_count: int | None = None
+        if attempt_reports:
+            first_n_problems = attempt_reports[0].get("n_problems")
+            if isinstance(first_n_problems, int):
+                problems_before_count = first_n_problems
+
         return BackgammonCellResult(
             verdict=verdict,
             attempts_to_green=attempts_to_green,
@@ -786,6 +816,10 @@ class BackgammonRunner(AgentRunner):
             wall_cost_usd=cell_cost_usd,
             cheated=cheated,
             cheat_detail=cheat_detail,
+            tool_calls=tool_calls_count,
+            test_invocations=test_invocations_count,
+            agentic_cycles=agentic_cycles_count,
+            problems_before=problems_before_count,
         )
 
     def _write_worker_permission_config(self, *, worktree: Path) -> None:
@@ -1413,6 +1447,126 @@ class BackgammonRunner(AgentRunner):
             f"PROGRESS run_label={run_label} step=user-event-sidecar attempt={attempt} "
             f"chars={len(text)} text_fp={self._fingerprint_text(text)} path={sidecar_path}"
         )
+
+    def _extract_event_counts(self, events_path: Path) -> tuple[int | None, int | None]:
+        """Return (tool_calls, test_invocations) from an opencode events jsonl file.
+
+        test_invocations counts bash tool_use events where state.input.command
+        contains any DECLARED_TEST_COMMANDS entry (plain case-sensitive
+        substring match).
+        """
+        malformed_lines = 0
+        tool_calls = 0
+        test_invocations = 0
+
+        try:
+            with events_path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        malformed_lines += 1
+                        continue
+
+                    if not isinstance(payload, dict):
+                        malformed_lines += 1
+                        continue
+
+                    if payload.get("type") != "tool_use":
+                        continue
+
+                    tool_calls += 1
+                    part = payload.get("part") if isinstance(payload.get("part"), dict) else {}
+                    if part.get("tool") != "bash":
+                        continue
+
+                    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                    tool_input = state.get("input") if isinstance(state.get("input"), dict) else {}
+                    command = tool_input.get("command")
+                    if not isinstance(command, str):
+                        continue
+
+                    if any(declared in command for declared in DECLARED_TEST_COMMANDS):
+                        test_invocations += 1
+        except OSError as exc:
+            _LOG.warning(
+                "backgammon event telemetry unavailable path=%s error_class=%s",
+                events_path,
+                exc.__class__.__name__,
+            )
+            return None, None
+
+        if malformed_lines > 0:
+            _LOG.warning(
+                "backgammon event telemetry malformed_lines=%d path=%s",
+                malformed_lines,
+                events_path,
+            )
+
+        return tool_calls, test_invocations
+
+    def _extract_agentic_cycles(self, user_events_path: Path) -> int | None:
+        """Return number of context-submission cycles from user-events jsonl.
+
+        One cycle equals one user context submission (initial prompt plus each
+        feedback injection). When attempt fields exist, cycles are counted as
+        distinct attempt values; if parsed user lines have no attempt fields,
+        fallback is the number of parsed user lines.
+        """
+        malformed_lines = 0
+        user_line_count = 0
+        attempts: set[int] = set()
+        saw_attempt_field = False
+
+        try:
+            with user_events_path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        malformed_lines += 1
+                        continue
+
+                    if not isinstance(payload, dict):
+                        malformed_lines += 1
+                        continue
+                    if payload.get("type") != "user":
+                        continue
+
+                    user_line_count += 1
+                    if "attempt" not in payload:
+                        continue
+
+                    attempt = payload.get("attempt")
+                    try:
+                        attempts.add(int(attempt))
+                        saw_attempt_field = True
+                    except (TypeError, ValueError):
+                        continue
+        except OSError as exc:
+            _LOG.warning(
+                "backgammon user-event telemetry unavailable path=%s error_class=%s",
+                user_events_path,
+                exc.__class__.__name__,
+            )
+            return None
+
+        if malformed_lines > 0:
+            _LOG.warning(
+                "backgammon user-event telemetry malformed_lines=%d path=%s",
+                malformed_lines,
+                user_events_path,
+            )
+
+        if saw_attempt_field:
+            return len(attempts)
+        return user_line_count
 
     def _budget_decision_for_attempt(
         self,

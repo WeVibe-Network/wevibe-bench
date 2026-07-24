@@ -13,10 +13,10 @@ if TYPE_CHECKING:
     from .consumer_gate import ConsumerGateOutcome, ServedStoreReconcile
 
 CUMULATIVE_SCHEMA_VERSION = 1
-# Telemetry seams that DO NOT exist in the current adapter (backgammon.py).
-# These are reported HONESTLY as unavailable rather than faked with nullable columns.
-# Any ProgressVector field left None means "see this list".
-MISSING_TELEMETRY_SEAMS = ("tool_calls", "test_invocations")
+# Telemetry seams that currently have no source in the adapter.
+# Keep this as the mechanism for future genuinely-missing seams.
+# Any ProgressVector field left None is still reported honestly via value-driven seam detection.
+MISSING_TELEMETRY_SEAMS: tuple[str, ...] = ()
 
 
 def _enum_value(value: Any) -> str:
@@ -230,6 +230,9 @@ class ProgressVector:
     rejected_reasons: list[str] = field(default_factory=list)
     termination_reason: str = ""
     failed_gates: list[str] = field(default_factory=list)
+    tool_calls: int | None = None
+    test_invocations: int | None = None
+    agentic_cycles: int | None = None
     missing_telemetry_seams: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -246,6 +249,9 @@ class ProgressVector:
                 "extraction_candidate_count": self.extraction_candidate_count,
                 "accepted_count": self.accepted_count,
                 "rejected_count": self.rejected_count,
+                "tool_calls": self.tool_calls,
+                "test_invocations": self.test_invocations,
+                "agentic_cycles": self.agentic_cycles,
             },
         )
 
@@ -263,6 +269,9 @@ class ProgressVector:
                 "extraction_candidate_count": self.extraction_candidate_count,
                 "accepted_count": self.accepted_count,
                 "rejected_count": self.rejected_count,
+                "tool_calls": self.tool_calls,
+                "test_invocations": self.test_invocations,
+                "agentic_cycles": self.agentic_cycles,
             },
         )
         return {
@@ -286,6 +295,9 @@ class ProgressVector:
             "rejected_reasons": list(self.rejected_reasons),
             "termination_reason": self.termination_reason,
             "failed_gates": list(self.failed_gates),
+            "tool_calls": self.tool_calls,
+            "test_invocations": self.test_invocations,
+            "agentic_cycles": self.agentic_cycles,
             "missing_telemetry_seams": missing_telemetry_seams,
         }
 
@@ -312,6 +324,9 @@ class ProgressVector:
             rejected_reasons=_string_list(d.get("rejected_reasons")),
             termination_reason=str(d.get("termination_reason", "")),
             failed_gates=_string_list(d.get("failed_gates")),
+            tool_calls=_optional_int(d.get("tool_calls")),
+            test_invocations=_optional_int(d.get("test_invocations")),
+            agentic_cycles=_optional_int(d.get("agentic_cycles")),
             missing_telemetry_seams=_string_list(d.get("missing_telemetry_seams")),
         )
 

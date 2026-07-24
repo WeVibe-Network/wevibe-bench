@@ -106,11 +106,20 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         total_tokens_value = _field(cell, "total_tokens")
     total_tokens = _int_or_default(total_tokens_value, default=input_tokens + output_tokens)
 
+    problems_before = _optional_int(_field(result, "problems_before"))
+    problems_after = _problems_after_from_result(result)
+    remaining_count = problems_after if problems_after is not None else None
+    resolved_count = (
+        problems_before - problems_after
+        if problems_before is not None and problems_after is not None
+        else None
+    )
+
     return ProgressVector(
-        problems_before=_optional_int(_field(result, "problems_before")),
-        problems_after=_problems_after_from_result(result),
-        resolved_count=_optional_int(_field(result, "resolved_count")),
-        remaining_count=_optional_int(_field(result, "remaining_count")),
+        problems_before=problems_before,
+        problems_after=problems_after,
+        resolved_count=resolved_count,
+        remaining_count=remaining_count,
         full_green=_bool_or_default(_field(result, "conformed"), default=False),
         attempts_to_green=_optional_int(_field(result, "attempts_to_green")),
         turns=_int_or_default(_field(result, "turns"), default=0),
@@ -121,6 +130,9 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         wall_cost_usd=_float_or_default(_field(result, "wall_cost_usd"), default=0.0),
         injected_count=_optional_int(_field(cell, "injection_count")),
         consumer_injected_count=None,
+        tool_calls=_optional_int(_field(result, "tool_calls")),
+        test_invocations=_optional_int(_field(result, "test_invocations")),
+        agentic_cycles=_optional_int(_field(result, "agentic_cycles")),
         termination_reason=_str_or_default(_field(result, "termination_reason"), default=""),
         failed_gates=_str_list(_field(result, "failed_gates")),
         missing_telemetry_seams=list(MISSING_TELEMETRY_SEAMS),
