@@ -174,7 +174,7 @@ class DockerCellConfig:
     served_memories_host_path: str = field(default_factory=_default_served_memories_host_path)
     served_memories_container_path: str = field(default_factory=_default_served_memories_container_path)
     plugin_state_host_path: str = "~/.wevibe/state"
-    plugin_state_container_path: str = "/home/worker/.wevibe/state"
+    plugin_state_container_path: str = "/work/.wevibe/state"
     plugin_config_host_path: str = "~/.wevibe/plugin-config.json"
     proxy_base_url: str | None = None
     proxy_token: str | None = None

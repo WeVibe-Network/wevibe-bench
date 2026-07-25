@@ -316,17 +316,47 @@ def _resolve_optional_path_env(name: str) -> Path | None:
     return Path(raw).expanduser().resolve()
 
 
-def _resolve_consumer_gate_state_dir(run_cfg: config.RunConfig) -> Path:
+def _canonical_consumer_state_dir(run_dir: Path) -> Path:
+    return Path(run_dir) / "worktree" / ".wevibe" / "state"
+
+
+def _resolve_consumer_gate_state_dir(
+    served_store_host_path: str | Path,
+    *,
+    run_dir: Path | None = None,
+) -> Path:
     explicit_state_dir = _resolve_optional_path_env(CONSUMER_STATE_DIR_ENV)
     if explicit_state_dir is not None:
+        _LOG.info(
+            "run_cumulative.consumer_state_dir_resolved source=env path=%s",
+            explicit_state_dir,
+        )
         return explicit_state_dir
 
     scoped_wevibe_dir = _resolve_optional_path_env(CONSUMER_SCOPED_WEVIBE_DIR_ENV)
-    if scoped_wevibe_dir is None:
-        served_store_parent = Path(run_cfg.served_memories_host_path).expanduser().resolve().parent
-        scoped_wevibe_dir = served_store_parent
+    if scoped_wevibe_dir is not None:
+        resolved = default_plugin_state_dir(scoped_wevibe_dir)
+        _LOG.info(
+            "run_cumulative.consumer_state_dir_resolved source=scoped-env path=%s",
+            resolved,
+        )
+        return resolved
 
-    return default_plugin_state_dir(scoped_wevibe_dir)
+    if run_dir is not None:
+        resolved = _canonical_consumer_state_dir(run_dir)
+        _LOG.info(
+            "run_cumulative.consumer_state_dir_resolved source=worktree path=%s",
+            resolved,
+        )
+        return resolved
+
+    served_store_parent = Path(served_store_host_path).expanduser().resolve().parent
+    resolved = default_plugin_state_dir(served_store_parent)
+    _LOG.info(
+        "run_cumulative.consumer_state_dir_resolved source=legacy path=%s",
+        resolved,
+    )
+    return resolved
 
 
 def _ensure_private_dir(path: Path) -> Path:
@@ -335,7 +365,12 @@ def _ensure_private_dir(path: Path) -> Path:
     return path
 
 
-def _bridge_paths(run_cfg: config.RunConfig, manifest_path: Path) -> BridgePaths:
+def _bridge_paths(
+    run_cfg: config.RunConfig,
+    manifest_path: Path,
+    *,
+    run_dir: Path | None = None,
+) -> BridgePaths:
     manifest_parent = Path(manifest_path).expanduser().resolve().parent
     base_dir = _ensure_private_dir(manifest_parent / "bridge")
     inbox = _ensure_private_dir(base_dir / "inbox")
@@ -347,7 +382,10 @@ def _bridge_paths(run_cfg: config.RunConfig, manifest_path: Path) -> BridgePaths
         inbox=inbox,
         logdir=base_dir,
         served_store_path=Path(run_cfg.served_memories_host_path).expanduser().resolve(),
-        consumer_state_dir=_resolve_consumer_gate_state_dir(run_cfg).expanduser().resolve(),
+        consumer_state_dir=_resolve_consumer_gate_state_dir(
+            run_cfg.served_memories_host_path,
+            run_dir=run_dir,
+        ).expanduser().resolve(),
     )
 
 
@@ -574,6 +612,47 @@ def _load_sxe_helpers(
     return build_substrate_events, session_id_counts, session_id_from_events
 
 
+def _durable_consumer_gate_counts(bridge_state_path: Path | None, run_id: str) -> tuple[int, int] | None:
+    if bridge_state_path is None:
+        return None
+    if not isinstance(bridge_state_path, Path):
+        raise TypeError("bridge_state_path must be a pathlib.Path when provided")
+
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        return None
+
+    try:
+        state = load_state(bridge_state_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if state is None:
+        return None
+
+    scope_prefix = f"{normalized_run_id}::"
+    accepted_cids: set[str] = set()
+    drained_cids: set[str] = set()
+    found_match = False
+
+    for scope_key_value, record in state.consumed_manifests.items():
+        if not str(scope_key_value).startswith(scope_prefix):
+            continue
+        found_match = True
+        for decision in record.delivered:
+            if str(decision.fate) != "accept":
+                continue
+            cid = str(decision.candidate_cid).strip()
+            if not cid:
+                continue
+            accepted_cids.add(cid)
+            if str(decision.ack_status) == "drained":
+                drained_cids.add(cid)
+
+    if not found_match:
+        return None
+    return len(accepted_cids), len(accepted_cids & drained_cids)
+
+
 class RealSessionRunner:
     """Real per-session runtime seam composed from BackgammonRunner + M2Proof."""
 
@@ -595,7 +674,6 @@ class RealSessionRunner:
         extract_timeout_s: int,
         proxy_base_url: str | None = None,
         proxy_token: str | None = None,
-        consumer_gate_coordinator: ConsumerGateCoordinator,
         consumer_decision_manifest: ConsumerDecisionManifest | None,
         served_store_host_path: Path,
         bridge_state_path: Path | None = None,
@@ -616,14 +694,11 @@ class RealSessionRunner:
         self._proxy_base_url = proxy_base_url
         self._proxy_token = proxy_token
 
-        if not isinstance(consumer_gate_coordinator, ConsumerGateCoordinator):
-            raise TypeError("consumer_gate_coordinator must be a ConsumerGateCoordinator")
         if not isinstance(served_store_host_path, Path):
             raise TypeError("served_store_host_path must be a pathlib.Path")
         if consumer_decision_manifest is not None:
             validate_schema(consumer_decision_manifest)
             validate_one_per_candidate(consumer_decision_manifest)
-        self._consumer_gate_coordinator = consumer_gate_coordinator
         self._consumer_decision_manifest = consumer_decision_manifest
         self._served_store_host_path = served_store_host_path.expanduser().resolve()
         if bridge_state_path is not None and not isinstance(bridge_state_path, Path):
@@ -813,7 +888,13 @@ class RealSessionRunner:
         session.run_id = run_id
         session.session_id = raw_session_id
 
-        recalled_candidates = self._consumer_gate_coordinator.read_recalled_candidates()
+        state_dir = _resolve_consumer_gate_state_dir(
+            self._served_store_host_path,
+            run_dir=state.run_dir,
+        )
+        coordinator = ConsumerGateCoordinator(state_dir=state_dir)
+
+        recalled_candidates = coordinator.read_recalled_candidates()
         recalled_cids = self._recalled_candidate_cids(recalled_candidates)
         manifest = self._manifest_for_consumer_gate(
             run_id=run_id,
@@ -826,7 +907,7 @@ class RealSessionRunner:
         # drains decisions before injection. That runtime timing bridge is deferred
         # (out of this zero-provider scope). This hook currently performs durable
         # correlation + benchmark recording for the session checkpoint.
-        outcome = self._consumer_gate_coordinator.apply_manifest(
+        outcome = coordinator.apply_manifest(
             manifest,
             run_id=run_id,
             session_id=raw_session_id,
@@ -835,7 +916,7 @@ class RealSessionRunner:
         accepted_cids, denied_cids, blocked_cids, reported_cids = self._partition_decisions_by_fate(
             outcome.decisions
         )
-        reconcile = self._consumer_gate_coordinator.served_store_reconcile(
+        reconcile = coordinator.served_store_reconcile(
             self._served_store_host_path,
             session_id=raw_session_id,
             accepted_cids=accepted_cids,
@@ -844,6 +925,14 @@ class RealSessionRunner:
             reported_cids=reported_cids,
         )
 
+        durable_counts = _durable_consumer_gate_counts(self._bridge_state_path, run_id)
+        durable_accepted_count: int | None = None
+        durable_injected_count: int | None = None
+        counts_source = "outcome"
+        if durable_counts is not None:
+            durable_accepted_count, durable_injected_count = durable_counts
+            counts_source = "durable"
+
         record = ConsumerGateRecord.from_outcome(
             outcome,
             reconcile,
@@ -851,6 +940,15 @@ class RealSessionRunner:
             serve_receipt_ids=None,
             denial_signal_status=None,
             report_signal_status=None,
+            durable_accepted_count=durable_accepted_count,
+            durable_injected_count=durable_injected_count,
+        )
+        _LOG.info(
+            "run_cumulative.consumer_gate_counts source=%s accepted=%s injected=%s run_id=%s",
+            counts_source,
+            record.accepted_count,
+            record.consumer_injected_count,
+            run_id,
         )
         if record.policy_id != manifest.policy_id:
             record = dataclass_replace(record, policy_id=manifest.policy_id)
@@ -1100,8 +1198,6 @@ def _build_real_runner_and_leader_client(
             _token_fingerprint8(proxy_token),
         )
 
-    consumer_state_dir = bridge_paths.consumer_state_dir
-    consumer_gate_coordinator = ConsumerGateCoordinator(state_dir=consumer_state_dir)
     consumer_decision_arg = str(getattr(args, "consumer_decision", "") or "").strip()
     consumer_decision_manifest = (
         _load_consumer_decision_manifest(consumer_decision_arg)
@@ -1156,7 +1252,6 @@ def _build_real_runner_and_leader_client(
         extract_timeout_s=_resolve_extract_timeout_s(),
         proxy_base_url=proxy_base_url,
         proxy_token=proxy_token,
-        consumer_gate_coordinator=consumer_gate_coordinator,
         consumer_decision_manifest=consumer_decision_manifest,
         served_store_host_path=served_store_host_path,
         bridge_state_path=bridge_paths.state_path,
@@ -1653,7 +1748,11 @@ def _resolve_bridge_runtime_config(args: argparse.Namespace) -> BridgeRuntimeCon
     load_bench_env()
     run_cfg = config.RunConfig()
     layout = _resolve_manifest_layout(str(args.manifest))
-    bridge_paths = _bridge_paths(run_cfg, layout.manifest_path)
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    run_dir = layout.runs_dir / "sessions" / run_id if run_id else None
+    # In this flow, bridge --run-id equals the per-session run_label.
+    # Env override still wins for exotic scopes.
+    bridge_paths = _bridge_paths(run_cfg, layout.manifest_path, run_dir=run_dir)
 
     manifest_inbox_arg = str(getattr(args, "manifest_inbox", "") or "").strip()
     if manifest_inbox_arg:
@@ -1664,9 +1763,17 @@ def _resolve_bridge_runtime_config(args: argparse.Namespace) -> BridgeRuntimeCon
     state_dir_arg = str(getattr(args, "state_dir", "") or "").strip()
     if state_dir_arg:
         consumer_state_dir = Path(state_dir_arg).expanduser().resolve()
+        state_source = "cli"
     else:
         consumer_state_dir = bridge_paths.consumer_state_dir
+        state_source = "bridge-default"
     consumer_state_dir.mkdir(parents=True, exist_ok=True)
+    _LOG.info(
+        "run_cumulative.bridge_runtime_consumer_state_dir source=%s run_id=%s path=%s",
+        state_source,
+        run_id or "none",
+        consumer_state_dir,
+    )
 
     served_store_arg = str(getattr(args, "served_store", "") or "").strip()
     if served_store_arg:

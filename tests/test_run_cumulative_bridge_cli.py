@@ -26,7 +26,6 @@ from wevibe_bench.cumulative.consumer_gate import (
     DECISIONS_FILENAME,
     HEARTBEAT_FILENAME,
     QUEUE_FILENAME,
-    ConsumerGateCoordinator,
 )
 from wevibe_bench.cumulative.types import SessionRecord
 
@@ -358,6 +357,8 @@ def test_run_session_on_requires_bridge_ready_before_run_cell(
         lambda _session_dir, **_kwargs: "session-from-events",
     )
 
+    monkeypatch.setenv("WEVIBE_BENCH_CONSUMER_STATE_DIR", str(tmp_path / "plugin-state"))
+
     calls = {"count": 0}
 
     class _SentinelRunner:
@@ -382,7 +383,6 @@ def test_run_session_on_requires_bridge_ready_before_run_cell(
         extract_base_url=None,
         extract_num_ctx=None,
         extract_timeout_s=10,
-        consumer_gate_coordinator=ConsumerGateCoordinator(state_dir=tmp_path / "plugin-state"),
         consumer_decision_manifest=None,
         served_store_host_path=tmp_path / "served-store.json",
         bridge_state_path=tmp_path / "missing-bridge-state.json",

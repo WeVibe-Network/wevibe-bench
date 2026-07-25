@@ -605,7 +605,7 @@ def test_memory_mode_on_off_env_wiring_and_no_seed_keystore_corpus_mounts(
         token_destination = "/home/worker/.wevibe/mcp-session-token"
         plugin_config_destination = "/home/worker/.wevibe/plugin-config.json"
         served_store_destination = primary_cfg.served_memories_container_path
-        state_store_destination = "/home/worker/.wevibe/state"
+        state_store_destination = "/work/.wevibe/state"
         destinations_on = {str(mount.get("Destination", "")) for mount in mounts_on}
         assert destinations_on == {
             "/work",
@@ -856,14 +856,27 @@ def test_gate_oracle_scoring_is_host_only_structurally() -> None:
 
     run_cell_source = inspect.getsource(BackgammonRunner._run_cell_impl)
     run_cell_tree = ast.parse(textwrap.dedent(run_cell_source))
-    docker_cfg_calls = [
+    build_cell_config_calls = [
         node
         for node in ast.walk(run_cell_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr == "_build_cell_config"
+    ]
+    assert build_cell_config_calls, "_run_cell_impl must call self._build_cell_config"
+
+    build_cell_source = inspect.getsource(BackgammonRunner._build_cell_config)
+    build_cell_tree = ast.parse(textwrap.dedent(build_cell_source))
+    docker_cfg_calls = [
+        node
+        for node in ast.walk(build_cell_tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "DockerCellConfig"
     ]
-    assert docker_cfg_calls, "_run_cell_impl must construct DockerCellConfig"
+    assert docker_cfg_calls, "_build_cell_config must construct DockerCellConfig"
     docker_cfg_kw = {kw.arg for kw in docker_cfg_calls[0].keywords}
     assert docker_cfg_kw == {"worktree", "memory_mode", "container_name"}
     assert "docker exec" not in gate_source.lower()

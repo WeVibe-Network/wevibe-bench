@@ -11,7 +11,6 @@ from wevibe_bench.cumulative.consumer_decision import (
     ConsumerDecisionManifest,
     validate_schema,
 )
-from wevibe_bench.cumulative.consumer_gate import ConsumerGateCoordinator
 from wevibe_bench.cumulative.types import SessionRecord
 
 
@@ -146,7 +145,10 @@ def test_validate_consumer_decision_passes_good_and_fails_bad_manifest(
     assert "FAIL:" in captured_bad.out
 
 
-def test_real_session_runner_consumer_gate_outcome_on_and_off(tmp_path: Path) -> None:
+def test_real_session_runner_consumer_gate_outcome_on_and_off(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     module = _load_run_cumulative_module()
     module._load_sxe_helpers = lambda _repo_root: (
         lambda **_kwargs: ([], {}, []),
@@ -155,6 +157,7 @@ def test_real_session_runner_consumer_gate_outcome_on_and_off(tmp_path: Path) ->
     )
 
     state_dir = tmp_path / "consumer-state"
+    monkeypatch.setenv("WEVIBE_BENCH_CONSUMER_STATE_DIR", str(state_dir))
     _write_json(
         state_dir / "wevibe-plugin-queue.json",
         [
@@ -229,10 +232,6 @@ def test_real_session_runner_consumer_gate_outcome_on_and_off(tmp_path: Path) ->
         extract_base_url=None,
         extract_num_ctx=None,
         extract_timeout_s=10,
-        consumer_gate_coordinator=ConsumerGateCoordinator(
-            state_dir=state_dir,
-            clock=lambda: 1_735_100_000.0,
-        ),
         consumer_decision_manifest=custom_manifest,
         served_store_host_path=served_store_path,
     )

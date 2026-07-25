@@ -153,6 +153,21 @@ DEFAULT_MAX_STEPS_PER_ATTEMPT = 100
 DEFAULT_RUN_TIMEOUT_S = 5400
 
 
+def _scan_cell_delivery(worktree: Path) -> str | None:
+    plugin_log = worktree / ".wevibe" / "logs" / "wevibe-plugin-errors.log"
+    try:
+        payload = plugin_log.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
+
+    matches = re.findall(r"\[inject\] injected count=(\d+)", payload)
+    if not matches:
+        return None
+    if any(int(count) >= 1 for count in matches):
+        return "YES"
+    return "NO"
+
+
 @dataclass(frozen=True)
 class _OpencodeRunStats:
     input_tokens: int
@@ -570,15 +585,10 @@ class BackgammonRunner(AgentRunner):
                 f"image={WORKER_IMAGE} memory_mode={self.memory_mode} container={container_name}"
             )
             self._init_worktree_git(worktree=worktree)
-            cell_config = DockerCellConfig(
+            cell_config = self._build_cell_config(
                 worktree=worktree,
-                memory_mode=self.memory_mode,
                 container_name=container_name,
             )
-            cell_config.output_token_max = self.max_output_tokens
-            cell_config.proxy_base_url = self.proxy_base_url
-            cell_config.proxy_token = self.proxy_token
-            cell_config.worker_logs_dir = worktree.parent / "worker-logs"
             cell_context = DockerCell(
                 cell_config,
                 progress=self._progress,
@@ -935,6 +945,16 @@ class BackgammonRunner(AgentRunner):
             if isinstance(first_n_problems, int):
                 problems_before_count = first_n_problems
 
+        if str(self.memory_mode).strip().lower() == "on":
+            scanned_delivery = _scan_cell_delivery(worktree)
+            delivery = scanned_delivery if scanned_delivery is not None else "not_measured"
+        else:
+            delivery = "N/A"
+        self._progress(
+            f"PROGRESS run_label={run_label} step=delivery-scan delivery={delivery} "
+            f"memory_mode={self.memory_mode}"
+        )
+
         return BackgammonCellResult(
             verdict=verdict,
             attempts_to_green=attempts_to_green,
@@ -944,7 +964,7 @@ class BackgammonRunner(AgentRunner):
             output_tokens=output_tokens_total,
             turns=turns_total,
             wall_seconds=wall_seconds,
-            delivery="N/A",
+            delivery=delivery,
             failed_gates=failed_gates_final,
             problems_final=problems_final,
             attempt_reports=attempt_reports,
@@ -1013,6 +1033,19 @@ class BackgammonRunner(AgentRunner):
             "PROGRESS step=worker-permission-config external_directory=deny "
             "oracle_bash_deny=active skip_permissions_removed=true"
         )
+
+    def _build_cell_config(self, *, worktree: Path, container_name: str) -> DockerCellConfig:
+        cell_config = DockerCellConfig(
+            worktree=worktree,
+            memory_mode=self.memory_mode,
+            container_name=container_name,
+        )
+        cell_config.plugin_state_host_path = str(worktree / ".wevibe" / "state")
+        cell_config.output_token_max = self.max_output_tokens
+        cell_config.proxy_base_url = self.proxy_base_url
+        cell_config.proxy_token = self.proxy_token
+        cell_config.worker_logs_dir = worktree.parent / "worker-logs"
+        return cell_config
 
     def _init_worktree_git(self, *, worktree: Path) -> None:
         # opencode resolves the session worktree by walking up from --dir /work

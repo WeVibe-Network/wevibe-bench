@@ -406,11 +406,24 @@ class ConsumerGateRecord:
         serve_receipt_ids: tuple[str, ...] | None = None,
         denial_signal_status: str | None = None,
         report_signal_status: str | None = None,
+        durable_accepted_count: int | None = None,
+        durable_injected_count: int | None = None,
     ) -> ConsumerGateRecord:
+        """Build a checkpoint record from gate outcome + optional durable bridge counts.
+
+        Durable counts are sourced from the bridge daemon delivered-decision record,
+        which survives queue rewrites and reflects correlated accepted/drained truth.
+        """
+
         accepted_count = _optional_int(getattr(outcome, "accept_count", None))
+        if durable_accepted_count is not None:
+            accepted_count = _optional_int(durable_accepted_count)
         denied_count = _optional_int(getattr(outcome, "deny_count", None))
         blocked_count = _optional_int(getattr(outcome, "block_count", None))
         reported_count = _optional_int(getattr(outcome, "report_count", None))
+        consumer_injected_count = accepted_count
+        if durable_injected_count is not None:
+            consumer_injected_count = _optional_int(durable_injected_count)
 
         served_store_write_confirmed: bool | None = None
         served_store_missing_accepted: tuple[str, ...] = ()
@@ -436,7 +449,7 @@ class ConsumerGateRecord:
             policy_id=_optional_string(getattr(outcome, "policy_id", "")) or "",
             coordinator_trace=_optional_string(getattr(outcome, "coordinator_trace", ""))
             or "",
-            consumer_injected_count=accepted_count,
+            consumer_injected_count=consumer_injected_count,
             accepted_count=accepted_count,
             denied_count=denied_count,
             blocked_count=blocked_count,

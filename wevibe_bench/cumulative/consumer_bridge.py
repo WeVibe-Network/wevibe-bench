@@ -13,6 +13,7 @@ invalid, or correlation-mismatched, the bridge emits NO decision.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -168,7 +169,22 @@ class ConsumerBridge:
 
     def refresh_heartbeat(self) -> None:
         self.coordinator.write_heartbeat()
-        self.state.heartbeat_last_ts_ms = self._now_ms()
+        now_ms = self._now_ms()
+        self.state.heartbeat_last_ts_ms = now_ms
+        if self.state.lease is not None:
+            # started_at_ms tracks the most recent renewal so from_dict's
+            # invariant remains true: started_at_ms + ttl_ms == expires_at_ms.
+            self.state.lease = dataclasses.replace(
+                self.state.lease,
+                started_at_ms=now_ms,
+                expires_at_ms=now_ms + self.lease_ttl_ms,
+            )
+            self._logger.debug(
+                "LEASE_RENEWED scope=%s expires_at_ms=%s ttl_ms=%s",
+                self._scope_key,
+                self.state.lease.expires_at_ms,
+                self.state.lease.ttl_ms,
+            )
         self.state.resume_marker = "active"
         atomic_write_state(self.state_path, self.state)
 
@@ -610,6 +626,11 @@ class ConsumerBridge:
 
         cycles = 0
         sleep_ms = min(self.poll_interval_ms, self.heartbeat_cadence_ms)
+        self._logger.info(
+            "consumer_bridge daemon started scope=%s lease_watchdog=renew-on-heartbeat ttl_ms=%s",
+            self._scope_key,
+            self.lease_ttl_ms,
+        )
 
         while not stop_event.is_set():
             if max_cycles is not None and cycles >= max_cycles:

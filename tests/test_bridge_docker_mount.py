@@ -56,7 +56,7 @@ def test_run_argv_memory_mode_on_mounts_plugin_state_rw_and_preserves_existing_m
     argv = _build_run_argv(config=cfg, worktree=worktree, uid=501, gid=20, memory_mode="on")
 
     resolved_plugin_state = plugin_state_host_path.resolve()
-    assert _contains_pair(argv, "-v", f"{resolved_plugin_state}:/home/worker/.wevibe/state:rw")
+    assert _contains_pair(argv, "-v", f"{resolved_plugin_state}:/work/.wevibe/state:rw")
     assert resolved_plugin_state.is_dir()
     assert (resolved_plugin_state.stat().st_mode & 0o777) == 0o700
 
@@ -90,4 +90,4 @@ def test_run_argv_memory_mode_off_has_no_plugin_state_mount(tmp_path: Path) -> N
 
     argv = _build_run_argv(config=cfg, worktree=worktree, uid=501, gid=20, memory_mode="off")
 
-    assert not any("/home/worker/.wevibe/state" in entry for entry in argv)
+    assert not any("/work/.wevibe/state" in entry for entry in argv)

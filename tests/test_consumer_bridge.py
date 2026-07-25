@@ -5,8 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from wevibe_bench.cumulative.bridge_state import load_state
-from wevibe_bench.cumulative.consumer_bridge import ConsumerBridge, manifest_inbox_name
+from wevibe_bench.cumulative.bridge_state import WorkerLease, load_state
+from wevibe_bench.cumulative.consumer_bridge import (
+    DEFAULT_LEASE_TTL_MS,
+    ConsumerBridge,
+    manifest_inbox_name,
+)
 from wevibe_bench.cumulative.consumer_decision import (
     CONSUMER_DECISION_SCHEMA_VERSION,
     ConsumerCandidateDecision,
@@ -260,7 +264,7 @@ def test_replay_idempotent_then_fate_flip_rejected(tmp_path: Path) -> None:
     assert decisions[0]["action"] == "accept"
 
 
-def test_refresh_heartbeat_then_lease_expiry_stops_refresh(tmp_path: Path) -> None:
+def test_refresh_heartbeat_renews_lease_and_preserves_state_invariant(tmp_path: Path) -> None:
     clock = FakeClock()
     bridge, state_dir, _, _, _ = _build_bridge(
         tmp_path,
@@ -271,25 +275,64 @@ def test_refresh_heartbeat_then_lease_expiry_stops_refresh(tmp_path: Path) -> No
         lease_ttl_ms=2_000,
     )
 
-    bridge.refresh_heartbeat()
-    ts_1 = _read_json(state_dir / HEARTBEAT_FILENAME)["ts"]
+    initial_lease = bridge.state.lease
+    assert initial_lease is not None
 
     clock.advance(1.0)
     bridge.refresh_heartbeat()
-    ts_2 = _read_json(state_dir / HEARTBEAT_FILENAME)["ts"]
-    assert ts_2 > ts_1
+    heartbeat_ts = _read_json(state_dir / HEARTBEAT_FILENAME)["ts"]
+    assert heartbeat_ts == int(clock() * 1000)
 
-    clock.advance(5.0)
-    status = bridge.poll_once()
-    assert status["reason"] == "lease_expired"
+    renewed_lease = bridge.state.lease
+    assert renewed_lease is not None
+    assert renewed_lease.expires_at_ms > initial_lease.expires_at_ms
+    assert renewed_lease.started_at_ms == int(clock() * 1000)
+    assert renewed_lease.expires_at_ms == renewed_lease.started_at_ms + renewed_lease.ttl_ms
+    assert WorkerLease.from_dict(renewed_lease.to_dict()) == renewed_lease
 
-    ts_after = _read_json(state_dir / HEARTBEAT_FILENAME)["ts"]
-    assert ts_after == ts_2
-
-    bridge.stop()
     state = load_state(bridge.state_path)
     assert state is not None
-    assert state.resume_marker == "stopped"
+    assert state.lease == renewed_lease
+
+
+def test_poll_once_heartbeat_keeps_lease_alive_past_2x_default_ttl(tmp_path: Path) -> None:
+    clock = FakeClock()
+    bridge, _, _, _, _ = _build_bridge(
+        tmp_path,
+        run_id="run-watchdog",
+        session_id="session-watchdog",
+        queue_payload=[_queue_entry("cid-watchdog")],
+        clock=clock,
+        lease_ttl_ms=DEFAULT_LEASE_TTL_MS,
+    )
+
+    elapsed_ms = 0
+    while elapsed_ms <= 240_000:
+        clock.advance(30.0)
+        elapsed_ms += 30_000
+        status = bridge.poll_once()
+        assert status["reason"] != "lease_expired"
+        assert bridge.state.resume_marker == "active"
+
+    persisted = load_state(bridge.state_path)
+    assert persisted is not None
+    assert persisted.resume_marker == "active"
+
+
+def test_poll_once_still_expires_if_no_heartbeat_refresh_past_ttl(tmp_path: Path) -> None:
+    clock = FakeClock()
+    bridge, _, _, _, _ = _build_bridge(
+        tmp_path,
+        run_id="run-backstop",
+        session_id="session-backstop",
+        queue_payload=[_queue_entry("cid-backstop")],
+        clock=clock,
+        lease_ttl_ms=2_000,
+    )
+
+    clock.advance(2.001)
+    status = bridge.poll_once()
+    assert status["reason"] == "lease_expired"
 
 
 def test_all_four_fates_written_with_exact_stored_shape(tmp_path: Path) -> None:
