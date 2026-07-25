@@ -223,6 +223,8 @@ class ProgressVector:
     wall_seconds: float = 0.0
     wall_cost_usd: float = 0.0
     injected_count: int | None = None
+    injected_block_chars: int | None = None
+    injected_block_est_tokens: int | None = None
     consumer_injected_count: int | None = None
     extraction_candidate_count: int | None = None
     accepted_count: int | None = None
@@ -245,6 +247,8 @@ class ProgressVector:
                 "remaining_count": self.remaining_count,
                 "attempts_to_green": self.attempts_to_green,
                 "injected_count": self.injected_count,
+                "injected_block_chars": self.injected_block_chars,
+                "injected_block_est_tokens": self.injected_block_est_tokens,
                 "consumer_injected_count": self.consumer_injected_count,
                 "extraction_candidate_count": self.extraction_candidate_count,
                 "accepted_count": self.accepted_count,
@@ -265,6 +269,8 @@ class ProgressVector:
                 "remaining_count": self.remaining_count,
                 "attempts_to_green": self.attempts_to_green,
                 "injected_count": self.injected_count,
+                "injected_block_chars": self.injected_block_chars,
+                "injected_block_est_tokens": self.injected_block_est_tokens,
                 "consumer_injected_count": self.consumer_injected_count,
                 "extraction_candidate_count": self.extraction_candidate_count,
                 "accepted_count": self.accepted_count,
@@ -288,6 +294,8 @@ class ProgressVector:
             "wall_seconds": self.wall_seconds,
             "wall_cost_usd": self.wall_cost_usd,
             "injected_count": self.injected_count,
+            "injected_block_chars": self.injected_block_chars,
+            "injected_block_est_tokens": self.injected_block_est_tokens,
             "consumer_injected_count": self.consumer_injected_count,
             "extraction_candidate_count": self.extraction_candidate_count,
             "accepted_count": self.accepted_count,
@@ -317,6 +325,8 @@ class ProgressVector:
             wall_seconds=float(d.get("wall_seconds", 0.0)),
             wall_cost_usd=float(d.get("wall_cost_usd", 0.0)),
             injected_count=_optional_int(d.get("injected_count")),
+            injected_block_chars=_optional_int(d.get("injected_block_chars")),
+            injected_block_est_tokens=_optional_int(d.get("injected_block_est_tokens")),
             consumer_injected_count=_optional_int(d.get("consumer_injected_count")),
             extraction_candidate_count=_optional_int(d.get("extraction_candidate_count")),
             accepted_count=_optional_int(d.get("accepted_count")),

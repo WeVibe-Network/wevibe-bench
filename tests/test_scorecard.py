@@ -56,6 +56,31 @@ def test_cell_total_tokens_is_input_plus_output() -> None:
     assert cell.total_tokens == 200
 
 
+def test_cell_to_dict_includes_injected_block_fields_without_affecting_total_tokens() -> None:
+    cell = Cell(
+        model="m",
+        task_id="t",
+        condition="ON",
+        resolved=True,
+        input_tokens=123,
+        output_tokens=77,
+        turns=1,
+        wall_cost_usd=1.0,
+        wall_seconds=1.0,
+        delivery="YES",
+        scored=True,
+        injected_block_chars=2400,
+        injected_block_est_tokens=600,
+    )
+
+    payload = cell.to_dict()
+
+    assert payload["injected_block_chars"] == 2400
+    assert payload["injected_block_est_tokens"] == 600
+    assert payload["total_tokens"] == 200
+    assert cell.total_tokens == 200
+
+
 def test_model_diff_math_for_capability_tokens_and_cost() -> None:
     cfg = _cfg()
     scorecard = Scorecard(cfg, _now=datetime(2026, 7, 8, tzinfo=timezone.utc))
@@ -116,6 +141,52 @@ def test_model_diff_math_for_capability_tokens_and_cost() -> None:
     assert diff.off_cost_usd == 2.0
     assert diff.on_cost_usd == 3.0
     assert diff.cost_delta_pct == 50.0
+
+
+def test_model_diffs_ignore_injected_block_fields_in_token_totals() -> None:
+    cfg = _cfg()
+    scorecard = Scorecard(cfg, _now=datetime(2026, 7, 8, tzinfo=timezone.utc))
+
+    scorecard.add_cell(
+        Cell(
+            model="model-a",
+            task_id="off-1",
+            condition="OFF",
+            resolved=False,
+            input_tokens=100,
+            output_tokens=100,
+            turns=1,
+            wall_cost_usd=1.0,
+            wall_seconds=1.0,
+            delivery="N/A",
+            scored=True,
+            injected_block_chars=9999,
+            injected_block_est_tokens=2500,
+        )
+    )
+    scorecard.add_cell(
+        Cell(
+            model="model-a",
+            task_id="on-1",
+            condition="ON",
+            resolved=True,
+            input_tokens=110,
+            output_tokens=90,
+            turns=1,
+            wall_cost_usd=1.0,
+            wall_seconds=1.0,
+            delivery="YES",
+            scored=True,
+            injected_block_chars=4000,
+            injected_block_est_tokens=1000,
+        )
+    )
+
+    diff = scorecard.model_diffs()[0]
+
+    assert diff.off_total_tokens == 200
+    assert diff.on_total_tokens == 200
+    assert diff.total_token_delta_pct == 0.0
 
 
 def test_manifest_contains_verbatim_config_seed_version_created_at_and_json_round_trip() -> None:

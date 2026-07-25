@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from wevibe_bench.adapters.backgammon import BackgammonCellResult, BackgammonRunner
 from wevibe_bench.cumulative.convergence import (
     CONVERGENCE_SCHEMA_VERSION,
@@ -290,6 +292,78 @@ def test_progress_from_cell_result_preserves_none_for_nullable_fields() -> None:
     assert "resolved_count" in progress.missing_telemetry_seams
 
 
+def test_progress_from_cell_result_maps_injected_block_fields_when_present() -> None:
+    result = BackgammonCellResult(
+        verdict="PASS",
+        attempts_to_green=0,
+        termination_reason="gates_green",
+        conformed=True,
+        input_tokens=10,
+        output_tokens=20,
+        turns=1,
+        wall_seconds=1.0,
+        delivery="YES",
+        failed_gates=[],
+        problems_final=[],
+        attempt_reports=[],
+        worktree="/tmp/worktree",
+        session_id="sess-block-present",
+        memory_mode="on",
+        model="openrouter/anthropic/claude-opus-4.8",
+        injected_block_chars=2400,
+        injected_block_est_tokens=600,
+    )
+
+    progress = progress_from_cell_result(
+        result,
+        cell={
+            "injected_block_chars": 2400,
+            "injected_block_est_tokens": 600,
+        },
+    )
+
+    assert progress.injected_block_chars == 2400
+    assert progress.injected_block_est_tokens == 600
+    assert "injected_block_chars" not in progress.missing_telemetry_seams
+    assert "injected_block_est_tokens" not in progress.missing_telemetry_seams
+
+
+def test_progress_from_cell_result_preserves_none_for_injected_block_fields() -> None:
+    result = BackgammonCellResult(
+        verdict="PASS",
+        attempts_to_green=0,
+        termination_reason="gates_green",
+        conformed=True,
+        input_tokens=10,
+        output_tokens=20,
+        turns=1,
+        wall_seconds=1.0,
+        delivery="YES",
+        failed_gates=[],
+        problems_final=[],
+        attempt_reports=[],
+        worktree="/tmp/worktree",
+        session_id="sess-block-missing",
+        memory_mode="off",
+        model="openrouter/anthropic/claude-opus-4.8",
+        injected_block_chars=None,
+        injected_block_est_tokens=None,
+    )
+
+    progress = progress_from_cell_result(
+        result,
+        cell={
+            "injected_block_chars": None,
+            "injected_block_est_tokens": None,
+        },
+    )
+
+    assert progress.injected_block_chars is None
+    assert progress.injected_block_est_tokens is None
+    assert "injected_block_chars" in progress.missing_telemetry_seams
+    assert "injected_block_est_tokens" in progress.missing_telemetry_seams
+
+
 def test_progress_vector_serde_round_trip_with_new_fields() -> None:
     vector = ProgressVector(
         problems_before=9,
@@ -304,6 +378,8 @@ def test_progress_vector_serde_round_trip_with_new_fields() -> None:
         total_tokens=300,
         wall_seconds=6.0,
         wall_cost_usd=1.25,
+        injected_block_chars=2400,
+        injected_block_est_tokens=600,
         tool_calls=22,
         test_invocations=5,
         agentic_cycles=3,
@@ -314,6 +390,8 @@ def test_progress_vector_serde_round_trip_with_new_fields() -> None:
     restored = ProgressVector.from_dict(payload)
 
     assert restored.to_dict() == payload
+    assert restored.injected_block_chars == 2400
+    assert restored.injected_block_est_tokens == 600
     assert restored.tool_calls == 22
     assert restored.test_invocations == 5
     assert restored.agentic_cycles == 3
@@ -333,6 +411,8 @@ def test_progress_vector_from_dict_coerces_garbage_to_none_and_normalizes_seams(
             "total_tokens": "0",
             "wall_seconds": "0.0",
             "wall_cost_usd": "0.0",
+            "injected_block_chars": "2400",
+            "injected_block_est_tokens": "600",
             "tool_calls": None,
             "test_invocations": None,
             "agentic_cycles": None,
@@ -343,6 +423,10 @@ def test_progress_vector_from_dict_coerces_garbage_to_none_and_normalizes_seams(
     assert restored.tool_calls is None
     assert restored.test_invocations is None
     assert restored.agentic_cycles is None
+    assert restored.injected_block_chars == 2400
+    assert restored.injected_block_est_tokens == 600
+    assert "injected_block_chars" not in restored.missing_telemetry_seams
+    assert "injected_block_est_tokens" not in restored.missing_telemetry_seams
     assert "tool_calls" in restored.missing_telemetry_seams
     assert "agentic_cycles" in restored.missing_telemetry_seams
     assert "custom-seam" in restored.missing_telemetry_seams
@@ -350,6 +434,31 @@ def test_progress_vector_from_dict_coerces_garbage_to_none_and_normalizes_seams(
     normalized = ProgressVector(tool_calls=None, agentic_cycles=2, missing_telemetry_seams=[])
     assert "tool_calls" in normalized.missing_telemetry_seams
     assert "agentic_cycles" not in normalized.missing_telemetry_seams
+
+
+def test_progress_vector_from_dict_rejects_corrupt_injected_block_fields() -> None:
+    payload = {
+        "problems_before": None,
+        "problems_after": None,
+        "resolved_count": None,
+        "remaining_count": None,
+        "attempts_to_green": None,
+        "turns": "0",
+        "input_tokens": "0",
+        "output_tokens": "0",
+        "total_tokens": "0",
+        "wall_seconds": "0.0",
+        "wall_cost_usd": "0.0",
+        "injected_block_chars": "bad",
+        "injected_block_est_tokens": "600",
+        "tool_calls": None,
+        "test_invocations": None,
+        "agentic_cycles": None,
+        "missing_telemetry_seams": [],
+    }
+
+    with pytest.raises(ValueError):
+        ProgressVector.from_dict(payload)
 
 
 def test_build_convergence_trend_math_hash_and_dict_shape() -> None:

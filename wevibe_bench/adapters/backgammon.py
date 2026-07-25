@@ -168,6 +168,24 @@ def _scan_cell_delivery(worktree: Path) -> str | None:
     return "NO"
 
 
+def _scan_injected_block_chars(worktree: Path) -> int | None:
+    plugin_log = worktree / ".wevibe" / "logs" / "wevibe-plugin-errors.log"
+    try:
+        payload = plugin_log.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
+
+    block_matches = re.findall(r"\[inject\] injected[^\n]*\bblock_chars=(\d+)", payload)
+    if block_matches:
+        return sum(int(chars) for chars in block_matches)
+
+    legacy_matches = re.findall(r"\[inject\] injected[^\n]*\bchars=(\d+)", payload)
+    if legacy_matches:
+        return sum(int(chars) for chars in legacy_matches)
+
+    return None
+
+
 @dataclass(frozen=True)
 class _OpencodeRunStats:
     input_tokens: int
@@ -332,6 +350,8 @@ class BackgammonCellResult:
     test_invocations: int | None = None
     agentic_cycles: int | None = None
     problems_before: int | None = None
+    injected_block_chars: int | None = None
+    injected_block_est_tokens: int | None = None
 
 
 def _default_progress(message: str) -> None:
@@ -948,8 +968,16 @@ class BackgammonRunner(AgentRunner):
         if str(self.memory_mode).strip().lower() == "on":
             scanned_delivery = _scan_cell_delivery(worktree)
             delivery = scanned_delivery if scanned_delivery is not None else "not_measured"
+            injected_block_chars = _scan_injected_block_chars(worktree)
+            injected_block_est_tokens = (
+                round(injected_block_chars / 4)
+                if injected_block_chars is not None
+                else None
+            )
         else:
             delivery = "N/A"
+            injected_block_chars = None
+            injected_block_est_tokens = None
         self._progress(
             f"PROGRESS run_label={run_label} step=delivery-scan delivery={delivery} "
             f"memory_mode={self.memory_mode}"
@@ -979,6 +1007,8 @@ class BackgammonRunner(AgentRunner):
             test_invocations=test_invocations_count,
             agentic_cycles=agentic_cycles_count,
             problems_before=problems_before_count,
+            injected_block_chars=injected_block_chars,
+            injected_block_est_tokens=injected_block_est_tokens,
         )
 
     def _write_worker_permission_config(self, *, worktree: Path) -> None:

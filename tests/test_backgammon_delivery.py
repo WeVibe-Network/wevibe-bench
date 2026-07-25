@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from wevibe_bench.adapters.backgammon import BackgammonRunner, _scan_cell_delivery
+from wevibe_bench.adapters.backgammon import (
+    BackgammonRunner,
+    _scan_cell_delivery,
+    _scan_injected_block_chars,
+)
 
 
 TASK_DIR = (Path(__file__).resolve().parents[1] / "tasks" / "backgammon").resolve()
@@ -69,6 +73,67 @@ def test_scan_cell_delivery_returns_none_when_no_inject_lines_exist(tmp_path: Pa
     assert _scan_cell_delivery(worktree) is None
 
 
+def test_scan_injected_block_chars_reads_new_block_chars_shape(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=2 block_chars=2400 sid=ses_new newly_served=2\n",
+    )
+
+    assert _scan_injected_block_chars(worktree) == 2400
+
+
+def test_scan_injected_block_chars_falls_back_to_legacy_chars_shape(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=2 chars=1207 sid=ses_legacy newly_served=2\n",
+    )
+
+    assert _scan_injected_block_chars(worktree) == 1207
+
+
+def test_scan_injected_block_chars_sums_multiple_inject_events(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=1 block_chars=1000 sid=ses_a newly_served=1\n"
+        "[inject] injected count=1 block_chars=400 sid=ses_b newly_served=1\n",
+    )
+
+    assert _scan_injected_block_chars(worktree) == 1400
+
+
+def test_scan_injected_block_chars_prefers_block_chars_when_both_present(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=2 block_chars=2400 chars=9999 sid=ses_mix newly_served=2\n",
+    )
+
+    assert _scan_injected_block_chars(worktree) == 2400
+
+
+def test_scan_injected_block_chars_returns_none_when_log_missing_or_without_injects(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-worktree"
+    missing.mkdir(parents=True, exist_ok=True)
+    assert _scan_injected_block_chars(missing) is None
+
+    no_inject = tmp_path / "no-inject-worktree"
+    no_inject.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        no_inject,
+        "[plugin] startup complete\n"
+        "[inject] unrelated marker\n",
+    )
+
+    assert _scan_injected_block_chars(no_inject) is None
+
+
 def test_run_cell_impl_sets_delivery_yes_when_memory_on_and_inject_log_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -105,6 +170,45 @@ def test_run_cell_impl_sets_delivery_yes_when_memory_on_and_inject_log_exists(
     )
 
     assert result.delivery == "YES"
+
+
+def test_run_cell_impl_sets_injected_block_est_tokens_from_scanned_chars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, memory_mode="on")
+    monkeypatch.setattr(runner, "_prepare_memory_mode", lambda *, worktree: False)
+    monkeypatch.setattr(
+        runner,
+        "_run_gate_report",
+        lambda **kwargs: {"verdict": "PASS", "conformed": True, "problems": [], "failed_gates": []},
+    )
+
+    original_copy_tree_contents = BackgammonRunner._copy_tree_contents
+
+    def _copy_tree_contents_with_log(src_dir: Path, dst_dir: Path) -> None:
+        original_copy_tree_contents(src_dir, dst_dir)
+        if Path(src_dir).name == "golden":
+            _write_plugin_log(
+                dst_dir,
+                "[inject] injected count=2 block_chars=1207 sid=ses_tokens newly_served=2\n",
+            )
+
+    monkeypatch.setattr(
+        BackgammonRunner,
+        "_copy_tree_contents",
+        staticmethod(_copy_tree_contents_with_log),
+    )
+
+    result = runner._run_cell_impl(
+        run_label="delivery-on-est-tokens",
+        run_dir=tmp_path / "delivery-on-est-tokens",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.injected_block_chars == 1207
+    assert result.injected_block_est_tokens == round(1207 / 4)
 
 
 def test_run_cell_impl_sets_delivery_not_measured_when_memory_on_without_inject_log(

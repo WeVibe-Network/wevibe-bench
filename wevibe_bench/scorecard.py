@@ -44,6 +44,8 @@ class Cell:
     pattern_position: str | None = None  # wave_id + position within wave (e.g. "baseline:0")
     run_block: str | None = None  # session block identifier for grouping
     injection_count: int | None = None  # number of injected memories
+    injected_block_chars: int | None = None  # injected memory block chars (honest nullable telemetry)
+    injected_block_est_tokens: int | None = None  # injected memory block estimated tokens (honest nullable telemetry)
     memory_mode: str | None = None  # OFF|ON from execution (replaces ambiguous off_injection)
     # DEFERRED: replaced by memory_mode field
 
@@ -77,6 +79,8 @@ class Cell:
             "pattern_position": self.pattern_position,
             "run_block": self.run_block,
             "injection_count": self.injection_count,
+            "injected_block_chars": self.injected_block_chars,
+            "injected_block_est_tokens": self.injected_block_est_tokens,
             "memory_mode": self.memory_mode,
         }
 

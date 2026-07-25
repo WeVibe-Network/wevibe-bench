@@ -203,6 +203,8 @@ def _cell_from_outcome(
     wave_index: int = 0,
     position_in_wave: int = 0,
     injection_count: int = 0,
+    injected_block_chars: int | None = None,
+    injected_block_est_tokens: int | None = None,
     memory_mode: str | None = None,
 ) -> Cell:
     _ = wave_index
@@ -226,6 +228,8 @@ def _cell_from_outcome(
         pattern_position=pattern_position,
         run_block=run_block,
         injection_count=injection_count if is_on_condition else 0,
+        injected_block_chars=(injected_block_chars if is_on_condition else None),
+        injected_block_est_tokens=(injected_block_est_tokens if is_on_condition else None),
         memory_mode=memory_mode,
     )
 
@@ -298,6 +302,12 @@ def run_ablation(
                         wave_index=wave_idx,
                         position_in_wave=model_idx,
                         injection_count=0,
+                        injected_block_chars=getattr(off_outcome, "injected_block_chars", None),
+                        injected_block_est_tokens=getattr(
+                            off_outcome,
+                            "injected_block_est_tokens",
+                            None,
+                        ),
                         memory_mode="off",
                     )
                     scorecard.add_cell(off_cell)
@@ -331,6 +341,12 @@ def run_ablation(
                         wave_index=wave_idx,
                         position_in_wave=model_idx,
                         injection_count=injection_count,
+                        injected_block_chars=getattr(on_outcome, "injected_block_chars", None),
+                        injected_block_est_tokens=getattr(
+                            on_outcome,
+                            "injected_block_est_tokens",
+                            None,
+                        ),
                         memory_mode="on",
                     )
                     scorecard.add_cell(on_cell)
