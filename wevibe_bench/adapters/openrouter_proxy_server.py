@@ -1083,6 +1083,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pricing-cache-read", type=float, default=None)
     parser.add_argument("--pricing-cache-write", type=float, default=None)
     parser.add_argument("--reject-on-equality", action="store_true")
+    parser.add_argument(
+        "--no-hard-cap",
+        action="store_true",
+        help=(
+            "Budget-watch mode (R2 Amendment 1, Walter 2026-07-25): the hard cap "
+            "becomes a watch-threshold, never a kill-switch — reservation/"
+            "settlement accounting runs unchanged but no request is ever refused "
+            "on budget. Spend is watched by the poller + coordinator."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.cap_usd <= 0:
@@ -1195,6 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_path=args.checkpoint,
         operational_target_usd=args.target_usd,
         reject_on_equality=bool(args.reject_on_equality),
+        watch_only=bool(args.no_hard_cap),
     )
     logger = ProxyLogger(args.log)
     if args.authorize and selected_profile.upstream == "orcarouter":
@@ -1250,6 +1261,8 @@ def main(argv: list[str] | None = None) -> int:
         upstream_provider=selected_profile.upstream,
         upstream_url=upstream_url,
         upstream_key_fp=upstream_key_fp,
+        budget_watch_only=bool(args.no_hard_cap),
+        max_tokens_cap=int(args.max_output_tokens),
     )
 
     server = make_server(proxy, host="127.0.0.1", port=int(args.port))

@@ -184,7 +184,12 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             model_id="z-ai/glm-5.2",
             provider_object=None,
             pricing=None,
-            max_output_tokens=8192,
+            # R2 Amendment 1 (Walter 2026-07-25): 8192 -> 32768. The 8192/8192
+            # pairing let reasoning consume the entire completion budget
+            # (hurdle #2 clamp guillotine fired live on the first GLM worker
+            # cell: 3/3 attempts finish=length, <=2 visible tokens, zero work).
+            # 32768 with reasoning capped at 8192 guarantees >=24k visible.
+            max_output_tokens=32768,
             max_reasoning_tokens=8192,
             upstream="orcarouter",
             authorized=False,
@@ -227,7 +232,12 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             model_id="tencent/hy3",
             provider_object=None,
             pricing=None,
-            max_output_tokens=8192,
+            # R2 Amendment 1 audit (Walter 2026-07-25): the same structural
+            # hazard as glm exists (8192 output == 8192 reasoning = zero
+            # guaranteed visible headroom); hy3 merely never tripped it in
+            # prior worker runs. Amended 8192 -> 32768 per the ruling's
+            # amend-if-structural-hazard condition.
+            max_output_tokens=32768,
             max_reasoning_tokens=8192,
             upstream="orcarouter",
             authorized=False,
@@ -239,7 +249,9 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             model_id="kimi/kimi-k2.7-code",
             provider_object=None,
             pricing=None,
-            max_output_tokens=8192,
+            # R2 Amendment 1 audit (Walter 2026-07-25): same structural hazard
+            # as glm (8192/8192 zero-headroom) -> amended to 32768.
+            max_output_tokens=32768,
             max_reasoning_tokens=8192,
             upstream="orcarouter",
             authorized=False,
@@ -703,6 +715,7 @@ class BudgetLedger:
         *,
         operational_target_usd: float | None = None,
         reject_on_equality: bool = False,
+        watch_only: bool = False,
     ) -> None:
         self.run_id = run_id
         self.model_id = model_id
@@ -713,6 +726,14 @@ class BudgetLedger:
             float(operational_target_usd) if operational_target_usd is not None else None
         )
         self.reject_on_equality = bool(reject_on_equality)
+        # R2 Amendment 1 (Walter 2026-07-25 budget-watch directive): watch_only
+        # downgrades the hard cap from kill-switch to watch-threshold — the
+        # reservation/settlement accounting runs UNCHANGED (the trust
+        # instrument), but reserve() never refuses. Spend is watched by the
+        # poller + coordinator; the run ends only on natural completion,
+        # variance-policy completion, integrity abort, hang-kill, or an
+        # explicit stop order. Never scored as capability FAIL (hurdle #7).
+        self.watch_only = bool(watch_only)
 
         self._accrued_actual = 0.0
         self._accrued_derived = 0.0
@@ -783,7 +804,7 @@ class BudgetLedger:
                 + reservation
             )
             over = projected >= self.hard_cap if self.reject_on_equality else projected > self.hard_cap
-            if over:
+            if over and not self.watch_only:
                 raise BudgetExceededError(
                     message=(
                         f"reservation would exceed hard cap: projected={projected:.8f} "

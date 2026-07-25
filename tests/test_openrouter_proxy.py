@@ -642,6 +642,29 @@ def test_budget_ledger_boundary_and_equality_policy(tmp_path: Path) -> None:
         strict.reserve("equal-refused", 0.01)
 
 
+def test_budget_ledger_watch_only_never_refuses(tmp_path: Path) -> None:
+    """R2 Amendment 1 (Walter 2026-07-25): watch_only downgrades the hard cap
+    to a watch-threshold — accounting runs unchanged, reserve() never refuses."""
+    ledger = BudgetLedger(
+        run_id="run-watch",
+        model_id="z-ai/glm-5.2",
+        profile_name="glm",
+        hard_cap_usd=1.0,
+        checkpoint_path=str(tmp_path / "ledger-watch.json"),
+        watch_only=True,
+    )
+    ledger.reserve("under", 0.99)
+    ledger.settle_derived("under", 0.99)
+    # Far beyond the cap: admitted and fully accounted, never refused.
+    ledger.reserve("over-1", 5.0)
+    ledger.settle_derived("over-1", 5.0)
+    ledger.reserve("over-2", 50.0)
+    ledger.settle_derived("over-2", 50.0)
+    snapshot = ledger.snapshot()
+    assert snapshot["accrued_derived"] == pytest.approx(55.99)
+    assert snapshot["hard_cap"] == pytest.approx(1.0)
+
+
 def test_budget_ledger_sequential_retries_and_settle_vs_retain(tmp_path: Path) -> None:
     ledger = BudgetLedger(
         run_id="run-seq",
