@@ -206,6 +206,10 @@ def _cell_from_outcome(
     injected_block_chars: int | None = None,
     injected_block_est_tokens: int | None = None,
     memory_mode: str | None = None,
+    keyword_match_rate: float | None = None,
+    keyword_matched_count: int | None = None,
+    keyword_served_count: int | None = None,
+    vector_only_serve_count: int | None = None,
 ) -> Cell:
     _ = wave_index
     pattern_position = f"{wave_id}:{position_in_wave}" if wave_id else None
@@ -231,6 +235,10 @@ def _cell_from_outcome(
         injected_block_chars=(injected_block_chars if is_on_condition else None),
         injected_block_est_tokens=(injected_block_est_tokens if is_on_condition else None),
         memory_mode=memory_mode,
+        keyword_match_rate=keyword_match_rate,
+        keyword_matched_count=keyword_matched_count,
+        keyword_served_count=keyword_served_count,
+        vector_only_serve_count=vector_only_serve_count,
     )
 
 

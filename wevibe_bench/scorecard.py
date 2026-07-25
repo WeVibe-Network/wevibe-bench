@@ -47,6 +47,10 @@ class Cell:
     injected_block_chars: int | None = None  # injected memory block chars (honest nullable telemetry)
     injected_block_est_tokens: int | None = None  # injected memory block estimated tokens (honest nullable telemetry)
     memory_mode: str | None = None  # OFF|ON from execution (replaces ambiguous off_injection)
+    keyword_match_rate: float | None = None
+    keyword_matched_count: int | None = None
+    keyword_served_count: int | None = None
+    vector_only_serve_count: int | None = None
     # DEFERRED: replaced by memory_mode field
 
     @property
@@ -82,6 +86,10 @@ class Cell:
             "injected_block_chars": self.injected_block_chars,
             "injected_block_est_tokens": self.injected_block_est_tokens,
             "memory_mode": self.memory_mode,
+            "keyword_match_rate": self.keyword_match_rate,
+            "keyword_matched_count": self.keyword_matched_count,
+            "keyword_served_count": self.keyword_served_count,
+            "vector_only_serve_count": self.vector_only_serve_count,
         }
 
 

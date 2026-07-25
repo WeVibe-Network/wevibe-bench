@@ -318,6 +318,10 @@ def _cell_from_outcome(
     delivery: str,
     scored: bool,
     outcome: TaskOutcome,
+    keyword_match_rate: float | None = None,
+    keyword_matched_count: int | None = None,
+    keyword_served_count: int | None = None,
+    vector_only_serve_count: int | None = None,
 ) -> Cell:
     not_scored_reason = None if scored else f"delivery={delivery}"
 
@@ -330,6 +334,10 @@ def _cell_from_outcome(
             scored=scored,
             not_scored_reason=not_scored_reason,
             outcome=outcome,
+            keyword_match_rate=keyword_match_rate,
+            keyword_matched_count=keyword_matched_count,
+            keyword_served_count=keyword_served_count,
+            vector_only_serve_count=vector_only_serve_count,
         )
 
     return Cell(
@@ -345,6 +353,10 @@ def _cell_from_outcome(
         delivery=delivery,
         scored=scored,
         not_scored_reason=not_scored_reason,
+        keyword_match_rate=keyword_match_rate,
+        keyword_matched_count=keyword_matched_count,
+        keyword_served_count=keyword_served_count,
+        vector_only_serve_count=vector_only_serve_count,
     )
 
 
@@ -460,6 +472,32 @@ def _run_cell(
         verdict = backend.verify_delivery(recall_result)
         injected_memories = recall_result.memories if verdict == DeliveryVerdict.YES else []
 
+        keyword_metric_kwargs: dict[str, float | int | None] = {}
+        if injected_memories:
+            served_n = len(injected_memories)
+            matched_n = 0
+            vector_only_n = 0
+            for memory in injected_memories:
+                matched_keywords = getattr(memory, "matched_keywords", None)
+                has_matched_keywords = isinstance(matched_keywords, list) and bool(matched_keywords)
+                keyword_score_raw = getattr(memory, "keyword_score", None)
+                keyword_score = _to_float(keyword_score_raw, default=0.0) if keyword_score_raw is not None else 0.0
+                vector_score_raw = getattr(memory, "vector_score", None)
+                vector_score = _to_float(vector_score_raw, default=0.0) if vector_score_raw is not None else 0.0
+
+                if has_matched_keywords or keyword_score > 0:
+                    matched_n += 1
+
+                if (not has_matched_keywords) and keyword_score <= 0 and vector_score > 0:
+                    vector_only_n += 1
+
+            keyword_metric_kwargs = {
+                "keyword_served_count": served_n,
+                "keyword_matched_count": matched_n,
+                "keyword_match_rate": matched_n / served_n if served_n else None,
+                "vector_only_serve_count": vector_only_n,
+            }
+
         outcome = runner.run_task(args.model, task_id, injected_memories)
         scored = verdict == DeliveryVerdict.YES
         cell = _cell_from_outcome(
@@ -469,6 +507,7 @@ def _run_cell(
             delivery=verdict.value,
             scored=scored,
             outcome=outcome,
+            **keyword_metric_kwargs,
         )
 
         telemetry_payload = {
