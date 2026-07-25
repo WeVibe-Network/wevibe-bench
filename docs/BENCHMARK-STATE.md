@@ -193,12 +193,23 @@ untouched; stage-7 cells are historical evidence only, never merged. Reports:
   path (`D-PRODUCER-MODEL-PROVENANCE` / `D-CAPABILITY-ELIGIBILITY`) is canonized but UNBUILT and unproven through
   real transport (prod `attestation:null`; provenance does not reach Qdrant) and has never been measured/used as a
   recall filter; therefore this persistence enforcement is design INTENT until that path is proven in real transport,
-  then enforcement is permanent.
+  then enforcement is permanent. **Amendment 2026-07-24:** provenance NOW reaches Qdrant for post-24-07 commits
+  (R1: bench `5394032` + hub `a171630`; born-stamped 9/9 × 3 legs; pre-fix 8 unstamped by Option A); the FILTER
+  remains unbuilt — caveat narrowed for the stamping leg only.
 
 
 ## 3. RECALL / INJECTION SEMANTICS (verified 2026-07-13/14)
 - Plugin re-injects ALL approved memories EVERY turn + across compaction (`wevibe-plugin.ts:1349` transform →
   `:1412-1447` inject-all-eligible → `:1503` compaction). Per-session dedup gates ATTRIBUTION only, not injection.
+  **⚠ SUPERSEDED BY CANON 2026-07-24 (PENDING implementation):** D-INJECTION-CADENCE-2026-07-24
+  (`wevibe-docs/DECISIONS.md` §23) replaces per-turn re-injection with inject-ONCE-at-acceptance (stable early
+  position), a bounded hub-ranked top-K served set within a fixed token budget, and VERBATIM compaction
+  preservation (never summarize-through); JIT progressive disclosure is PARKED as a future seam. Implementation
+  dispatched 2026-07-25 (plugin inject-once + verbatim preserve + bench metering); **worker-image REVENDOR
+  required before R2.** Until the revendored image lands, the per-turn behavior above is still the live truth.
+  **Benchmark metering rule (same canon):** in all measurement arms the memory block's tokens MUST be metered and
+  reported separately from the model's work tokens — every OFF/ON progress vector carries injected-memory tokens
+  as their own field.
 - `WEVIBE_RECALL_MODE=test`: floor 0 / budget 1000 / limit 1000 + AUTO-APPROVE (`:1105`, skips human popup) →
   headless injection works. **PROD/unset headless = injects NOTHING** (needs human approval; no TUI → dropped).
 - Real relevance floor overridable via `~/.wevibe/plugin-config.json` (`recall_relevance_floor`/`recall_max_injected`)
@@ -323,6 +334,15 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   permanent.
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
+- **2026-07-25 (post OrcaRouter migration + step-6 smoke + R0/R1 + zero-progress gate):** qdrant
+  `org_wevibe-org-0_memories` = **17** (8 pre-fix UNSTAMPED, Option A leave-and-disclose + 9 born-stamped
+  `tencent/hy3` × 3 legs; R2 will wipe = declared experiment reset, diary §22.2). 9/9 containers healthy; clones
+  :4550 (PID 4243) + :4451 (PID 4473) running gate code `1a04bae`; canonical mcp tip `c5304d9` (1 push-held);
+  wevibe-server 3 push-held (`6740207`, `a171630`, +1 pre-existing); identity unlocked in :4450; Ollama nomic-768
+  + LM Studio qwen+nomic live. Suites: bench **572**, canonical mcp 553, clone 557. Worker image
+  `wevibe-bench-worker:v1` = `9d389f8e376b` — REVENDOR required before R2 (injection-cadence impl, §3). Spend
+  24–25-07 ≈ **$5.54/$115** (step-6 $4.08 + R0 $0.73 + probes). Staged program (diary §22): R0 ✅ R1 ✅ → **R2
+  NEXT** (fresh wipe + GLM-5.2 OFF→ON self-lift) → tier-pin → noise calibration → R3 ($40 cap) → R4.
 - **22-07-22 (post-stage8 + disclosed D6 rerun):** qdrant `org_wevibe-org-0_memories` = **6 memories** (stage-8
   Cell-1 Opus self-extraction, delivery-proven 6/6; pool frozen). hub :4440 instanceId `94184b05`; 9/9 containers
   healthy; Ollama :11434 (nomic-embed-text:v1.5) up. :4550 clone running pid 55392 (`runs/clone4550.pid`,

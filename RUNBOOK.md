@@ -280,6 +280,28 @@ INTENT until that path is proven through the real transport. Once proven, enforc
 
 For the full canonical statement, see `BENCHMARK-DIARY.md` §18.
 
+> **Caveat amendment (2026-07-24):** producer provenance NOW reaches Qdrant for memories committed after this date
+> (R1 fix, bench `5394032` + hub `a171630`; first born-stamped commits 9/9 × 3 legs). The pre-fix 8 stay unstamped
+> (Option A leave-and-disclose). Production attestation is still `null` and the capability-eligibility FILTER is
+> still unbuilt — the caveat above stands for enforcement, narrowed for the stamping leg.
+
+## Injection cadence canon + memory-block token metering (PENDING implementation — D-INJECTION-CADENCE-2026-07-24)
+
+Canon ratified 2026-07-24 (`wevibe-docs/DECISIONS.md` §23; Walter, "resounding yes"): a recalled-and-accepted
+memory is injected ONCE at acceptance (stable early position after system instructions), NOT re-pushed per turn;
+the served set is hub-ranked top-K within a fixed token budget; the injected block is preserved VERBATIM across
+compaction (restore-verbatim, never summarize-through). **In all benchmark measurement arms, the memory block's
+tokens MUST be metered and reported separately from the model's work tokens** — every OFF/ON progress vector that
+reports tokens must carry the injected-memory-token count as its own field. JIT/reference-based progressive
+disclosure is PARKED as a future architecture seam, not a cadence flag.
+
+Status: implementation DISPATCHED 2026-07-25 (plugin inject-once + verbatim compaction preserve + bench token
+metering; ledger `wevibe-meta/workspace/reports/25-07-26-0341-injection-cadence-implementation-LEDGER.md`).
+**Worker-image REVENDOR is required before R2** — the vendored plugin in `wevibe-bench-worker:v1` must carry the
+new cadence code. Until the revendored image lands, the plugin still re-injects the eligible block every turn
+(superseded MM-1 behavior); do not report cadence effects as canon-conformant before then. This canon supersedes
+per-turn re-injection and resolves MM-1 in the spec's direction (code→spec).
+
 ## Backgammon oracle-isolation invariant (measurement integrity)
 
 **Invariant:** workers must never access gate oracle/test sources; worker feedback is
