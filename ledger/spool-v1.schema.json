@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://wevibe.dev/schemas/spool-v1.schema.json",
   "title": "WeVibe SPOOL-V1",
+  "description": "Authoritative spec: wevibe-meta/workspace/docs/SPOOL-V1.md. Conformance tripwires: tests/test_spool_v1_conformance.py (this repo) + scaffold/wevibe-mcp-clone/tests/gstv-spool-conformance.test.ts, both against the plugin-produced fixture scaffold/wevibe-mcp-clone/tests/fixtures/spool-v1.plugin-produced.jsonl (regen: npx tsx plugins/gen-spool-v1-fixture.ts in wevibe-opencode-plugin).",
   "type": "object",
   "required": [
     "v",
@@ -67,8 +68,14 @@
         "properties": {
           "payload": {
             "type": "object",
+            "required": [
+              "directory"
+            ],
             "properties": {
-              "repo_root": {
+              "directory": {
+                "type": "string"
+              },
+              "worktree": {
                 "type": "string"
               }
             },
@@ -107,8 +114,10 @@
           "payload": {
             "type": "object",
             "properties": {
-              "error": {
-                "type": "string"
+              "message_excerpt": {
+                "type": "string",
+                "maxLength": 2060,
+                "description": "producer slices at 2048 then appends the 12-char truncation marker → wire max 2060"
               }
             },
             "additionalProperties": false
@@ -138,6 +147,11 @@
               },
               "tool": {
                 "type": "string"
+              },
+              "args_excerpt": {
+                "type": "string",
+                "maxLength": 2060,
+                "description": "producer slices at 2048 then appends the 12-char truncation marker → wire max 2060"
               }
             },
             "additionalProperties": false
@@ -176,13 +190,13 @@
               },
               "output_excerpt": {
                 "type": "string",
-                "maxLength": 2048,
-                "description": "Excerpt is truncated at 2048 chars by the producer; truncation is marked by the producer."
+                "maxLength": 2060,
+                "description": "producer slices at 2048 then appends the 12-char truncation marker → wire max 2060"
               },
               "error_excerpt": {
                 "type": "string",
-                "maxLength": 2048,
-                "description": "Excerpt is truncated at 2048 chars by the producer; truncation is marked by the producer."
+                "maxLength": 2060,
+                "description": "producer slices at 2048 then appends the 12-char truncation marker → wire max 2060"
               }
             },
             "additionalProperties": false
@@ -254,10 +268,14 @@
             "type": "object",
             "required": [
               "path",
+              "serverID",
               "diagnostics"
             ],
             "properties": {
               "path": {
+                "type": "string"
+              },
+              "serverID": {
                 "type": "string"
               },
               "diagnostics": {
@@ -292,8 +310,10 @@
               "command": {
                 "type": "string"
               },
-              "exit_code": {
-                "type": "integer"
+              "args_excerpt": {
+                "type": "string",
+                "maxLength": 2060,
+                "description": "producer slices at 2048 then appends the 12-char truncation marker → wire max 2060"
               }
             },
             "additionalProperties": false
