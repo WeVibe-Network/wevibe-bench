@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 import json
 import os
@@ -110,51 +109,6 @@ def ensure_network(name: str = WORKER_NETWORK) -> None:
     if "already exists" in detail:
         return
     raise RuntimeError(f"docker network create failed for {name}: {_result_detail(created)}")
-
-
-def build_worker_image(
-    *,
-    context_dir: Path | None = None,
-    tag: str = WORKER_IMAGE,
-    progress: Callable[[str], None] | None = None,
-) -> None:
-    """Build the disposable worker image, streaming docker build output."""
-    context = _default_context_dir() if context_dir is None else Path(context_dir).expanduser().resolve()
-    if not context.is_dir():
-        raise RuntimeError(f"docker worker context does not exist: {context}")
-
-    cmd = ["docker", "build", "-t", tag, str(context)]
-    _emit(progress, f"PROGRESS docker-build start tag={tag} context={context}")
-
-    tail: deque[str] = deque(maxlen=120)
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("docker CLI not found in PATH") from exc
-    except Exception as exc:  # noqa: BLE001 - include full failure detail.
-        raise RuntimeError(f"docker build launch failed for {tag}: {exc}") from exc
-
-    assert proc.stdout is not None
-    for raw_line in proc.stdout:
-        line = raw_line.rstrip("\n")
-        if not line:
-            continue
-        tail.append(line)
-        _emit(progress, f"PROGRESS docker-build line={line}")
-    proc.stdout.close()
-
-    rc = proc.wait()
-    if rc != 0:
-        detail = " | ".join(tail) if tail else "no docker build output captured"
-        raise RuntimeError(f"docker build failed tag={tag} context={context} rc={rc} detail={detail}")
-
-    _emit(progress, f"PROGRESS docker-build complete tag={tag} context={context}")
 
 
 @dataclass

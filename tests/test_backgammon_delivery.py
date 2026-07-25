@@ -134,6 +134,52 @@ def test_scan_injected_block_chars_returns_none_when_log_missing_or_without_inje
     assert _scan_injected_block_chars(no_inject) is None
 
 
+def test_scan_cell_delivery_with_additive_cadence_fields(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=2 block_chars=2400 cadence=once block_tokens=600 top_k=5 sid=s1 newly_served=2 injected_once=5 budget_remaining=7000\n",
+    )
+
+    assert _scan_cell_delivery(worktree) == "YES"
+
+
+def test_scan_injected_block_chars_with_additive_cadence_fields(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=2 block_chars=2400 cadence=once block_tokens=600 top_k=5 sid=s1 newly_served=2 injected_once=5 budget_remaining=7000\n",
+    )
+
+    assert _scan_injected_block_chars(worktree) == 2400
+
+
+def test_restore_lines_are_not_counted_as_injections(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] injected count=1 block_chars=1200 sid=s1 newly_served=1 injected_once=1 budget_remaining=7800 cadence=once\n"
+        "[inject] restored count=2 block_chars=2400 sid=s1 cadence=once compaction_restores=1\n",
+    )
+
+    assert _scan_cell_delivery(worktree) == "YES"
+    assert _scan_injected_block_chars(worktree) == 1200
+
+
+def test_restore_only_log_is_not_an_injection(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "[inject] restored count=2 block_chars=2400 sid=s1 cadence=once compaction_restores=1\n",
+    )
+
+    assert _scan_cell_delivery(worktree) is None
+
+
 def test_run_cell_impl_sets_delivery_yes_when_memory_on_and_inject_log_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

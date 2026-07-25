@@ -110,6 +110,7 @@ Creates the disposable worker image; no secrets are baked. Network `wevibe-bench
 docker image inspect wevibe-bench-worker:v1 --format '{{.Size}}'
 python -m pytest tests/test_docker_isolation.py -q
 python scripts/docker_isolation_smoke.py
+# If venv is not active: PYTHONPATH=. python scripts/docker_isolation_smoke.py
 ```
 `tests/test_docker_isolation.py` checks isolation + wiring. `scripts/docker_isolation_smoke.py` is the local synthetic
 smoke proving oracle/golden/runner/host paths are absent inside the container and exported `/work` edits are scored
