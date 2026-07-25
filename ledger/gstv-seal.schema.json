@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wevibe.dev/schemas/gstv-seal.schema.json",
+  "title": "WeVibe GSTV Goal Seal",
+  "description": "Goal seal schema (WP-DESIGN-SPEC CODE 7).",
+  "type": "object",
+  "required": [
+    "goal_id",
+    "goal_text_hash",
+    "predicate_hash",
+    "state0_hash",
+    "repo_binding",
+    "sealed_at",
+    "contributor_sig",
+    "chain_anchor",
+    "state_alg"
+  ],
+  "properties": {
+    "goal_id": {
+      "type": "string",
+      "pattern": "^gstv-[0-9a-f]{16}$"
+    },
+    "goal_text_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "predicate_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256(test command ‖ test file contents) — contents-hashing the test files is the anti-goalpost mechanism, D-GSTV-PREDICATE-DEFAULT."
+    },
+    "state0_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "repo_binding": {
+      "type": "string",
+      "description": "Repository binding reference to the .wevibe/org.json marker."
+    },
+    "sealed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "LOCAL signed timestamp in MVP."
+    },
+    "contributor_sig": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$",
+      "description": "Hex Ed25519 signature."
+    },
+    "chain_anchor": {
+      "const": null,
+      "description": "Always UNSET in MVP; x/attestation is parked."
+    },
+    "state_alg": {
+      "const": "walk-v1"
+    }
+  },
+  "additionalProperties": false
+}

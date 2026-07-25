@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "description": "Machine-readable catalog of GSTV ops events emitted via logOp ops-log surface (logfmt lines at <logDir>/ops/<op>-<YYYYMMDD>.log); fingerprints are first-8-hex sha256 and never raw keys/secrets.",
+  "ops": [
+    {
+      "op": "gstv.seal",
+      "level": "info",
+      "description": "Emitted when a goal seal is computed and signed.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "goal_text_fp",
+        "predicate_fp",
+        "state0_fp",
+        "repo_fp",
+        "seal_fp",
+        "ed_pub_fp",
+        "sig_fp",
+        "status",
+        "dur_ms"
+      ]
+    },
+    {
+      "op": "gstv.attach",
+      "description": "Emitted for attach attempts against an existing trajectory head.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "match",
+        "head_fp",
+        "state_fp",
+        "status"
+      ]
+    },
+    {
+      "op": "gstv.chain.link",
+      "description": "Emitted for each appended trajectory chain link.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "index",
+        "kind",
+        "cause",
+        "state_fp",
+        "diff_fp",
+        "link_fp",
+        "prev_fp",
+        "status"
+      ]
+    },
+    {
+      "op": "gstv.gap",
+      "description": "Emitted when a chain gap is detected and recorded.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "detector",
+        "path",
+        "index",
+        "link_fp",
+        "status"
+      ]
+    },
+    {
+      "op": "gstv.predicate.observe",
+      "description": "Emitted for each predicate observation run during goal pursuit.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "source",
+        "exit",
+        "state_fp",
+        "env_fp",
+        "testfile_match",
+        "status"
+      ]
+    },
+    {
+      "op": "gstv.goal.close",
+      "description": "Emitted when a goal is closed with aggregate trajectory stats; attempts_to_green is count of predicate observations up to and including the closing green.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "attempts_to_green",
+        "sessions",
+        "links",
+        "gaps",
+        "red_boundaries",
+        "status",
+        "dur_ms"
+      ]
+    }
+  ]
+}

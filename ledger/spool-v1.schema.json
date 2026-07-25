@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wevibe.dev/schemas/spool-v1.schema.json",
+  "title": "WeVibe SPOOL-V1",
+  "type": "object",
+  "required": [
+    "v",
+    "seq",
+    "ts",
+    "session_id",
+    "trace_id",
+    "event",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "const": "spool-v1"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "trace_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "session.created",
+        "session.idle",
+        "session.error",
+        "tool.execute.before",
+        "tool.execute.after",
+        "file.edited",
+        "file.watcher.updated",
+        "lsp.client.diagnostics",
+        "command.executed",
+        "gstv.attach.attempt",
+        "gstv.boundary.run"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "session.created"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "repo_root": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "session.idle"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "session.error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "tool.execute.before"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "call_id",
+              "tool"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "tool.execute.after"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "call_id",
+              "tool"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer"
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "output_excerpt": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Excerpt is truncated at 2048 chars by the producer; truncation is marked by the producer."
+              },
+              "error_excerpt": {
+                "type": "string",
+                "maxLength": 2048,
+                "description": "Excerpt is truncated at 2048 chars by the producer; truncation is marked by the producer."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "file.edited"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "file.watcher.updated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "lsp.client.diagnostics"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "path",
+              "diagnostics"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "diagnostics": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "command.executed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "command"
+            ],
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "gstv.attach.attempt"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "goal_id"
+            ],
+            "properties": {
+              "goal_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "gstv.boundary.run"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "goal_id",
+              "command",
+              "exit_code",
+              "duration_ms"
+            ],
+            "properties": {
+              "goal_id": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "exit_code": {
+                "type": "integer"
+              },
+              "duration_ms": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ]
+}

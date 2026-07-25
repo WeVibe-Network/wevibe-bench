@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wevibe.dev/schemas/gstv-chain-link.schema.json",
+  "title": "WeVibe GSTV Trajectory Chain Link",
+  "description": "Trajectory chain link schema (D-GSTV-CHAIN-PRIMITIVE). Genesis link prev equals the seal state0_hash.",
+  "type": "object",
+  "required": [
+    "v",
+    "index",
+    "prev",
+    "state_hash",
+    "diff_hash",
+    "ts",
+    "session_id",
+    "cause",
+    "kind",
+    "state_alg",
+    "link_hash"
+  ],
+  "properties": {
+    "v": {
+      "const": "gstv-chain-v1"
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "prev": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Hash of previous link; for genesis this equals the goal seal state0_hash."
+    },
+    "state_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "diff_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "cause": {
+      "type": "string",
+      "description": "A tool_call_id string OR one of the literals external|attach|boundary."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "state",
+        "gap"
+      ]
+    },
+    "state_alg": {
+      "const": "walk-v1"
+    },
+    "link_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "link_i = sha256(prev ‖ state_hash ‖ diff_hash ‖ ts ‖ session_id ‖ cause), newline-separated UTF-8 preimage."
+    },
+    "detector": {
+      "type": "string",
+      "enum": [
+        "watcher",
+        "attach_mismatch"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "gap"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "detector"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "detector"
+          ]
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}
