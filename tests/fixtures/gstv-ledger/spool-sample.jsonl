@@ -1,0 +1,4 @@
+{"v":"spool-v1","seq":1,"ts":"2026-07-25T18:54:35.253Z","session_id":"s1","trace_id":"t1","event":"session.created","payload":{"directory":"/repo"}}
+{"v":"spool-v1","seq":2,"ts":"2026-07-25T18:54:35.353Z","session_id":"s1","trace_id":"t1","event":"tool.execute.before","payload":{"call_id":"c1","tool":"edit"}}
+{"v":"spool-v1","seq":3,"ts":"2026-07-25T18:54:35.453Z","session_id":"s1","trace_id":"t1","event":"tool.execute.after","payload":{"call_id":"c1","tool":"edit"}}
+{"v":"spool-v1","seq":4,"ts":"2026-07-25T18:54:35.553Z","session_id":"s1","trace_id":"t1","event":"session.error","payload":

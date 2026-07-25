@@ -1,0 +1,3 @@
+2026-07-25T18:55:00.001Z [INFO] trace=tr-1 verify candidate hash {"candidate_hash":"h1","decision":"verify"}
+garbage leader line
+2026-07-25T18:55:01.001Z [WARN] trace=tr-2 deny commit due_policy {"candidate_hash":"h2","decision":"deny"}

@@ -1,0 +1,4 @@
+2026-07-26T12:00:03.000Z INFO trace=tr-full-1 op=http.request method=POST url=/v1/serves status=200
+2026-07-26T12:00:03.010Z WARN trace=tr-full-1 [serve] receipt failed status=400 reason=vector_only cid_fp=abc123ef
+2026-07-26T12:00:03.020Z INFO trace=tr-full-1 [inject] count=1 block_chars=100 cid_fp=abc123ef
+2026-07-26T12:00:03.030Z INFO trace=tr-full-1 [inject] count=1 block_chars=200 cid_fp=deadbeef

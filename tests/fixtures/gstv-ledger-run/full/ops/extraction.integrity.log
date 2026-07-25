@@ -1,0 +1,1 @@
+2026-07-26T12:00:01.000Z INFO op=extraction.integrity trace=tr-full-1 phase=final job_id=job-1 outcome=completed resolved_problem_count=1 unresolved_problem_count=0 coincidental_count=0 emitted_memory_count=2 invariant_violation=false candidate_hash=cand1111 committed_cid=abc123ef

@@ -1,0 +1,2 @@
+2026-07-26T13:00:00.000Z INFO op=gstv.seal trace=tr-sparse-1 session_id=s-2 goal_id=goal-s seal_fp=seal9999 status=ok
+2026-07-26T13:00:00.100Z INFO op=episode.open trace=tr-sparse-1 session_id=s-2 episode_id=ep-s signal_key=sparse/key signal_key_mode=raw source=ops status=ok

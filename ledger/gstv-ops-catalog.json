@@ -95,6 +95,98 @@
         "status",
         "dur_ms"
       ]
+    },
+    {
+      "op": "episode.open",
+      "description": "Emitted when a GSTV episode opens from a signal source.",
+      "fields": [
+        "trace",
+        "session_id",
+        "episode_id",
+        "signal_key",
+        "signal_key_mode",
+        "source",
+        "status"
+      ]
+    },
+    {
+      "op": "episode.close",
+      "description": "Emitted when a GSTV episode closes with outcome and attempt diff summary.",
+      "fields": [
+        "trace",
+        "session_id",
+        "episode_id",
+        "signal_key",
+        "outcome",
+        "attempt_diff_fp",
+        "edits",
+        "coincidental_flip",
+        "status"
+      ]
+    },
+    {
+      "op": "gstv.extraction.unlock",
+      "description": "Emitted when extraction unlock criteria are satisfied with aggregate counters.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "links",
+        "gaps",
+        "episodes",
+        "receipts_predicate",
+        "receipts_negative",
+        "attempts_to_green",
+        "sessions",
+        "red_boundaries",
+        "unlock_fp",
+        "status"
+      ]
+    },
+    {
+      "op": "predicate.receipt",
+      "description": "Emitted when a predicate receipt is produced for a goal attempt.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "exit",
+        "env_fp",
+        "chain_head_fp",
+        "receipt_fp",
+        "sig_fp",
+        "status"
+      ]
+    },
+    {
+      "op": "negative.receipt",
+      "description": "Emitted when a negative receipt cites non-matching trajectory state.",
+      "fields": [
+        "trace",
+        "session_id",
+        "goal_id",
+        "cited_state_fp",
+        "receipt_fp",
+        "sig_fp",
+        "status"
+      ]
+    },
+    {
+      "op": "gstv.run_summary",
+      "description": "Emitted with run-level GSTV counters after processing completes.",
+      "fields": [
+        "trace",
+        "run_id",
+        "goals",
+        "episodes_open",
+        "episodes_closed",
+        "coincidental",
+        "receipts_predicate",
+        "receipts_negative",
+        "unattributed_vector_only",
+        "signal_key_mode",
+        "status"
+      ]
     }
   ]
 }

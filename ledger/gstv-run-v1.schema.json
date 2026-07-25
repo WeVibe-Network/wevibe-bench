@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wevibe.dev/schemas/gstv-run-v1.schema.json",
+  "title": "WeVibe GSTV Run Ledger",
+  "description": "One-stop GSTV run ledger derivable from logs alone. Honest absence is fail-closed: missing/invalid inputs are disclosed in integrity.gaps_disclosed and represented as zero/null/empty values, never inferred.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "run_id",
+    "generated_at",
+    "ledger_source",
+    "signal_key_mode",
+    "goals",
+    "problems",
+    "cadence",
+    "extraction",
+    "utilization_proxy",
+    "integrity"
+  ],
+  "properties": {
+    "v": {
+      "const": "gstv-run-v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "Generator timestamp in ISO-8601 form."
+    },
+    "ledger_source": {
+      "const": "logs-only"
+    },
+    "signal_key_mode": {
+      "type": "string",
+      "enum": [
+        "parsed",
+        "raw",
+        "mixed",
+        "absent"
+      ],
+      "description": "Run-level signal-key materialization mode as observed from logs; absent means no trustworthy source was present."
+    },
+    "goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "goal_id",
+          "seal_fp",
+          "closed",
+          "attempts_to_green",
+          "sessions",
+          "links",
+          "gaps",
+          "red_boundaries",
+          "receipts",
+          "unlock_fp",
+          "signal_key_mode"
+        ],
+        "properties": {
+          "goal_id": {
+            "type": "string"
+          },
+          "seal_fp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "closed": {
+            "type": "boolean"
+          },
+          "attempts_to_green": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sessions": {
+            "type": "integer"
+          },
+          "links": {
+            "type": "integer"
+          },
+          "gaps": {
+            "type": "integer"
+          },
+          "red_boundaries": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "receipts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "predicate_fps",
+              "negative_fps"
+            ],
+            "properties": {
+              "predicate_fps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "negative_fps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "unlock_fp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signal_key_mode": {
+            "type": "string",
+            "enum": [
+              "parsed",
+              "raw",
+              "mixed",
+              "absent"
+            ],
+            "description": "Goal-scoped mode. Honest absence uses absent rather than inferred values."
+          }
+        }
+      }
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "signal_key",
+          "episode_id",
+          "attempt_diff_fp",
+          "candidate_hash",
+          "leader_decision",
+          "committed_cid",
+          "injected_memory_overlap"
+        ],
+        "properties": {
+          "signal_key": {
+            "type": "string"
+          },
+          "episode_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attempt_diff_fp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "candidate_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "leader_decision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed_cid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "injected_memory_overlap": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "cadence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recalls",
+        "gate_events",
+        "injections",
+        "serves",
+        "unattributed_vector_only",
+        "basis"
+      ],
+      "properties": {
+        "recalls": {
+          "type": "integer"
+        },
+        "gate_events": {
+          "type": "integer"
+        },
+        "injections": {
+          "type": "integer"
+        },
+        "serves": {
+          "type": "integer"
+        },
+        "unattributed_vector_only": {
+          "type": "integer"
+        },
+        "basis": {
+          "type": "string",
+          "description": "Disclosure string naming exactly what counters were observed in source logs."
+        }
+      }
+    },
+    "extraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolved",
+        "emitted",
+        "empty_reason",
+        "invariant_violation"
+      ],
+      "properties": {
+        "resolved": {
+          "type": "integer"
+        },
+        "emitted": {
+          "type": "integer"
+        },
+        "empty_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invariant_violation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "utilization_proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "pairs"
+      ],
+      "properties": {
+        "label": {
+          "const": "proxy-not-scoreboard"
+        },
+        "pairs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "memory_fp",
+              "attempt_diff_fp",
+              "similarity"
+            ],
+            "properties": {
+              "memory_fp": {
+                "type": "string"
+              },
+              "attempt_diff_fp": {
+                "type": "string"
+              },
+              "similarity": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ledger_source",
+        "gaps_disclosed",
+        "ops_coverage"
+      ],
+      "properties": {
+        "ledger_source": {
+          "const": "logs-only"
+        },
+        "gaps_disclosed": {
+          "type": "array",
+          "description": "Named absences and parse gaps. Honest absence requires explicit disclosure when source data is missing or invalid.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ops_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "present",
+            "absent"
+          ],
+          "properties": {
+            "present": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "absent": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

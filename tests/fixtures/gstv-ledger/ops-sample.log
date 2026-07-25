@@ -1,0 +1,4 @@
+2026-07-25T18:54:35.253Z INFO op=episode.open trace=t1 session_id=s1 episode_id=ep-1 signal_key=sig/A signal_key_mode=parsed source=serve status=ok
+2026-07-25T18:54:35.400Z INFO op=gstv.goal.close trace=t1 session_id=s1 goal_id=goal-1 attempts_to_green=3 sessions=1 links=4 gaps=1 red_boundaries=1 status=ok dur_ms=155
+this line is malformed and should be skipped
+2026-07-25T18:54:35.600Z WARN op=episode.close trace=t1 session_id=s1 episode_id=ep-1 signal_key=sig/A outcome=green attempt_diff_fp=adf12345 edits=2 coincidental_flip=false status=ok

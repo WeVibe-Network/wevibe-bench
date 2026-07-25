@@ -1,0 +1,2 @@
+2026-07-25T18:54:36.001Z INFO op=extraction.integrity trace=t2 phase=terminal job_id=job-1 session_fp=abc123ef outcome=completed resolved_problem_count=2 unresolved_problem_count=1 coincidental_count=0 emitted_memory_count=2 invariant_violation=false episode_metadata=available
+2026-07-25T18:54:36.101Z ERROR op=extraction.integrity trace=t2 phase=terminal job_id=job-2 session_fp=ff0011aa outcome=failed empty_reason=tool_error invariant_violation=true

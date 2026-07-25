@@ -1,0 +1,4 @@
+2026-07-25T18:56:00.001Z INFO [serve] receipt failed status=400 reason=bad_request cid_fp=ABCDEF12
+2026-07-25T18:56:00.002Z INFO op=http.request trace=t3 url=/v1/serves status=200 dur_ms=5
+2026-07-25T18:56:00.003Z INFO [inject] trace=t3 count=2 block_chars=1200
+2026-07-25T18:56:00.004Z INFO [inject] trace=t3 count=1 block_chars=500

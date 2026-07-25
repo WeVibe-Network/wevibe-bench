@@ -1,0 +1,10 @@
+2026-07-26T12:00:00.000Z INFO op=gstv.seal trace=tr-full-1 session_id=s-1 goal_id=goal-1 seal_fp=seal1111 status=ok
+2026-07-26T12:00:00.100Z INFO op=gstv.attach trace=tr-full-1 session_id=s-1 goal_id=goal-1 match=true status=ok
+2026-07-26T12:00:00.200Z INFO op=gstv.chain.link trace=tr-full-1 session_id=s-1 goal_id=goal-1 index=1 kind=edit status=ok
+2026-07-26T12:00:00.300Z INFO op=gstv.chain.link trace=tr-full-1 session_id=s-1 goal_id=goal-1 index=2 kind=edit status=ok
+2026-07-26T12:00:00.400Z INFO op=gstv.predicate.observe trace=tr-full-1 session_id=s-1 goal_id=goal-1 exit=red status=ok
+2026-07-26T12:00:00.500Z INFO op=episode.open trace=tr-full-1 session_id=s-1 episode_id=ep-1 signal_key=sig/key signal_key_mode=parsed source=ops status=ok
+2026-07-26T12:00:00.600Z INFO op=episode.close trace=tr-full-1 session_id=s-1 episode_id=ep-1 signal_key=sig/key outcome=resolved attempt_diff_fp=adiff123 coincidental_flip=false status=ok
+2026-07-26T12:00:00.700Z INFO op=predicate.receipt trace=tr-full-1 session_id=s-1 goal_id=goal-1 receipt_fp=pred1111 status=ok
+2026-07-26T12:00:00.800Z INFO op=gstv.goal.close trace=tr-full-1 session_id=s-1 goal_id=goal-1 attempts_to_green=1 sessions=1 links=2 gaps=0 red_boundaries=1 status=ok
+2026-07-26T12:00:00.900Z INFO op=gstv.extraction.unlock trace=tr-full-1 session_id=s-1 goal_id=goal-1 links=2 gaps=0 episodes=1 receipts_predicate=1 receipts_negative=0 attempts_to_green=1 sessions=1 red_boundaries=1 unlock_fp=unlock111 status=ok
