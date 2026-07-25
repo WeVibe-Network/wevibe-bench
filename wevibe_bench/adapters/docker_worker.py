@@ -566,10 +566,6 @@ def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     progress(message)
 
 
-def _default_context_dir() -> Path:
-    return (Path(__file__).resolve().parents[2] / "docker" / "worker").resolve()
-
-
 def _build_run_argv(
     *,
     config: DockerCellConfig,

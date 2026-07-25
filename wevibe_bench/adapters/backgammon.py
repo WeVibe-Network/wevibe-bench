@@ -29,7 +29,7 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
-from wevibe_bench.adapters.aider_polyglot import _format_memory
+from wevibe_bench.adapters._memory_format import _format_memory
 from wevibe_bench.adapters.cheat_detector import (
     build_oracle_markers,
     scan_events_for_oracle_access,

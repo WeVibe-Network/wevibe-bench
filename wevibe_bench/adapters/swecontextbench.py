@@ -31,7 +31,7 @@ from minisweagent.environments.docker import DockerEnvironment
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models import get_model
 
-from wevibe_bench.adapters.aider_polyglot import _format_memory
+from wevibe_bench.adapters._memory_format import _format_memory
 from wevibe_bench.backends.base import NeedCard, RecalledMemory
 from wevibe_bench.runner import AgentRunner, TaskOutcome
 

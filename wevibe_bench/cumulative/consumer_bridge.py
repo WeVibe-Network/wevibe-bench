@@ -22,6 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from ._validation import _require_non_empty_string
 from .bridge_state import (
     BridgeDaemonState,
     DeliveredDecision,
@@ -45,12 +46,6 @@ MANIFEST_SUFFIX = ".consumer-manifest.json"
 DEFAULT_POLL_INTERVAL_MS = 1_000
 DEFAULT_HEARTBEAT_CADENCE_MS = 5_000
 DEFAULT_LEASE_TTL_MS = 120_000
-
-
-def _require_non_empty_string(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} is required")
-    return value.strip()
 
 
 def _require_positive_int(value: Any, *, field_name: str) -> int:

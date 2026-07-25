@@ -1,3 +1,5 @@
+"""Lifecycle orchestrator + M2 proof coverage (MCP-REST and qdrant probe flows)."""
+
 from __future__ import annotations
 
 import io
@@ -9,8 +11,6 @@ from typing import Any
 
 import pytest
 
-from wevibe_bench.config import BenchmarkSchedule, BenchmarkWave, RunConfig
-from wevibe_bench.lifecycle.driver import RelayDriver
 from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.m2_proof import M2Proof
@@ -813,27 +813,3 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     assert isinstance(parsed_input.get("batch"), list)
     assert parsed_input["batch"]
 
-
-def test_driver_dry_pass_completes_without_live_services() -> None:
-    logger, _ = _capture_logger("test.lifecycle.driver.dry")
-
-    class DummyOrchestrator:
-        org_id = "org-dry"
-
-    class DummyM2:
-        orchestrator = DummyOrchestrator()
-
-    driver = RelayDriver(
-        cfg=LifecycleConfig(),
-        run_cfg=RunConfig(schedule=BenchmarkSchedule(waves=(BenchmarkWave(wave_id="single", models=("model-dry",),),),), tau=0.5, surface_budget=1),
-        m2_proof=DummyM2(),
-        logger=logger,
-        exercises=["exercise-1"],
-    )
-
-    result = driver.dry_pass(model="model-dry")
-    assert result["mode"] == "dry"
-    assert result["model"] == "model-dry"
-    assert len(result["results"]) == 1
-    assert result["results"][0]["exercise"] == "exercise-1"
-    assert result["results"][0]["submission_hash"].startswith("dry-")

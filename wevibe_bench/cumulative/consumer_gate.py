@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from ._validation import _require_non_empty_string
 from .consumer_decision import (
     CONSUMER_DECISION_SCHEMA_VERSION,
     VALID_FATES,
@@ -39,12 +40,6 @@ HEARTBEAT_FILENAME = "wevibe-tui-active.json"
 # heartbeat seam files. Any attempt to write other files (AGENTS/context/etc.)
 # is a correctness violation.
 _ALLOWED_WRITE_FILENAMES = frozenset({DECISIONS_FILENAME, HEARTBEAT_FILENAME})
-
-
-def _require_non_empty_string(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} is required")
-    return value.strip()
 
 
 def _read_json_file(path: Path, *, default: Any) -> Any:

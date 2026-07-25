@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from ._validation import _require_non_empty_string
+
 CONSUMER_DECISION_SCHEMA_VERSION = 1
 
 VALID_FATES = frozenset({"accept", "deny", "block", "report"})
@@ -20,12 +22,6 @@ def _required_key(mapping: Mapping[str, Any], *, field_name: str) -> Any:
     if field_name not in mapping:
         raise ValueError(f"missing required field: {field_name}")
     return mapping[field_name]
-
-
-def _require_non_empty_string(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} is required")
-    return value.strip()
 
 
 def _require_int(value: Any, *, field_name: str) -> int:

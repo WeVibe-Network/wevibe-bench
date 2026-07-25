@@ -22,6 +22,8 @@ import logging
 import os
 from typing import Any, Mapping
 
+from ._validation import _optional_str as _shared_optional_str
+from ._validation import _require_non_empty_string as _shared_require_non_empty_string
 from .catalog import (
     CatalogRecord,
     PrivateCatalog,
@@ -126,16 +128,11 @@ class LeaderClient:
 
     @staticmethod
     def _optional_str(value: Any) -> str | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text if text else None
+        return _shared_optional_str(value)
 
     @staticmethod
     def _require_non_empty_string(value: Any, *, field_name: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{field_name} is required")
-        return value.strip()
+        return _shared_require_non_empty_string(value, field_name=field_name)
 
     @classmethod
     def _normalize_file_path(

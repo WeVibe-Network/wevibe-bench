@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from ._validation import _optional_str, _require_non_empty_string
 from .types import CUMULATIVE_SCHEMA_VERSION, SessionRecord
 
 VERIFY = "verify"
@@ -23,13 +24,6 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text if text else None
-
-
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -40,12 +34,6 @@ def _dict_value(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return dict(value)
-
-
-def _require_non_empty_string(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} is required")
-    return value.strip()
 
 
 def _require_int(value: Any, *, field_name: str) -> int:

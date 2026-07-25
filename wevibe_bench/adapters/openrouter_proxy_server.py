@@ -23,6 +23,8 @@ import uuid
 from typing import Any, Callable, Iterable, NamedTuple
 
 from wevibe_bench.adapters.openrouter_proxy import (
+    _as_int,
+    _is_number,
     BudgetExceededError,
     BudgetLedger,
     CredentialError,
@@ -136,16 +138,6 @@ def urllib_upstream_transport(
             body=error_payload,
             stream_lines=None,
         )
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _as_int(value: Any) -> int:
-    if _is_number(value):
-        return int(value)
-    return 0
 
 
 def _as_float_or_none(value: Any) -> float | None:

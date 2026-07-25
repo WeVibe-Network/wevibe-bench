@@ -11,6 +11,7 @@ import tempfile
 import time
 from typing import Any, Mapping
 
+from ._validation import _require_non_empty_string
 from .consumer_decision import ConflictError as ConsumerConflictError
 
 BRIDGE_STATE_SCHEMA_VERSION = 1
@@ -26,12 +27,6 @@ _PLUGIN_OUTCOME_REF_BUCKETS = (
     "nonaccept_leaked",
     "side_effect_timeouts",
 )
-
-
-def _require_non_empty_string(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} is required")
-    return value.strip()
 
 
 def _optional_non_empty_string(value: Any, *, field_name: str) -> str | None:

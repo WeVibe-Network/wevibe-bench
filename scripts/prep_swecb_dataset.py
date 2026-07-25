@@ -22,8 +22,6 @@ DEFAULT_EXPERIENCE_DIR = Path(
 ).expanduser()
 DEFAULT_OUTPUT_DIR = Path("~/Desktop/benchmark/datasets/swecontextbench").expanduser()
 DEFAULT_HF_LOCAL_DIR = DEFAULT_OUTPUT_DIR / "hf"
-DEFAULT_REL_PARQUET = DEFAULT_HF_LOCAL_DIR / "data" / "SWEContextBench_Relationship.parquet"
-
 TOPIC = "swecontextbench-experience"
 
 # Hub rejects memory plaintext over ~2000 UTF-8 bytes; cap with margin.
