@@ -149,9 +149,10 @@ class CatalogRecord:
     committing_identity: str = ""
     content_hash: str = ""
     committed_at: str = ""
+    producer_model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "submission_hash": self.submission_hash,
             "committed_id": self.committed_id,
             "keywords": list(self.keywords),
@@ -162,6 +163,9 @@ class CatalogRecord:
             "content_hash": self.content_hash,
             "committed_at": self.committed_at,
         }
+        if self.producer_model is not None:
+            payload["producer_model"] = self.producer_model
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CatalogRecord:
@@ -191,6 +195,7 @@ class CatalogRecord:
                 data.get("committed_at"),
                 field_name="committed_at",
             ),
+            producer_model=_optional_str(data.get("producer_model")),
         )
 
 
@@ -235,6 +240,7 @@ def redacted_candidate_ref(candidate: Mapping[str, Any]) -> dict[str, Any]:
         "submission_hash": submission_hash,
         "keywords": _candidate_keywords(candidate_map),
         "memory_type": _optional_str(candidate_map.get("memory_type")),
+        "producer_model": _optional_str(candidate_map.get("producer_model")),
         "content_hash": _sha256_text(candidate_text),
     }
 
@@ -377,6 +383,7 @@ class PrivateCatalog:
         committed_id: str,
         comparison_text: str,
         committing_identity: str,
+        producer_model: str | None = None,
     ) -> CatalogRecord:
         if not isinstance(session, SessionRecord):
             raise ValueError("session must be a SessionRecord")
@@ -425,6 +432,7 @@ class PrivateCatalog:
             ),
             content_hash=_sha256_text(comparison_text_value),
             committed_at=_utc_now_iso(),
+            producer_model=_optional_str(producer_model),
         )
         self.append(record)
         return record

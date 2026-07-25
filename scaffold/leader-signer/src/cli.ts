@@ -92,7 +92,7 @@ function usage(): string {
     '  wallet-address [--seed-hex <hex>]',
     '  register-org --org-name <s> --domain <s> [--description <s>] [--tech-stack <s>] [--focus-areas <s>] [--fund-amount <uvibe>] [--seed-hex <hex>]',
     '  add-member --org-id <id> --member-pubkey <hex> --x25519 <hex> [--role <s>] [--can-contribute <bool>] [--can-moderate <bool>] [--seed-hex <hex>]',
-    '  commit-batch --org-id <id> [--seed-hex <hex>]   (reads JSON from stdin)',
+    '  commit-batch --org-id <id> [--producer-model-id <slug>] [--seed-hex <hex>]   (reads JSON from stdin)',
   ].join('\n');
 }
 
@@ -900,6 +900,7 @@ async function runCommitBatch(flags: CliFlags, logger: CommandLogger): Promise<R
   const seedHex = getSeedHex(flags);
   const seedFp = getSeedFingerprint(seedHex);
   const orgId = getRequiredFlag(flags, 'org-id');
+  const producerModelId = flags['producer-model-id']?.trim();
   const chainRpc = envOrDefault('WEVIBE_CHAIN_RPC', DEFAULT_CHAIN_RPC);
   process.env.WEVIBE_CHAIN_RPC = chainRpc;
 
@@ -907,6 +908,7 @@ async function runCommitBatch(flags: CliFlags, logger: CommandLogger): Promise<R
   await logger.progress('commit-batch: parsed stdin batch', {
     seed_fp: seedFp,
     org_id: orgId,
+    producer_model_id: producerModelId || null,
     entry_count: entries.length,
     chain_rpc: chainRpc,
   });
@@ -939,6 +941,7 @@ async function runCommitBatch(flags: CliFlags, logger: CommandLogger): Promise<R
       entry.contributor_wallet,
       entry.memory_type,
       entry.mc_version,
+      producerModelId,
     );
 
     const approveMsg = buildApproveMemoryMsg(

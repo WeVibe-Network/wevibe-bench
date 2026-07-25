@@ -548,7 +548,12 @@ class M2Proof:
                         return True
         return False
 
-    def _commit_batch(self, org_id: str, batch_payload: Any) -> dict[str, Any]:
+    def _commit_batch(
+        self,
+        org_id: str,
+        batch_payload: Any,
+        producer_model_id: str,
+    ) -> dict[str, Any]:
         if not isinstance(batch_payload, dict):
             raise RuntimeError(f"batch_submit expected object payload, got: {batch_payload}")
 
@@ -560,9 +565,21 @@ class M2Proof:
         t0 = time.perf_counter_ns()
         self._log("info", "lifecycle.m2.commit_batch", trace, "ok", 0, phase="start", org_id=org_id)
 
+        producer_model_id_value = str(producer_model_id or "").strip()
+        if not producer_model_id_value:
+            raise RuntimeError("producer_model_id is required for commit provenance")
+
         signer_dir = os.path.expanduser(self._cfg.leader_signer_dir)
         signer_cli = os.path.join(signer_dir, "dist", "cli.js")
-        cmd = ["node", signer_cli, "commit-batch", "--org-id", org_id]
+        cmd = [
+            "node",
+            signer_cli,
+            "commit-batch",
+            "--org-id",
+            org_id,
+            "--producer-model-id",
+            producer_model_id_value,
+        ]
         env = dict(os.environ)
         env.update(
             {
@@ -617,11 +634,18 @@ class M2Proof:
             int(dur_ms),
             org_id=org_id,
             tx_hash=tx_hash,
+            producer_model_id=producer_model_id_value,
             msg_count=response.get("msg_count"),
         )
         return response
 
-    def leader_verify_and_commit(self, org_id: str, submission_hash: str, keywords: list[str]) -> dict[str, Any]:
+    def leader_verify_and_commit(
+        self,
+        org_id: str,
+        submission_hash: str,
+        keywords: list[str],
+        producer_model_id: str | None = None,
+    ) -> dict[str, Any]:
         hops: list[str] = []
         precheck_payload = self._hop(
             hops,
@@ -707,6 +731,11 @@ class M2Proof:
             lambda: self._hub_client.verify_keywords(self._leader, org_id, entries=[verify_entry]),
         )
         self._require_hub_passed_result(verify_payload, submission_hash, "verify_keywords")
+        producer_model_id_value = str(producer_model_id or "").strip()
+        if not producer_model_id_value:
+            raise RuntimeError(
+                "leader_verify_and_commit requires producer_model_id for provenance stamping"
+            )
         batch_payload = self._hop(
             hops,
             "batch_submit",
@@ -715,7 +744,7 @@ class M2Proof:
         commit_batch_payload = self._hop(
             hops,
             "commit_batch",
-            lambda: self._commit_batch(org_id, batch_payload),
+            lambda: self._commit_batch(org_id, batch_payload, producer_model_id_value),
         )
 
         deadline = time.time() + 30
@@ -927,7 +956,12 @@ class M2Proof:
             org_id=org_id,
         )
         submission_hash = self.submit_memory(org_id, memory)
-        verify_commit = self.leader_verify_and_commit(org_id, submission_hash, memory["keywords"])
+        verify_commit = self.leader_verify_and_commit(
+            org_id,
+            submission_hash,
+            memory["keywords"],
+            producer_model_id=str(model).strip(),
+        )
 
         qdrant_after = self._snapshot_fn(self._qdrant_url)
         qdrant_delta = self._qdrant_delta(org_id, qdrant_before, qdrant_after)

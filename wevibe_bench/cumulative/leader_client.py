@@ -731,6 +731,7 @@ class LeaderClient:
                     org_id,
                     submission_hash,
                     keywords,
+                    producer_model_id=self._optional_str(session_candidate.get("producer_model")),
                 )
                 committed_id, commit_status, payload_committing_identity = self._extract_commit_outcome(
                     verify_payload,
@@ -744,6 +745,7 @@ class LeaderClient:
                     committed_id,
                     comparison_text,
                     committing_identity=committing_identity,
+                    producer_model=self._optional_str(session_candidate.get("producer_model")),
                 )
 
                 self._append_verify_ledger_entry(

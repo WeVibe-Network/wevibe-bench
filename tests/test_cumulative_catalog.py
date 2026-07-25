@@ -26,6 +26,7 @@ def _record(
     org_id: str,
     sequence_index: int,
     committing_identity: str,
+    producer_model: str | None = None,
 ) -> CatalogRecord:
     return CatalogRecord(
         submission_hash=submission_hash,
@@ -37,6 +38,7 @@ def _record(
         committing_identity=committing_identity,
         content_hash=_sha256_text(text),
         committed_at="2026-07-23T12:00:00Z",
+        producer_model=producer_model,
     )
 
 
@@ -61,6 +63,7 @@ def test_private_catalog_creates_0600_and_load_round_trip(tmp_path) -> None:
         org_id="org-catalog",
         sequence_index=1,
         committing_identity="leader-a",
+        producer_model="tencent/hy3",
     )
 
     catalog.append(first)
@@ -69,6 +72,23 @@ def test_private_catalog_creates_0600_and_load_round_trip(tmp_path) -> None:
 
     catalog.append(second)
     assert catalog.load() == [first, second]
+
+
+def test_catalog_record_dict_round_trip_without_producer_model_key() -> None:
+    record = _record(
+        submission_hash="sub-no-model",
+        committed_id="cid-no-model",
+        text="no producer model set",
+        keywords=["alpha"],
+        org_id="org-catalog",
+        sequence_index=9,
+        committing_identity="leader-a",
+        producer_model=None,
+    )
+
+    encoded = record.to_dict()
+    assert "producer_model" not in encoded
+    assert CatalogRecord.from_dict(encoded) == record
 
 
 def test_find_duplicates_matches_hash_submission_and_keyword_overlap(tmp_path) -> None:

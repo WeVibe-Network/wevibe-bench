@@ -147,6 +147,7 @@ export function buildSubmitCommitmentMsg(
   contributorWallet: string,
   memoryType: string,
   mcVersion: number,
+  producerModelId?: string,
 ): EncodeObject {
   const fields: number[] = [
     ...encodeStringField(0x0a, signer),
@@ -170,6 +171,13 @@ export function buildSubmitCommitmentMsg(
     ...encodeVarint(0x50),
     ...encodeVarint(mcVersion),
   );
+
+  const normalizedProducerModelId = producerModelId?.trim() ?? '';
+  if (normalizedProducerModelId.length > 0) {
+    // field 16 (producer_model_id), wire type 2 (length-delimited)
+    // tag = (16 << 3) | 2 = 130 => varint bytes 0x82 0x01
+    fields.push(...encodeVarint(130), ...encodeVarint(Buffer.byteLength(normalizedProducerModelId)), ...Buffer.from(normalizedProducerModelId));
+  }
 
   return {
     typeUrl: '/wevibe.memory.v1.MsgSubmitCommitment',

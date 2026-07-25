@@ -34,7 +34,9 @@ class FakeM2Proof:
         org_id: str,
         submission_hash: str,
         keywords: list[str],
+        producer_model_id: str | None = None,
     ) -> dict[str, object]:
+        assert producer_model_id == "tencent/hy3"
         self.calls.append((org_id, submission_hash, tuple(keywords)))
         return {
             "cid": f"cid-{submission_hash}",
@@ -82,6 +84,7 @@ def _session() -> SessionRecord:
                 "submission_hash": "sub-11-verify",
                 "text": SYNTHETIC_TEXT_CANARY,
                 "keywords": ["alpha", "beta"],
+                "producer_model": "tencent/hy3",
             },
             {
                 "submission_hash": "sub-11-deny",
@@ -89,6 +92,7 @@ def _session() -> SessionRecord:
                 "comparison_text": "private-comparison-deny",
                 "plaintext": "should-never-leak",
                 "keywords": ["gamma"],
+                "producer_model": "tencent/hy3",
             },
         ],
         extraction_candidate_count=2,
@@ -203,6 +207,7 @@ def test_apply_routes_verify_and_deny_to_correct_adapters_and_catalogs_commit(tm
     assert record.committed_id == "cid-sub-11-verify"
     assert record.committing_identity == leader.ed_pubkey_hex
     assert record.comparison_text == SYNTHETIC_TEXT_CANARY
+    assert record.producer_model == "tencent/hy3"
 
     safe_ledger_bytes = safe_ledger_path.read_bytes()
     assert SYNTHETIC_TEXT_CANARY.encode("utf-8") not in safe_ledger_bytes

@@ -48,12 +48,14 @@ class _RunnerWithoutConsumerHook:
                     "text": f"alpha {_MEMORY_TEXT} {index}",
                     "keywords": ["alpha", "backgammon"],
                     "memory_type": "memory",
+                    "producer_model": "model-a",
                 },
                 {
                     "submission_hash": f"sub-{index}-b",
                     "text": f"beta {_MEMORY_TEXT} {index}",
                     "keywords": ["beta", "backgammon"],
                     "memory_type": "memory",
+                    "producer_model": "model-a",
                 },
             ],
             "extraction_job_id": f"job-{index}",
@@ -79,10 +81,16 @@ class _RunnerWithConsumerHook(_RunnerWithoutConsumerHook):
 
 class _FakeM2Proof:
     @staticmethod
-    def leader_verify_and_commit(org_id: str, submission_hash: str, keywords: list[str]) -> dict[str, Any]:
+    def leader_verify_and_commit(
+        org_id: str,
+        submission_hash: str,
+        keywords: list[str],
+        producer_model_id: str | None = None,
+    ) -> dict[str, Any]:
         raise AssertionError(
             "leader_verify_and_commit should not be called in all-deny tests; "
-            f"org_id={org_id} submission_hash={submission_hash} keywords={keywords}"
+            "org_id={org_id} submission_hash={submission_hash} keywords={keywords} "
+            f"producer_model_id={producer_model_id}"
         )
 
 

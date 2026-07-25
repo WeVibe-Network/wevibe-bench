@@ -652,7 +652,10 @@ def _run_main_capture_extract_call(
             _org_id: str,
             submission_hash: str,
             _keywords: list[str],
+            producer_model_id: str | None = None,
         ) -> dict[str, Any]:
+            if producer_model_id is not None:
+                assert producer_model_id == "opencode/big-pickle"
             return {
                 "commit_status": {
                     "submissions": [

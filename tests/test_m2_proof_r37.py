@@ -847,15 +847,21 @@ def test_leader_verify_and_commit_precheck_non_committed_runs_full_flow() -> Non
 
     commit_batch_payloads: list[dict[str, Any]] = []
 
-    def _fake_commit_batch(_org_id: str, batch_payload: Any) -> dict[str, Any]:
+    def _fake_commit_batch(_org_id: str, batch_payload: Any, producer_model_id: str) -> dict[str, Any]:
         calls.append("commit_batch")
         assert isinstance(batch_payload, dict)
+        assert producer_model_id == "tencent/hy3"
         commit_batch_payloads.append(batch_payload)
         return {"tx_hash": "tx-1", "code": 0, "msg_count": 1}
 
     proof._commit_batch = _fake_commit_batch  # type: ignore[method-assign]
 
-    result = proof.leader_verify_and_commit("org-1", "sub-1", ["python"])
+    result = proof.leader_verify_and_commit(
+        "org-1",
+        "sub-1",
+        ["python"],
+        producer_model_id="tencent/hy3",
+    )
 
     assert calls == [
         "commit_status",

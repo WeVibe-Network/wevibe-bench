@@ -72,12 +72,14 @@ class FakeRunner:
                     "text": f"alpha synthetic memory {index}",
                     "keywords": ["alpha", "backgammon"],
                     "memory_type": "memory",
+                    "producer_model": "model-a",
                 },
                 {
                     "submission_hash": f"sub-{index}-b",
                     "text": f"beta synthetic memory {index}",
                     "keywords": ["beta", "backgammon"],
                     "memory_type": "memory",
+                    "producer_model": "model-a",
                 },
             ],
             "extraction_job_id": f"job-{index}",
@@ -111,7 +113,9 @@ class FakeM2Proof:
         org_id: str,
         submission_hash: str,
         keywords: list[str],
+        producer_model_id: str | None = None,
     ) -> dict[str, Any]:
+        assert producer_model_id is not None
         self.verify_calls.append((org_id, submission_hash, tuple(keywords)))
         return {
             "cid": f"cid-{submission_hash}",

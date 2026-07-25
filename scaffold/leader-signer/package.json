@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "npm run build && node dist/src/chain-client.spec.js"
   },
   "dependencies": {
     "@cosmjs/amino": "0.39.0",

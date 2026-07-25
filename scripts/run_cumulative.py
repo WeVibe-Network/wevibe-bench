@@ -174,6 +174,25 @@ def _normalize_model_slug(model: str) -> str:
     return slug or "model"
 
 
+def _producer_model_id_from_model(model: str) -> str:
+    model_value = str(model).strip()
+    if not model_value:
+        raise RuntimeError("producer model cannot be empty")
+
+    parts = [part for part in model_value.split("/") if part]
+    if parts and parts[0] == "openrouter":
+        parts = parts[1:]
+
+    producer_model_id = "/".join(parts)
+    if not producer_model_id:
+        raise RuntimeError(f"unable to resolve producer model from model={model!r}")
+
+    if not _normalize_model_slug(producer_model_id):
+        raise RuntimeError(f"unable to normalize producer model from model={model!r}")
+
+    return producer_model_id
+
+
 def _provider_pin_from_model(model: str) -> str:
     parts = [part for part in model.split("/") if part]
     if not parts:
@@ -914,6 +933,11 @@ class RealSessionRunner:
 
         self._contributor_rest.last_job_id = None
         extract_model, extract_provider = self._extract_model_for_session(session)
+        producer_model_id = _producer_model_id_from_model(session.model)
+        if not producer_model_id.strip():
+            raise RuntimeError(
+                f"unable to resolve producer_model_id from session.model={session.model!r}"
+            )
         project_context = self._project_context_for_session(session, state)
 
         try:
@@ -964,6 +988,7 @@ class RealSessionRunner:
                     "text": text,
                     "keywords": keywords,
                     "memory_type": memory_type,
+                    "producer_model": producer_model_id,
                 }
             )
 

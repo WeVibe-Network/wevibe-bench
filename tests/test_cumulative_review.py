@@ -109,12 +109,14 @@ class FakeRunner:
                     "text": alpha_text,
                     "keywords": ["alpha", "backgammon"],
                     "memory_type": "memory",
+                    "producer_model": "model-a",
                 },
                 {
                     "submission_hash": f"sub-{index}-b",
                     "text": beta_text,
                     "keywords": ["beta", "backgammon"],
                     "memory_type": "memory",
+                    "producer_model": "model-a",
                 },
             ],
             "extraction_job_id": f"job-{index}",
@@ -137,7 +139,9 @@ class FakeM2Proof:
         org_id: str,
         submission_hash: str,
         keywords: list[str],
+        producer_model_id: str | None = None,
     ) -> dict[str, Any]:
+        assert producer_model_id is not None
         self.verify_calls.append((org_id, submission_hash, tuple(keywords)))
         return {
             "cid": f"cid-{submission_hash}",
@@ -350,11 +354,13 @@ def test_redacted_candidate_ref_removes_plaintext_and_hashes_text() -> None:
             "comparison_text": "another-copy",
             "keywords": ["alpha"],
             "memory_type": "memory",
+            "producer_model": "model-a",
         }
     )
 
     assert "text" not in redacted
     assert "comparison_text" not in redacted
+    assert redacted["producer_model"] == "model-a"
     assert redacted["content_hash"] == hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
@@ -423,6 +429,7 @@ def test_manifest_redaction_cross_process_resume_and_hash_only_artifacts(tmp_pat
     record = catalog_records[0]
     assert record.submission_hash == verify_ref
     assert record.comparison_text == alpha_text
+    assert record.producer_model == "model-a"
 
     safe_ledger_bytes = resumed_harness.safe_ledger_path.read_bytes()
     assert alpha_text.encode("utf-8") not in safe_ledger_bytes
@@ -445,6 +452,7 @@ def test_reconcile_catalog_complete_flag_reports_missing_authoritative_ids() -> 
         committing_identity="leader-a",
         content_hash=hashlib.sha256(comparison_text.encode("utf-8")).hexdigest(),
         committed_at="2026-07-23T12:10:00+00:00",
+        producer_model="tencent/hy3",
     )
 
     partial = reconcile(

@@ -798,6 +798,8 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
         "commit-batch",
         "--org-id",
         "org-77",
+        "--producer-model-id",
+        "model-a",
     ]
     assert commit_batch_call["cwd"] == expected_signer_dir
     env = commit_batch_call["env"]
