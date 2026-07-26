@@ -3,7 +3,7 @@ import { join, resolve, dirname, basename } from "path"
 import { homedir } from "os"
 import { fileURLToPath } from "node:url"
 import { createHash, randomUUID } from "node:crypto"
-import { SessionMetricsRecorder } from "./metrics"
+import { SessionMetricsRecorder, assessRecallNeed, extractToolExitCode } from "./metrics"
 import { buildRecallHarvest, type RecallHarvestSignals } from "./recall-harvest"
 import { detectBinding, type BindingState } from "./binding"
 import { resolveScopedWeVibeDir, scopedLogDir, scopedRunsDir, scopedStateDir } from "./wevibe-paths"
@@ -84,6 +84,8 @@ export interface SelectInjectCandidatesResult {
   chargedCharsDelta: number
   budgetRemaining: number
 }
+
+export type RecallTrigger = "user_message" | "tool_failure"
 
 const memoryHeader = "## Team Memory (WeVibe Network)"
 const memoryIntro = "The following are verified technical memories from your organization."
@@ -609,8 +611,9 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
     const line = `${new Date().toISOString()} [${level}]${trace ? ` trace=${trace}` : ""} ${message}`
     try {
       appendFileSync(errorLogPath, `${line}\n`)
-    } catch {
+    } catch (err) {
       // best-effort logging only
+      console.error("wevibe-plugin log sink write failed:", err)
     }
     if (client?.app?.log) {
       void client.app.log({
@@ -791,6 +794,39 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
         approvedCids.delete(decision.memoryID)
         deniedCids.add(decision.memoryID)
         reportedCids.delete(decision.memoryID)
+
+        const noteToken = readWeVibeMcpToken()
+        if (noteToken && bindingState.active && bindingState.orgId) {
+          const boundOrg = bindingState.orgId
+          const noteTrace = newTrace()
+          logPlugin("info", `[decision-note] deny memory_fp=${fp8(decision.memoryID)}`, noteTrace)
+          fetch(`${WEVIBE_MCP_HTTP}/v1/decision-notes`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${noteToken}`,
+              "X-WeVibe-Trace-Id": noteTrace,
+            },
+            body: JSON.stringify({
+              org_id: boundOrg,
+              memory_hash: decision.memoryID,
+              action: "deny",
+              ...(decision.reason ? { reason: decision.reason } : {}),
+            }),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          })
+            .then(async (res) => {
+              if (res.ok) return
+              let reason = ""
+              try { reason = excerpt((await res.text()).slice(0, 512), 200) ?? "" } catch {
+                // best effort
+              }
+              logPlugin("warn", `[decision-note] deny note failed status=${res.status}${reason ? ` reason=${reason}` : ""} memory_fp=${fp8(decision.memoryID)}`, noteTrace)
+            })
+            .catch((err) => {
+              logPlugin("warn", `[decision-note] deny note failed reason=${excerpt(err instanceof Error ? err.message : String(err), 200)} memory_fp=${fp8(decision.memoryID)}`, noteTrace)
+            })
+        }
 
         continue
       }
@@ -1157,10 +1193,11 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   }
 
   async function loadMemories(query: string, trace: string): Promise<void> {
+    const recallStartedAtMs = Date.now()
     logPlugin("info", `[recall] loadMemories query="${query.slice(0, 80)}"`, trace)
     let recallOutcomeLogged = false
     const logRecallOutcome = (
-      status: number | "none",
+      status: number | "none" | "cache",
       count: number,
       reasonCode?: string,
       errorValue?: string,
@@ -1169,13 +1206,14 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
       recallOutcomeLogged = true
       const reason = typeof reasonCode === "string" && reasonCode.length > 0 ? reasonCode : "none"
       const error = typeof errorValue === "string" && errorValue.length > 0 ? errorValue : "none"
-      logPlugin("info", `recall: status=${status} count=${count} reason=${reason} error=${error}`, trace)
+      logPlugin("info", `recall_returned status=${status} count=${count} reason_code=${reason} dur_ms=${Date.now() - recallStartedAtMs} error=${error}`, trace)
     }
 
     try {
       const now = Date.now()
       if (query === memoryCacheKey && cachedMemories.length > 0 && (now - memoryCacheTimestamp) < MEMORY_CACHE_TTL_MS) {
         logPlugin("info", `[recall] loadMemories cache-hit ageSec=${Math.round((now - memoryCacheTimestamp) / 1000)} query="${query.slice(0, 80)}"`, trace)
+        logRecallOutcome("cache", cachedMemories.length, "cache_hit")
         return
       }
 
@@ -1398,13 +1436,14 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   }
 
   let recallInFlight: Promise<void> | null = null
-  const triggerRecall = (query: string): void => {
+  const triggerRecall = (query: string, trigger: RecallTrigger): void => {
     if (!wevibeAvailable || !bindingState.active) {
       logPlugin("info", "[binding] recall suppressed: session dormant (unbound)")
       return
     }
     if (recallInFlight) return
     const trace = newTrace()
+    logPlugin("info", `recall_fired trigger=${trigger} sid=${currentSessionId() ?? "unknown"}`, trace)
     recallInFlight = loadMemories(query, trace).catch(() => undefined).finally(() => { recallInFlight = null })
   }
 
@@ -1671,7 +1710,7 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
       }
 
       lastRecalledQuery = normalizedPromptText
-      triggerRecall(normalizedPromptText)
+      triggerRecall(normalizedPromptText, "user_message")
     },
 
     "experimental.chat.system.transform": async (input, output) => {
@@ -1955,6 +1994,7 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
           token: readWeVibeMcpToken(),
           newTrace,
           runCommand,
+          log: logPlugin,
         }
 
         if (eventType === "session.created") {
@@ -1993,7 +2033,27 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
     },
 
     "tool.execute.after": async (input, output) => {
+      const needSessionId = input.sessionID ?? currentSessionId()
+      const preNeedSignals = metricsRecorder.getBuildTestSignals(needSessionId)
       metricsRecorder.handleToolAfter(input, output)
+
+      // Need-gated recall firing: failure signals only; dedup via recallInFlight + lastRecalledQuery.
+      if (wevibeAvailable && bindingState.active && !recallInFlight) {
+        const argsRecord = input.args as { command?: unknown } | undefined
+        const need = assessRecallNeed({
+          tool: input.tool,
+          command: typeof argsRecord?.command === "string" ? argsRecord.command : undefined,
+          exitCode: extractToolExitCode(output?.metadata),
+          pre: preNeedSignals,
+          post: metricsRecorder.getBuildTestSignals(needSessionId),
+          recentErrors: metricsRecorder.getRecentErrors(needSessionId),
+          lastFiredSignature: lastRecalledQuery,
+        })
+        if (need.needed && need.signature !== lastRecalledQuery) {
+          lastRecalledQuery = need.signature
+          triggerRecall(need.query, "tool_failure")
+        }
+      }
 
       if (!sensorsEnabled) {
         return

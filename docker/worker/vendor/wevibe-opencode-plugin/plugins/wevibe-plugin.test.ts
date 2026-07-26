@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,12 +11,24 @@ type FetchCall = {
   url: string
   method: string
   bodyText?: string
+  headers?: Record<string, unknown>
 }
 
 type Harness = {
   hooks: Record<string, (input: unknown, output: unknown) => Promise<void>>
   calls: FetchCall[]
+  appLogs: unknown[]
+  worktree: string
+  decisionsPath: string
+  statusPath: string
+  logFilePath?: string
   cleanup: () => void
+}
+
+type SetupHarnessOptions = {
+  recallResponder?: (call: FetchCall) => Response | Promise<Response>
+  decisionNoteResponder?: (call: FetchCall) => Response | Promise<Response>
+  captureLogFile?: boolean
 }
 
 type RecallMemory = {
@@ -94,15 +106,22 @@ const writeSessionToken = (homeDir: string): void => {
 const setupHarness = async (
   memories: RecallMemory[],
   config: Record<string, unknown> = {},
+  options: SetupHarnessOptions = {},
 ): Promise<Harness> => {
   const oldFetch = globalThis.fetch;
   const oldHome = process.env.HOME;
   const oldRecallMode = process.env.WEVIBE_RECALL_MODE;
   const oldMcpUrl = process.env.WEVIBE_MCP_HTTP_URL;
+  const oldLogDir = process.env.WEVIBE_LOG_DIR;
 
   const calls: FetchCall[] = [];
+  const appLogs: unknown[] = [];
   const homeDir = mkdtempSync(join(tmpdir(), 'wevibe-plugin-home-'));
   const worktree = mkdtempSync(join(tmpdir(), 'wevibe-plugin-worktree-'));
+  const logDir = join(homeDir, 'plugin-logs');
+  const logFilePath = join(logDir, 'wevibe-plugin-errors.log');
+  const decisionsPath = join(worktree, '.wevibe', 'state', 'wevibe-plugin-decisions.json');
+  const statusPath = join(worktree, '.wevibe', 'state', 'wevibe-plugin-status.json');
 
   writeBoundMarker(worktree);
   writeSessionToken(homeDir);
@@ -111,18 +130,40 @@ const setupHarness = async (
   process.env.HOME = homeDir;
   process.env.WEVIBE_RECALL_MODE = 'test';
   process.env.WEVIBE_MCP_HTTP_URL = 'http://wevibe-mock:4450';
+  if (options.captureLogFile) {
+    process.env.WEVIBE_LOG_DIR = logDir;
+  } else if (oldLogDir !== undefined) {
+    process.env.WEVIBE_LOG_DIR = oldLogDir;
+  } else {
+    delete process.env.WEVIBE_LOG_DIR;
+  }
 
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const method = (init?.method ?? (typeof input === 'string' || input instanceof URL ? 'GET' : input.method) ?? 'GET').toUpperCase();
     const bodyText = readBodyText(init?.body);
-    calls.push({ url, method, bodyText });
+    const headers = init?.headers instanceof Headers
+      ? Object.fromEntries(init.headers.entries()) as Record<string, unknown>
+      : init?.headers && typeof init.headers === 'object' && !Array.isArray(init.headers)
+        ? init.headers as Record<string, unknown>
+        : undefined;
+    const call = { url, method, bodyText, headers };
+    calls.push(call);
 
     if (url.endsWith('/v1/health')) {
       return toJsonResponse(200, { status: 'ok' });
     }
     if (url.endsWith('/v1/recall')) {
+      if (options.recallResponder) {
+        return options.recallResponder(call);
+      }
       return toJsonResponse(200, recallPayload(memories));
+    }
+    if (url.endsWith('/v1/decision-notes')) {
+      if (options.decisionNoteResponder) {
+        return options.decisionNoteResponder(call);
+      }
+      return toJsonResponse(200, { status: 'ok' });
     }
     if (url.endsWith('/v1/serves')) {
       return toJsonResponse(200, { status: 'ok' });
@@ -139,7 +180,9 @@ const setupHarness = async (
     worktree,
     client: {
       app: {
-        log: async () => {},
+        log: async (entry: unknown) => {
+          appLogs.push(entry);
+        },
       },
       tui: {
         showToast: async () => {},
@@ -165,6 +208,11 @@ const setupHarness = async (
     } else {
       process.env.WEVIBE_MCP_HTTP_URL = oldMcpUrl;
     }
+    if (oldLogDir === undefined) {
+      delete process.env.WEVIBE_LOG_DIR;
+    } else {
+      process.env.WEVIBE_LOG_DIR = oldLogDir;
+    }
     rmSync(homeDir, { recursive: true, force: true });
     rmSync(worktree, { recursive: true, force: true });
   };
@@ -172,6 +220,11 @@ const setupHarness = async (
   return {
     hooks: plugin as unknown as Record<string, (input: unknown, output: unknown) => Promise<void>>,
     calls,
+    appLogs,
+    worktree,
+    decisionsPath,
+    statusPath,
+    ...(options.captureLogFile ? { logFilePath } : {}),
     cleanup,
   };
 };
@@ -197,6 +250,50 @@ const triggerRecall = async (
   }
   throw new Error('Timed out waiting for recall request');
 };
+
+const recallCalls = (calls: FetchCall[]): FetchCall[] => calls.filter(call => call.url.endsWith('/v1/recall'));
+
+const waitForRecallCount = async (calls: FetchCall[], expected: number): Promise<void> => {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (recallCalls(calls).length >= expected) {
+      return;
+    }
+    await sleep(25);
+  }
+  throw new Error(`Timed out waiting for ${expected} recall calls`);
+};
+
+const decisionNoteCalls = (calls: FetchCall[]): FetchCall[] => calls.filter(call => call.url.endsWith('/v1/decision-notes'));
+
+const appLogMessages = (appLogs: unknown[]): string[] =>
+  appLogs
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return '';
+      const body = (entry as { body?: { message?: unknown } }).body;
+      return typeof body?.message === 'string' ? body.message : '';
+    })
+    .filter(message => message.length > 0);
+
+const waitForAppLog = async (appLogs: unknown[], pattern: RegExp): Promise<void> => {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (appLogMessages(appLogs).some(message => pattern.test(message))) {
+      return;
+    }
+    await sleep(25);
+  }
+  throw new Error(`Timed out waiting for app log matching ${pattern.toString()}`);
+};
+
+const writeDecisions = (
+  harness: Harness,
+  decisions: Array<{ memoryID: string; action: 'accept' | 'deny' | 'block' | 'report'; reason?: string; note?: string; timestamp: number }>,
+): void => {
+  writeFileSync(harness.decisionsPath, JSON.stringify(decisions), 'utf8');
+};
+
+const readDecisions = (harness: Harness): unknown => JSON.parse(readFileSync(harness.decisionsPath, 'utf8'));
+
+const readStatus = (harness: Harness): unknown => JSON.parse(readFileSync(harness.statusPath, 'utf8'));
 
 const serveBodies = (calls: FetchCall[]): Array<Record<string, unknown>> =>
   calls
@@ -307,4 +404,322 @@ test('budget cap skips oversized memory, continues to inject fitting later memor
   const secondServes = serveBodies(calls);
   assert.equal(secondServes.length, 1);
   assert.equal(secondServes[0].memory_hash, tinyMemory.cid);
+});
+
+test('fires need-gated recall on failing tool.execute.after signals', { concurrency: false }, async (t) => {
+  const harness = await setupHarness([{ cid: 'cid-failure', text: 'failure memory' }], { recall_max_injected: 10, inject_char_budget: 8000 });
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-tool-failure-fire';
+
+  await triggerRecall(hooks, calls, sessionID);
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+  await hooks['tool.execute.after'](
+    {
+      tool: 'bash',
+      sessionID,
+      callID: 'call-build-1',
+      args: { command: 'npm run build' },
+    },
+    {
+      title: '',
+      output: 'error TS2345: boom',
+      metadata: { exit: 1 },
+    },
+  );
+
+  await waitForRecallCount(calls, 2);
+
+  const recalls = recallCalls(calls);
+  assert.equal(recalls.length, 2);
+
+  const secondBody = JSON.parse(recalls[1].bodyText ?? '{}') as Record<string, unknown>;
+  const secondQuery = typeof secondBody.query === 'string' ? secondBody.query : '';
+  assert.match(secondQuery, /(build failing|tool failure)/);
+  assert.ok(secondQuery.includes('npm run build'));
+  assert.equal(typeof secondBody.org_id, 'string');
+  assert.equal(typeof secondBody.session_id, 'string');
+});
+
+test('stays silent on clean tool.execute.after results', { concurrency: false }, async (t) => {
+  const harness = await setupHarness([{ cid: 'cid-clean', text: 'clean memory' }], { recall_max_injected: 10, inject_char_budget: 8000 });
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-tool-clean';
+
+  await triggerRecall(hooks, calls, sessionID);
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+  await hooks['tool.execute.after'](
+    {
+      tool: 'bash',
+      sessionID,
+      callID: 'call-build-clean',
+      args: { command: 'npm run build' },
+    },
+    {
+      title: '',
+      output: 'ok',
+      metadata: { exit: 0 },
+    },
+  );
+
+  await sleep(150);
+  assert.equal(recallCalls(calls).length, 1);
+});
+
+test('dedups identical failing signatures for tool.execute.after recall', { concurrency: false }, async (t) => {
+  const harness = await setupHarness([{ cid: 'cid-dedup', text: 'dedup memory' }], { recall_max_injected: 10, inject_char_budget: 8000 });
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-tool-dedup';
+  const failingOutput = {
+    title: '',
+    output: 'error TS2345: boom',
+    metadata: { exit: 1 },
+  };
+
+  await triggerRecall(hooks, calls, sessionID);
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+
+  await hooks['tool.execute.after'](
+    {
+      tool: 'bash',
+      sessionID,
+      callID: 'c1',
+      args: { command: 'npm run build' },
+    },
+    failingOutput,
+  );
+  await waitForRecallCount(calls, 2);
+
+  await hooks['tool.execute.after'](
+    {
+      tool: 'bash',
+      sessionID,
+      callID: 'c2',
+      args: { command: 'npm run build' },
+    },
+    failingOutput,
+  );
+  await sleep(150);
+
+  assert.equal(recallCalls(calls).length, 2);
+});
+
+test('does not fire tool failure recall while recall request is in flight', { concurrency: false }, async (t) => {
+  let resolveRecall: (value: Response) => void = () => {};
+  let hasResolveRecall = false;
+  let recallDeferred: Promise<Response> | null = null;
+
+  const harness = await setupHarness(
+    [{ cid: 'cid-inflight', text: 'inflight memory' }],
+    { recall_max_injected: 10, inject_char_budget: 8000 },
+    {
+      recallResponder: () => {
+        if (!recallDeferred) {
+          recallDeferred = new Promise<Response>((resolve) => {
+            resolveRecall = resolve;
+            hasResolveRecall = true;
+          });
+        }
+        return recallDeferred;
+      },
+    },
+  );
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-tool-inflight';
+
+  try {
+    await triggerRecall(hooks, calls, sessionID);
+    assert.equal(recallCalls(calls).length, 1);
+
+    await hooks['tool.execute.after'](
+      {
+        tool: 'bash',
+        sessionID,
+        callID: 'call-inflight-1',
+        args: { command: 'npm run build' },
+      },
+      {
+        title: '',
+        output: 'error TS2345: boom',
+        metadata: { exit: 1 },
+      },
+    );
+
+    await sleep(150);
+    assert.equal(recallCalls(calls).length, 1);
+  } finally {
+    if (hasResolveRecall) {
+      resolveRecall(toJsonResponse(200, recallPayload([{ cid: 'cid-inflight', text: 'inflight memory' }])));
+    }
+  }
+
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base'] });
+  assert.equal(recallCalls(calls).length, 1);
+});
+
+test('emits funnel recall_fired and recall_returned line shapes with matching trace for tool failure', { concurrency: false }, async (t) => {
+  const harness = await setupHarness(
+    [{ cid: 'cid-funnel', text: 'funnel memory' }],
+    { recall_max_injected: 10, inject_char_budget: 8000 },
+    { captureLogFile: true },
+  );
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls, appLogs, logFilePath } = harness;
+  const sessionID = 'session-tool-funnel';
+
+  await triggerRecall(hooks, calls, sessionID);
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+  await hooks['tool.execute.after'](
+    {
+      tool: 'bash',
+      sessionID,
+      callID: 'call-funnel-1',
+      args: { command: 'npm run build' },
+    },
+    {
+      title: '',
+      output: 'error TS2345: boom',
+      metadata: { exit: 1 },
+    },
+  );
+  await waitForRecallCount(calls, 2);
+  await sleep(50);
+
+  const messages = appLogMessages(appLogs);
+
+  assert.ok(messages.some(message => /recall_fired trigger=user_message sid=\S+/.test(message)));
+  assert.ok(messages.some(message => /recall_fired trigger=tool_failure sid=\S+/.test(message)));
+  assert.ok(messages.some(message => /recall_returned status=\S+ count=\d+ reason_code=\S+ dur_ms=\d+ error=\S+/.test(message)));
+
+  assert.ok(logFilePath);
+  const logText = existsSync(logFilePath) ? readFileSync(logFilePath, 'utf8') : '';
+  const recallLines = logText.split('\n').filter(line => line.includes('recall_fired') || line.includes('recall_returned'));
+  const firedLines = recallLines.filter(line => line.includes('recall_fired'));
+  const returnedLines = recallLines.filter(line => line.includes('recall_returned'));
+
+  assert.ok(firedLines.some(line => /recall_fired trigger=user_message sid=\S+/.test(line)));
+  assert.ok(firedLines.some(line => /recall_fired trigger=tool_failure sid=\S+/.test(line)));
+  assert.ok(firedLines.every(line => /trace=[0-9a-f]{8}/.test(line)));
+  assert.ok(returnedLines.length >= firedLines.length);
+  assert.ok(returnedLines.every(line => /recall_returned status=\S+ count=\d+ reason_code=\S+ dur_ms=\d+ error=\S+/.test(line)));
+
+  const toolFailureLine = firedLines.find(line => /recall_fired trigger=tool_failure sid=\S+/.test(line));
+  assert.ok(toolFailureLine);
+  const toolFailureTrace = (toolFailureLine?.match(/trace=([0-9a-f]{8})/) ?? [])[1];
+  assert.equal(typeof toolFailureTrace, 'string');
+  assert.ok(returnedLines.some(line => line.includes(`trace=${toolFailureTrace}`)));
+});
+
+test('posts a decision-note on deny with org, memory hash, and reason', { concurrency: false }, async (t) => {
+  const harness = await setupHarness([], { recall_max_injected: 10, inject_char_budget: 8000 });
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-decision-note-deny-reason';
+
+  await triggerRecall(hooks, calls, sessionID);
+  writeDecisions(harness, [{ memoryID: 'cid-deny-1', action: 'deny', reason: 'not relevant', timestamp: Date.now() }]);
+
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+
+  const noteCalls = decisionNoteCalls(calls);
+  assert.equal(noteCalls.length, 1);
+  assert.equal(noteCalls[0].method, 'POST');
+  assert.deepEqual(JSON.parse(noteCalls[0].bodyText ?? '{}'), {
+    org_id: 'org-test',
+    memory_hash: 'cid-deny-1',
+    action: 'deny',
+    reason: 'not relevant',
+  });
+
+  assert.equal(noteCalls[0].headers?.Authorization, 'Bearer token-test');
+  const traceId = noteCalls[0].headers?.['X-WeVibe-Trace-Id'];
+  assert.equal(typeof traceId, 'string');
+  assert.match(traceId as string, /^[0-9a-f]{8}$/);
+
+  assert.ok(appLogMessages(harness.appLogs).some(message => /\[decision-note\] deny memory_fp=/.test(message)));
+  assert.deepEqual(readDecisions(harness), []);
+
+  const status = readStatus(harness) as { denied?: string[] };
+  assert.ok(status.denied?.includes('cid-deny-1'));
+});
+
+test('omits reason on the decision-note when the deny carries none', { concurrency: false }, async (t) => {
+  const harness = await setupHarness([], { recall_max_injected: 10, inject_char_budget: 8000 });
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-decision-note-deny-no-reason';
+
+  await triggerRecall(hooks, calls, sessionID);
+  writeDecisions(harness, [{ memoryID: 'cid-deny-2', action: 'deny', timestamp: Date.now() }]);
+
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+
+  const noteCalls = decisionNoteCalls(calls);
+  assert.equal(noteCalls.length, 1);
+  assert.deepEqual(JSON.parse(noteCalls[0].bodyText ?? '{}'), {
+    org_id: 'org-test',
+    memory_hash: 'cid-deny-2',
+    action: 'deny',
+  });
+
+  const status = readStatus(harness) as { denied?: string[] };
+  assert.ok(status.denied?.includes('cid-deny-2'));
+});
+
+test('logs but does not fail the deny when the decision-note endpoint returns non-2xx', { concurrency: false }, async (t) => {
+  const harness = await setupHarness(
+    [],
+    { recall_max_injected: 10, inject_char_budget: 8000 },
+    { decisionNoteResponder: () => toJsonResponse(500, { error: 'mcp exploded' }) },
+  );
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-decision-note-deny-500';
+
+  await triggerRecall(hooks, calls, sessionID);
+  writeDecisions(harness, [{ memoryID: 'cid-deny-3', action: 'deny', reason: 'bad status', timestamp: Date.now() }]);
+
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+  await waitForAppLog(harness.appLogs, /\[decision-note\] deny note failed status=500/);
+
+  assert.deepEqual(readDecisions(harness), []);
+  const status = readStatus(harness) as { denied?: string[] };
+  assert.ok(status.denied?.includes('cid-deny-3'));
+});
+
+test('logs but does not fail the deny when the decision-note fetch throws', { concurrency: false }, async (t) => {
+  const harness = await setupHarness(
+    [],
+    { recall_max_injected: 10, inject_char_budget: 8000 },
+    {
+      decisionNoteResponder: () => {
+        throw new Error('connect ECONNREFUSED');
+      },
+    },
+  );
+  t.after(() => harness.cleanup());
+
+  const { hooks, calls } = harness;
+  const sessionID = 'session-decision-note-deny-fetch-throw';
+
+  await triggerRecall(hooks, calls, sessionID);
+  writeDecisions(harness, [{ memoryID: 'cid-deny-4', action: 'deny', reason: 'network fail', timestamp: Date.now() }]);
+
+  await hooks['experimental.chat.system.transform']({ sessionID }, { system: ['base system'] });
+  await waitForAppLog(harness.appLogs, /\[decision-note\] deny note failed reason=.*ECONNREFUSED/);
+
+  assert.deepEqual(readDecisions(harness), []);
+  const status = readStatus(harness) as { denied?: string[] };
+  assert.ok(status.denied?.includes('cid-deny-4'));
 });
