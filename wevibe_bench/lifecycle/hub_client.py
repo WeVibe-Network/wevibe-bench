@@ -192,6 +192,14 @@ class HubClient:
                 self._require_passed_result("verify_keywords", payload, submission_hash)
         return payload
 
+    def add_keyword(self, identity: Identity, org_id: str, keyword: str) -> Any:
+        return self._request(
+            "lifecycle.hub.add_keyword",
+            identity,
+            f"/v1/orgs/{org_id}/keywords",
+            {"keyword": keyword},
+        )
+
     def submit_keyword_results(
         self,
         identity: Identity,

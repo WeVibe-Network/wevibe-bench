@@ -26,9 +26,11 @@ from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.logging_util import new_trace_id
 from wevibe_bench.lifecycle.mcp_process import McpProcessManager
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
+from wevibe_bench.preflight import PreflightError, verify_org_checklist
 
 _M1_STEPS = [
     "create_org",
+    "seed_keywords",
     "contributor_pubkeys",
     "invite",
     "add_member_onchain",
@@ -36,10 +38,6 @@ _M1_STEPS = [
     "provision_recall",
     "poll_membership",
 ]
-
-
-class PreflightError(RuntimeError):
-    """Raised when a required preflight check fails."""
 
 
 @dataclass(frozen=True)
@@ -312,6 +310,12 @@ def _bootstrap(
     _progress(
         f"BOOTSTRAP_M1_OK org_id={org_id} members=2 trace={bootstrap_trace} org_id_fp={org_fp}",
         logger,
+    )
+    verify_org_checklist(
+        hub_url=cfg.hub_url,
+        org_id=org_id,
+        identity=leader,
+        logger=logger,
     )
     return 0
 

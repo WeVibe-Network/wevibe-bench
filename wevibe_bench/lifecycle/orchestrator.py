@@ -318,6 +318,14 @@ class LifecycleOrchestrator:
 
         signer_dir = os.path.expanduser(self._cfg.leader_signer_dir)
         signer_cli = os.path.join(signer_dir, "dist", "cli.js")
+
+        if len(self._cfg.org_description) > 500:
+            raise ValueError("org_description exceeds limit=500")
+        if len(self._cfg.org_tech_stack) > 200:
+            raise ValueError("org_tech_stack exceeds limit=200")
+        if len(self._cfg.org_focus_areas) > 200:
+            raise ValueError("org_focus_areas exceeds limit=200")
+
         cmd = [
             "node",
             signer_cli,
@@ -327,6 +335,12 @@ class LifecycleOrchestrator:
             "--domain",
             self._cfg.domain,
         ]
+        if self._cfg.org_description.strip():
+            cmd.extend(["--description", self._cfg.org_description])
+        if self._cfg.org_tech_stack.strip():
+            cmd.extend(["--tech-stack", self._cfg.org_tech_stack])
+        if self._cfg.org_focus_areas.strip():
+            cmd.extend(["--focus-areas", self._cfg.org_focus_areas])
         if owned:
             self._log(
                 "info",
@@ -525,6 +539,23 @@ class LifecycleOrchestrator:
     def enable_recall(self, org_id: str, member_pubkey: str) -> Any:
         return self._hub_client.enable_recall(self._leader, org_id, member_pubkey, free=True)
 
+    def seed_keywords(self, org_id: str) -> int:
+        count = 0
+        for keyword in self._cfg.org_keywords:
+            self._hub_client.add_keyword(self._leader, org_id, keyword)
+            count += 1
+        self._log(
+            "info",
+            "lifecycle.orchestrator.seed_keywords",
+            new_trace_id(),
+            "ok",
+            0,
+            org_id=org_id,
+            org_id_fp=fp(org_id),
+            keyword_count=count,
+        )
+        return count
+
     def provision_recall(self, org_id: str) -> Any:
         cli = self._admin_cli_factory(self._leader_admin_env())
         return cli.provision_recall(org_id)
@@ -586,6 +617,7 @@ class LifecycleOrchestrator:
     def run_m1(self) -> dict[str, Any]:
         steps: list[dict[str, Any]] = []
         org_id = self._step(steps, "create_org", self.create_org)
+        self._step(steps, "seed_keywords", lambda: self.seed_keywords(org_id))
         contributor_pk = self._step(steps, "contributor_pubkeys", self.contributor_pubkeys)
         try:
             already_member = org_id in self._extract_org_ids(

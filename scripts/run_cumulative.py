@@ -71,6 +71,7 @@ from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_rest import McpRest
+from wevibe_bench.preflight import verify_org_checklist
 
 IS_PRIMARY_SCORED_PATH = True
 _LOG = logging.getLogger("run_cumulative")
@@ -1210,6 +1211,12 @@ def _build_real_runner_and_leader_client(
     contributor = Identity.from_hex(_required_env("WEVIBE_BENCH_CONTRIB_SEED_HEX"))
 
     hub_client = HubClient(cfg, _LOG)
+    verify_org_checklist(
+        hub_url=cfg.hub_url,
+        org_id=str(args.org),
+        identity=leader,
+        logger=_LOG,
+    )
     extract_prompt = _load_required_text(repo_root / "scaffold" / "sxe-candidate" / "E-assembled.txt")
 
     contributor_rest = _PromptInjectingCaptureRest(

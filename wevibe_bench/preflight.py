@@ -25,6 +25,13 @@ import pathlib
 import socket
 import urllib.error
 import urllib.request
+from typing import TYPE_CHECKING, Any, Callable
+
+from wevibe_bench.lifecycle.logging_util import fp, new_trace_id
+from wevibe_bench.lifecycle.signing import wevibe_signed_headers
+
+if TYPE_CHECKING:
+    from wevibe_bench.lifecycle.identity import Identity
 
 LOGGER = logging.getLogger("wevibe_bench.preflight")
 _REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -64,13 +71,21 @@ class PreflightError(RuntimeError):
     """Raised when a required recall tier is down/unhealthy. Message names the fix."""
 
 
-def _http_get(url: str, token: str | None, timeout: float = 5.0) -> tuple[int, dict, bool]:
+def _http_get(
+    url: str,
+    token: str | None,
+    timeout: float = 5.0,
+    headers: dict[str, str] | None = None,
+    parse_any_json: bool = False,
+) -> tuple[int, Any, bool]:
     """GET url; return (status, json_dict_or_empty, reachable). Never raises for network errors."""
-    headers = {"Accept": "application/json"}
+    req_headers = {"Accept": "application/json"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        req_headers["Authorization"] = f"Bearer {token}"
+    if headers:
+        req_headers.update(headers)
     try:
-        request = urllib.request.Request(url=url, headers=headers, method="GET")
+        request = urllib.request.Request(url=url, headers=req_headers, method="GET")
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.getcode()
             payload = response.read()
@@ -79,19 +94,21 @@ def _http_get(url: str, token: str | None, timeout: float = 5.0) -> tuple[int, d
             payload = exc.read()
         except OSError:
             payload = b""
-        return exc.code, _safe_json(payload), True
+        return exc.code, _safe_json(payload, parse_any_json=parse_any_json), True
     except (urllib.error.URLError, OSError, socket.timeout):
         return 0, {}, False
-    return status, _safe_json(payload), True
+    return status, _safe_json(payload, parse_any_json=parse_any_json), True
 
 
-def _safe_json(payload: bytes) -> dict:
+def _safe_json(payload: bytes, *, parse_any_json: bool = False) -> Any:
     if not payload:
         return {}
     try:
         parsed = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
+    if parse_any_json:
+        return parsed
     return parsed if isinstance(parsed, dict) else {}
 
 
@@ -197,3 +214,185 @@ def preflight(
             f"This is the mcp/clone tier, NOT the hub." + REMEDIATION
         )
     log.info("preflight.mcp OK (%s reachable and healthy)", mcp_recall_url)
+
+
+def verify_org_checklist(
+    *,
+    hub_url: str,
+    org_id: str,
+    identity: "Identity",
+    logger: logging.Logger | None = None,
+    http_get: Callable[..., tuple[int, Any, bool]] = _http_get,
+) -> None:
+    """Verify org keyword/profile checklist required before benchmarking."""
+    remediation = (
+        " run scripts/bootstrap_org_m1.py "
+        "(re-seeds org keywords + org profile; idempotent)"
+    )
+    trace_id = new_trace_id()
+    org_fp = fp(org_id)
+
+    keywords_url = f"{hub_url.rstrip('/')}/v1/orgs/{org_id}/keywords"
+    signed_headers = wevibe_signed_headers(identity, trace_id)
+    kw_status, kw_body, kw_reachable = http_get(
+        keywords_url,
+        token=None,
+        headers=signed_headers,
+        parse_any_json=True,
+    )
+    if not kw_reachable:
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=keywords outcome=fail trace_id=%s org_fp=%s reason=unreachable http_status=%s reachable=%s",
+                trace_id,
+                org_fp,
+                kw_status,
+                kw_reachable,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=keywords unreachable "
+            f"url={keywords_url}; benchmarking never runs unless the pipeline checklist is proven;"
+            + remediation
+        )
+    if kw_status != 200:
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=keywords outcome=fail trace_id=%s org_fp=%s reason=non_200 http_status=%s",
+                trace_id,
+                org_fp,
+                kw_status,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=keywords returned non-200 "
+            f"url={keywords_url} status={kw_status}; benchmarking never runs unless the pipeline checklist is proven;"
+            + remediation
+        )
+    if not isinstance(kw_body, list):
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=keywords outcome=fail trace_id=%s org_fp=%s reason=non_list_body body_type=%s",
+                trace_id,
+                org_fp,
+                type(kw_body).__name__,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=keywords response is not a JSON list "
+            f"url={keywords_url}; benchmarking never runs unless the pipeline checklist is proven;"
+            + remediation
+        )
+    has_active_keyword = any(
+        isinstance(entry, dict) and entry.get("deprecated") is False
+        for entry in kw_body
+    )
+    if not has_active_keyword:
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=keywords outcome=fail trace_id=%s org_fp=%s reason=no_non_deprecated_keywords",
+                trace_id,
+                org_fp,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=keywords keyword vocab is empty "
+            "(no non-deprecated keywords); benchmarks must not run; "
+            "benchmarking never runs unless the pipeline checklist is proven;"
+            + remediation
+        )
+    if logger is not None:
+        logger.info(
+            "preflight.org_checklist check=keywords outcome=ok trace_id=%s org_fp=%s http_status=%s reachable=%s",
+            trace_id,
+            org_fp,
+            kw_status,
+            kw_reachable,
+        )
+
+    org_url = f"{hub_url.rstrip('/')}/v1/orgs/{org_id}"
+    org_status, org_body, org_reachable = http_get(org_url, token=None, parse_any_json=True)
+    if not org_reachable:
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=org_profile outcome=fail trace_id=%s org_fp=%s reason=unreachable http_status=%s reachable=%s",
+                trace_id,
+                org_fp,
+                org_status,
+                org_reachable,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=org_profile unreachable "
+            f"url={org_url};" + remediation
+        )
+    if org_status != 200:
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=org_profile outcome=fail trace_id=%s org_fp=%s reason=non_200 http_status=%s",
+                trace_id,
+                org_fp,
+                org_status,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=org_profile returned non-200 "
+            f"url={org_url} status={org_status};" + remediation
+        )
+    if not isinstance(org_body, dict):
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=org_profile outcome=fail trace_id=%s org_fp=%s reason=non_object_body body_type=%s",
+                trace_id,
+                org_fp,
+                type(org_body).__name__,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=org_profile response is not a JSON object "
+            f"url={org_url};" + remediation
+        )
+
+    description = org_body.get("description")
+    if not isinstance(description, str):
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=org_profile outcome=fail trace_id=%s org_fp=%s reason=description_missing_or_non_string",
+                trace_id,
+                org_fp,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=org_profile description missing or not a string;"
+            + remediation
+        )
+    if not description.strip():
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=org_profile outcome=fail trace_id=%s org_fp=%s reason=description_empty",
+                trace_id,
+                org_fp,
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=org_profile description is empty after trim;"
+            + remediation
+        )
+    if len(description) > 500:
+        if logger is not None:
+            logger.info(
+                "preflight.org_checklist check=org_profile outcome=fail trace_id=%s org_fp=%s reason=description_too_long description_len=%s",
+                trace_id,
+                org_fp,
+                len(description),
+            )
+        raise PreflightError(
+            "PREFLIGHT FAILED: org checklist check=org_profile description exceeds 500 characters;"
+            + remediation
+        )
+    if logger is not None:
+        logger.info(
+            "preflight.org_checklist check=org_profile outcome=ok trace_id=%s org_fp=%s http_status=%s reachable=%s",
+            trace_id,
+            org_fp,
+            org_status,
+            org_reachable,
+        )
+
+    if logger is not None:
+        logger.info(
+            "preflight.org_checklist check=complete outcome=ok trace_id=%s org_fp=%s",
+            trace_id,
+            org_fp,
+        )

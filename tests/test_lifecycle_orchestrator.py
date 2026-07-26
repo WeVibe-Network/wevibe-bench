@@ -188,6 +188,12 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
             calls.append("poll_membership")
             return [{"org_id": "org-123"}]
 
+        def add_keyword(self, identity: Identity, org_id: str, keyword: str) -> Any:
+            calls.append(f"add_keyword:{keyword}")
+            assert identity is leader
+            assert org_id == "org-123"
+            return {"status": "ok"}
+
     class FakeMcpRest:
         def identity_pubkeys(self) -> dict[str, str]:
             calls.append("contributor_pubkeys")
@@ -248,6 +254,7 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
     }
     assert [step["step"] for step in result["steps"]] == [
         "create_org",
+        "seed_keywords",
         "contributor_pubkeys",
         "invite",
         "add_member_onchain",
@@ -256,6 +263,7 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
         "poll_membership",
     ]
     assert calls == [
+        *[f"add_keyword:{keyword}" for keyword in cfg.org_keywords],
         "contributor_pubkeys",
         "invite",
         "enable_recall",
@@ -272,6 +280,12 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
         "wevibe-bench-lifecycle",
         "--domain",
         "bench.wevibe.local",
+        "--description",
+        cfg.org_description,
+        "--tech-stack",
+        cfg.org_tech_stack,
+        "--focus-areas",
+        cfg.org_focus_areas,
     ]
     assert signer_calls[0]["cwd"] == "/opt/leader-signer"
     env = signer_calls[0]["env"]
@@ -364,6 +378,12 @@ def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
             calls.append("poll_membership")
             return [{"org_id": "org-123"}]
 
+        def add_keyword(self, identity: Identity, org_id: str, keyword: str) -> Any:
+            calls.append(f"add_keyword:{keyword}")
+            assert identity is leader
+            assert org_id == "org-123"
+            return {"status": "ok"}
+
     class FakeMcpRest:
         def identity_pubkeys(self) -> dict[str, str]:
             calls.append("contributor_pubkeys")
@@ -414,12 +434,14 @@ def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
     assert result["org_id"] == "org-123"
     assert [step["step"] for step in result["steps"]] == [
         "create_org",
+        "seed_keywords",
         "contributor_pubkeys",
         "enable_recall",
         "provision_recall",
         "poll_membership",
     ]
     assert calls == [
+        *[f"add_keyword:{keyword}" for keyword in cfg.org_keywords],
         "contributor_pubkeys",
         "enable_recall",
         "provision_recall",
@@ -435,6 +457,12 @@ def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
         "wevibe-bench-lifecycle",
         "--domain",
         "bench.wevibe.local",
+        "--description",
+        cfg.org_description,
+        "--tech-stack",
+        cfg.org_tech_stack,
+        "--focus-areas",
+        cfg.org_focus_areas,
     ]
     assert all("add-member" not in call["cmd"] for call in signer_calls)
 
@@ -812,4 +840,3 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     assert isinstance(parsed_input, dict)
     assert isinstance(parsed_input.get("batch"), list)
     assert parsed_input["batch"]
-

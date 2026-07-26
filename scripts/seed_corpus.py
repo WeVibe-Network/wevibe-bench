@@ -21,7 +21,7 @@ from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.lifecycle.qdrant_probe import find_org_collection, snapshot_counts
-from wevibe_bench.preflight import preflight
+from wevibe_bench.preflight import PreflightError, preflight, verify_org_checklist
 
 
 def _required_env(name: str) -> str:
@@ -622,6 +622,13 @@ def main() -> int:
             logger.info(checkpoint_msg)
             print(checkpoint_msg)
 
+        verify_org_checklist(
+            hub_url=cfg.hub_url,
+            org_id=org_id,
+            identity=leader,
+            logger=logger,
+        )
+
         keep_leader_alive = True
 
         qdrant_before_snapshot = snapshot_counts(qdrant_url)
@@ -740,6 +747,8 @@ def main() -> int:
                 delivery.get("n_memories"),
                 delivery.get("matched"),
             )
+    except PreflightError:
+        raise
     except Exception as exc:
         fatal_error = str(exc)
         logger.exception("op=seed.corpus.failed err=%s", fatal_error)
