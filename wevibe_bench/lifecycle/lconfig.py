@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pathlib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -41,6 +42,8 @@ DEFAULT_ORG_KEYWORDS = (
     "ai_difficulty",
     "http_api",
 )
+DEFAULT_LEADER_KEYSTORE_PATH = str(Path.home() / ".wevibe" / "bench" / "leader-keystore")
+DEFAULT_CONTRIB_KEYSTORE_PATH = str(Path.home() / ".wevibe" / "bench" / "contrib-keystore")
 
 
 def _parse_org_keywords(raw: str | None) -> tuple[str, ...]:
@@ -65,6 +68,16 @@ class LifecycleConfig:
     contributor_mcp_url: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_MCP_URL")
         or "http://127.0.0.1:4451"
+    )
+    leader_keystore_path: str = field(
+        default_factory=lambda: os.environ.get(
+            "WEVIBE_BENCH_LEADER_KEYSTORE", DEFAULT_LEADER_KEYSTORE_PATH
+        )
+    )
+    contributor_keystore_path: str = field(
+        default_factory=lambda: os.environ.get(
+            "WEVIBE_BENCH_CONTRIB_KEYSTORE", DEFAULT_CONTRIB_KEYSTORE_PATH
+        )
     )
     org_name: str = "wevibe-bench-lifecycle"
     domain: str = "bench.wevibe.local"
@@ -106,6 +119,8 @@ class LifecycleConfig:
             "hub_url": self.hub_url,
             "leader_mcp_url": self.leader_mcp_url,
             "contributor_mcp_url": self.contributor_mcp_url,
+            "leader_keystore_path": self.leader_keystore_path,
+            "contributor_keystore_path": self.contributor_keystore_path,
             "org_name": self.org_name,
             "domain": self.domain,
             "org_description": self.org_description,

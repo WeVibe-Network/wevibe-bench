@@ -22,7 +22,11 @@ from typing import Any, Callable
 
 from wevibe_bench.benv import load_bench_env
 from wevibe_bench.lifecycle.identity import Identity
-from wevibe_bench.lifecycle.lconfig import LifecycleConfig
+from wevibe_bench.lifecycle.lconfig import (
+    DEFAULT_CONTRIB_KEYSTORE_PATH,
+    DEFAULT_LEADER_KEYSTORE_PATH,
+    LifecycleConfig,
+)
 from wevibe_bench.lifecycle.logging_util import new_trace_id
 from wevibe_bench.lifecycle.mcp_process import McpProcessManager
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
@@ -265,8 +269,8 @@ def _bootstrap(
         return 0
 
     wevibe_root = os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT", str(Path(__file__).resolve().parents[2]))
-    leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", "/tmp/wevibe-bench-leader-keystore.json")
-    contributor_keystore = os.environ.get("WEVIBE_BENCH_CONTRIB_KEYSTORE", "/tmp/wevibe-bench-contrib-keystore.json")
+    leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", DEFAULT_LEADER_KEYSTORE_PATH)
+    contributor_keystore = os.environ.get("WEVIBE_BENCH_CONTRIB_KEYSTORE", DEFAULT_CONTRIB_KEYSTORE_PATH)
 
     procman = McpProcessManager(wevibe_root=wevibe_root, cfg=cfg, logger=logger)
     orchestrator = orchestrator_factory(

@@ -359,7 +359,7 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
 ## 10. ⚠ FOR-WALTER CARRY ITEM (unresolved)
 A mis-configured clone earlier wrote a bench `org-wevibe-org-0-master` envelope into `~/.wevibe/keys/keys.json`
 (mtime 2026-07-14 ~15:19 local) — MAY collide with Walter's CANONICAL org keys. NOT deleted (Walter to verify +
-clean deliberately). Bench now writes only /tmp keystores → won't recur.
+clean deliberately). Bench now writes only durable `~/.wevibe/bench/{leader,contrib}-keystore` keystores (moved off `/tmp` on 2026-07-26 after a power-loss eviction destroyed the bench-org master key) → won't recur.
 
 ## 11. ARTIFACT MAP (where everything is)
 - **Reports (KB):** `wevibe-meta/workspace/reports/` — this thread: 14-07-26-`0400`(result)/`0130`(recall-probe)/

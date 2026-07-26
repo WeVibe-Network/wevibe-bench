@@ -61,7 +61,8 @@ so a standalone start must set them explicitly with the same derivations:
 - `WEVIBE_KEYSTORE_PATH="$WEVIBE_BENCH_LEADER_KEYSTORE"` — the org MASTER KEY envelope is WRITTEN by
   the clone serving `/v1/org-setup/finalize` and READ by the invite + provision-recall `admin.js`
   subprocesses (which set `WEVIBE_KEYSTORE_PATH=$WEVIBE_BENCH_LEADER_KEYSTORE`). If the manual :4550
-  clone omits this it writes K_master to the DEFAULT `~/.wevibe/keys` while the readers look in `/tmp`
+  clone omits this it writes K_master to the DEFAULT `~/.wevibe/keys` while the readers look in the bench
+  keystore home (`~/.wevibe/bench/leader-keystore` by default)
   → recall `decrypt_failed: Umbral re-encryption Internal validation failed` / invite `no master key
   found` (the 2026-07-13 blocker). Writer and readers MUST share this path. (K_master stays leader-local;
   hub never receives K_master or epoch_sk — this is a keystore-PATH routing fix, not a crypto change.)
@@ -70,7 +71,7 @@ Preferred one-path remains lifecycle `bring_up`; this standalone command only mi
 cd /Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench && \
   WEVIBE_BENCH_WEVIBE_ROOT="${WEVIBE_BENCH_WEVIBE_ROOT:-$(cd .. && pwd)}" && \
   set -a && source config/bench.env && set +a && \
-  WEVIBE_BENCH_LEADER_KEYSTORE="${WEVIBE_BENCH_LEADER_KEYSTORE:-/tmp/wevibe-bench-leader-keystore.json}" && \
+  WEVIBE_BENCH_LEADER_KEYSTORE="${WEVIBE_BENCH_LEADER_KEYSTORE:-$HOME/.wevibe/bench/leader-keystore}" && \
 cd scaffold/wevibe-mcp-clone && \
   WEVIBE_MCP_HTTP_ONLY=1 WEVIBE_MCP_HTTP_PORT=4550 WEVIBE_HTTP_HOST=127.0.0.1 \
   WEVIBE_BENCH_ENDPOINTS=1 WEVIBE_SEED_BACKEND=env \
@@ -82,14 +83,16 @@ cd scaffold/wevibe-mcp-clone && \
   WEVIBE_HUB_URL=http://127.0.0.1:4440 \
   nohup node dist/server.js < /dev/null > ../../runs/clone4550.log 2>&1 &
 ```
-**CLEAN-START (wipe) INVARIANT — ONCE at benchmark start (not per run):** a full chain wipe destroys the
+**CLEAN-START (wipe) INVARIANT — ONCE at benchmark start (not per run):** bench keystores now live under
+`~/.wevibe/bench/{leader,contrib}-keystore` (moved off `/tmp` on 2026-07-26 after a power-loss `/tmp`
+eviction destroyed the bench-org master key). A full chain wipe destroys the
 on-chain org + its epoch key, so the LOCAL K_master in the bench keystores becomes STALE and MUST be
 cleared IN THE SAME STEP, else the next `register-org` creates a fresh org whose epoch key mismatches
 the stale K_master → `decrypt_failed`. Use the all-inclusive benchmark-start wipe path in
 `Wipe cadence — ONE-WIPE at benchmark start, NEVER per run (Walter-locked 2026-07-24)` below.
 ```
 make redeploy                               # (from wevibe-meta) ONE benchmark-start wipe: chain/pg/qdrant + served-cache
-rm -rf "$WEVIBE_BENCH_LEADER_KEYSTORE" "$WEVIBE_BENCH_CONTRIB_KEYSTORE"   # clear STALE bench K_master (NEVER ~/.wevibe/keys)
+rm -rf "$WEVIBE_BENCH_LEADER_KEYSTORE" "$WEVIBE_BENCH_CONTRIB_KEYSTORE"   # clear STALE bench K_master (defaults resolve to ~/.wevibe/bench/{leader,contrib}-keystore; NEVER ~/.wevibe/keys)
 # then run the residue check in the wipe-cadence section; any residue = STOP & FIX
 # then start :4550 (above) — /v1/org-setup/finalize regenerates a fresh matching K_master into $WEVIBE_BENCH_LEADER_KEYSTORE
 ```
@@ -254,7 +257,8 @@ ledger enforcement. This remains paid execution (Walter-authorized), not routine
 
 **INVARIANT (extends `D-BENCH-CUMULATIVE-LOOP-2026-07-23`):** wipe the benchmark stack EXACTLY ONCE at benchmark start.
 Run the all-inclusive wipe from `wevibe-meta` via `make redeploy`, pair it with bench keystore clear
-(`rm -rf "$WEVIBE_BENCH_LEADER_KEYSTORE" "$WEVIBE_BENCH_CONTRIB_KEYSTORE"`), then run residue verification before
+(`rm -rf "$WEVIBE_BENCH_LEADER_KEYSTORE" "$WEVIBE_BENCH_CONTRIB_KEYSTORE"`, defaults
+`~/.wevibe/bench/{leader,contrib}-keystore`), then run residue verification before
 any scored run. This is the only wipe/reset event for that benchmark campaign.
 
 After that one wipe, subsequent runs MUST NEVER restart chain/pg/qdrant and MUST NEVER reset corpus state.
@@ -264,7 +268,7 @@ Each run reuses accumulated memories already in storage; only the run-local code
 1. Qdrant memory collections are empty or absent (no leftover benchmark vectors/documents).
 2. Chain + Postgres state is fresh (new org/session state expected after redeploy).
 3. Served cache is cleared.
-4. Bench keystore residue is gone (`$WEVIBE_BENCH_LEADER_KEYSTORE`, `$WEVIBE_BENCH_CONTRIB_KEYSTORE` removed).
+4. Bench keystore residue is gone (`$WEVIBE_BENCH_LEADER_KEYSTORE`, `$WEVIBE_BENCH_CONTRIB_KEYSTORE` removed; defaults are `~/.wevibe/bench/{leader,contrib}-keystore`).
 If any residue exists, STOP and FIX it before bringing benchmark flow back up.
 
 **Re-baseline bar:** only a TRUE REGRESSION or TOTAL BENCHMARK FAILURE justifies re-baselining (going back to

@@ -16,7 +16,11 @@ from typing import Any
 from build_distilled_corpus import DEFAULT_OPENCODE_AUTH, _load_openrouter_key
 from seed_corpus import _bring_up_for_resume, _load_identity, _required_env
 from wevibe_bench.benv import load_bench_env
-from wevibe_bench.lifecycle.lconfig import LifecycleConfig
+from wevibe_bench.lifecycle.lconfig import (
+    DEFAULT_CONTRIB_KEYSTORE_PATH,
+    DEFAULT_LEADER_KEYSTORE_PATH,
+    LifecycleConfig,
+)
 from wevibe_bench.lifecycle.logging_util import run_logger
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
@@ -713,10 +717,10 @@ def main() -> int:
 
         stage = "orchestrator"
         wevibe_root = os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT", str(Path(__file__).resolve().parents[2]))
-        leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", "/tmp/wevibe-bench-leader-keystore.json")
+        leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", DEFAULT_LEADER_KEYSTORE_PATH)
         contributor_keystore = os.environ.get(
             "WEVIBE_BENCH_CONTRIB_KEYSTORE",
-            "/tmp/wevibe-bench-contrib-keystore.json",
+            DEFAULT_CONTRIB_KEYSTORE_PATH,
         )
         leader_wallet = _required_env("WEVIBE_BENCH_LEADER_WALLET")
 

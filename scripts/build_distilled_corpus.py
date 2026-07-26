@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from seed_corpus import _load_identity, _required_env
-from wevibe_bench.lifecycle.lconfig import LifecycleConfig
+from wevibe_bench.lifecycle.lconfig import (
+    DEFAULT_CONTRIB_KEYSTORE_PATH,
+    DEFAULT_LEADER_KEYSTORE_PATH,
+    LifecycleConfig,
+)
 from wevibe_bench.lifecycle.logging_util import run_logger
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
@@ -819,8 +823,8 @@ def main() -> int:
     logfile = getattr(logger, "logfile_path", "")
 
     wevibe_root = os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT", str(Path(__file__).resolve().parents[2]))
-    leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", "/tmp/wevibe-bench-leader-keystore.json")
-    contributor_keystore = os.environ.get("WEVIBE_BENCH_CONTRIB_KEYSTORE", "/tmp/wevibe-bench-contrib-keystore.json")
+    leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", DEFAULT_LEADER_KEYSTORE_PATH)
+    contributor_keystore = os.environ.get("WEVIBE_BENCH_CONTRIB_KEYSTORE", DEFAULT_CONTRIB_KEYSTORE_PATH)
 
     api_key = _load_openrouter_key(Path(DEFAULT_OPENCODE_AUTH).expanduser())
     api_key_fp = _sha256_first8(api_key)
