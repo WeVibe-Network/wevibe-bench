@@ -187,6 +187,58 @@ def _scan_injected_block_chars(worktree: Path) -> int | None:
 
 
 @dataclass(frozen=True)
+class RecallFunnelScan:
+    recall_fired_total: int = 0
+    recall_fired_user_message: int = 0
+    recall_fired_tool_failure: int = 0
+    recall_returned_total: int = 0
+    recall_returned_count_sum: int = 0
+    no_keywords_count: int = 0
+    injected_count: int = 0
+    served_attempted: int = 0
+    served_failed: int = 0
+    served_confirmed: int = 0
+
+
+def _scan_recall_funnel(worktree: Path) -> RecallFunnelScan | None:
+    plugin_log = worktree / ".wevibe" / "logs" / "wevibe-plugin-errors.log"
+    try:
+        payload = plugin_log.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
+
+    fired_matches = re.findall(r"\brecall_fired\s+trigger=(user_message|tool_failure)\b", payload)
+    recall_fired_user_message = sum(1 for trigger in fired_matches if trigger == "user_message")
+    recall_fired_tool_failure = sum(1 for trigger in fired_matches if trigger == "tool_failure")
+
+    returned_matches = re.findall(
+        r"\brecall_returned\s+status=\S+\s+count=(\d+)\s+reason_code=(\S+)\s+dur_ms=\d+\s+error=",
+        payload,
+    )
+    recall_returned_count_sum = sum(int(count) for count, _reason_code in returned_matches)
+    no_keywords_count = sum(1 for _count, reason_code in returned_matches if reason_code == "no_keywords")
+
+    injected_matches = re.findall(r"\[inject\]\s+injected\s+count=(\d+)", payload)
+    injected_count = sum(int(count) for count in injected_matches)
+
+    served_attempted = len(re.findall(r"\[serve\]\s+upsert\s+cid=", payload))
+    served_failed = len(re.findall(r"\[serve\]\s+receipt\s+failed\b", payload))
+
+    return RecallFunnelScan(
+        recall_fired_total=len(fired_matches),
+        recall_fired_user_message=recall_fired_user_message,
+        recall_fired_tool_failure=recall_fired_tool_failure,
+        recall_returned_total=len(returned_matches),
+        recall_returned_count_sum=recall_returned_count_sum,
+        no_keywords_count=no_keywords_count,
+        injected_count=injected_count,
+        served_attempted=served_attempted,
+        served_failed=served_failed,
+        served_confirmed=served_attempted - served_failed,
+    )
+
+
+@dataclass(frozen=True)
 class _OpencodeRunStats:
     input_tokens: int
     output_tokens: int
@@ -352,6 +404,16 @@ class BackgammonCellResult:
     problems_before: int | None = None
     injected_block_chars: int | None = None
     injected_block_est_tokens: int | None = None
+    recall_fired_total: int | None = None
+    recall_fired_user_message: int | None = None
+    recall_fired_tool_failure: int | None = None
+    recall_returned_total: int | None = None
+    recall_returned_count_sum: int | None = None
+    no_keywords_count: int | None = None
+    injected_count: int | None = None
+    served_attempted: int | None = None
+    served_failed: int | None = None
+    served_confirmed: int | None = None
 
 
 def _default_progress(message: str) -> None:
@@ -974,10 +1036,37 @@ class BackgammonRunner(AgentRunner):
                 if injected_block_chars is not None
                 else None
             )
+            funnel = _scan_recall_funnel(worktree)
+            recall_fired_total = funnel.recall_fired_total if funnel is not None else None
+            recall_fired_user_message = (
+                funnel.recall_fired_user_message if funnel is not None else None
+            )
+            recall_fired_tool_failure = (
+                funnel.recall_fired_tool_failure if funnel is not None else None
+            )
+            recall_returned_total = funnel.recall_returned_total if funnel is not None else None
+            recall_returned_count_sum = (
+                funnel.recall_returned_count_sum if funnel is not None else None
+            )
+            no_keywords_count = funnel.no_keywords_count if funnel is not None else None
+            injected_count = funnel.injected_count if funnel is not None else None
+            served_attempted = funnel.served_attempted if funnel is not None else None
+            served_failed = funnel.served_failed if funnel is not None else None
+            served_confirmed = funnel.served_confirmed if funnel is not None else None
         else:
             delivery = "N/A"
             injected_block_chars = None
             injected_block_est_tokens = None
+            recall_fired_total = None
+            recall_fired_user_message = None
+            recall_fired_tool_failure = None
+            recall_returned_total = None
+            recall_returned_count_sum = None
+            no_keywords_count = None
+            injected_count = None
+            served_attempted = None
+            served_failed = None
+            served_confirmed = None
         self._progress(
             f"PROGRESS run_label={run_label} step=delivery-scan delivery={delivery} "
             f"memory_mode={self.memory_mode}"
@@ -1009,6 +1098,16 @@ class BackgammonRunner(AgentRunner):
             problems_before=problems_before_count,
             injected_block_chars=injected_block_chars,
             injected_block_est_tokens=injected_block_est_tokens,
+            recall_fired_total=recall_fired_total,
+            recall_fired_user_message=recall_fired_user_message,
+            recall_fired_tool_failure=recall_fired_tool_failure,
+            recall_returned_total=recall_returned_total,
+            recall_returned_count_sum=recall_returned_count_sum,
+            no_keywords_count=no_keywords_count,
+            injected_count=injected_count,
+            served_attempted=served_attempted,
+            served_failed=served_failed,
+            served_confirmed=served_confirmed,
         )
 
     def _write_worker_permission_config(self, *, worktree: Path) -> None:

@@ -31,6 +31,12 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
 def _optional_bool(value: Any) -> bool | None:
     if value is None:
         return None
@@ -225,6 +231,19 @@ class ProgressVector:
     injected_count: int | None = None
     injected_block_chars: int | None = None
     injected_block_est_tokens: int | None = None
+    recall_fired_total: int | None = None
+    recall_fired_user_message: int | None = None
+    recall_fired_tool_failure: int | None = None
+    recall_returned_total: int | None = None
+    recall_returned_count_sum: int | None = None
+    no_keywords_count: int | None = None
+    served_attempted: int | None = None
+    served_failed: int | None = None
+    served_confirmed: int | None = None
+    # Derived ratios: None means not derivable (for example, zero denominator), not missing telemetry.
+    recall_return_rate: float | None = None
+    inject_yield: float | None = None
+    serve_success_rate: float | None = None
     consumer_injected_count: int | None = None
     extraction_candidate_count: int | None = None
     accepted_count: int | None = None
@@ -249,6 +268,15 @@ class ProgressVector:
                 "injected_count": self.injected_count,
                 "injected_block_chars": self.injected_block_chars,
                 "injected_block_est_tokens": self.injected_block_est_tokens,
+                "recall_fired_total": self.recall_fired_total,
+                "recall_fired_user_message": self.recall_fired_user_message,
+                "recall_fired_tool_failure": self.recall_fired_tool_failure,
+                "recall_returned_total": self.recall_returned_total,
+                "recall_returned_count_sum": self.recall_returned_count_sum,
+                "no_keywords_count": self.no_keywords_count,
+                "served_attempted": self.served_attempted,
+                "served_failed": self.served_failed,
+                "served_confirmed": self.served_confirmed,
                 "consumer_injected_count": self.consumer_injected_count,
                 "extraction_candidate_count": self.extraction_candidate_count,
                 "accepted_count": self.accepted_count,
@@ -271,6 +299,15 @@ class ProgressVector:
                 "injected_count": self.injected_count,
                 "injected_block_chars": self.injected_block_chars,
                 "injected_block_est_tokens": self.injected_block_est_tokens,
+                "recall_fired_total": self.recall_fired_total,
+                "recall_fired_user_message": self.recall_fired_user_message,
+                "recall_fired_tool_failure": self.recall_fired_tool_failure,
+                "recall_returned_total": self.recall_returned_total,
+                "recall_returned_count_sum": self.recall_returned_count_sum,
+                "no_keywords_count": self.no_keywords_count,
+                "served_attempted": self.served_attempted,
+                "served_failed": self.served_failed,
+                "served_confirmed": self.served_confirmed,
                 "consumer_injected_count": self.consumer_injected_count,
                 "extraction_candidate_count": self.extraction_candidate_count,
                 "accepted_count": self.accepted_count,
@@ -296,6 +333,19 @@ class ProgressVector:
             "injected_count": self.injected_count,
             "injected_block_chars": self.injected_block_chars,
             "injected_block_est_tokens": self.injected_block_est_tokens,
+            "recall_fired_total": self.recall_fired_total,
+            "recall_fired_user_message": self.recall_fired_user_message,
+            "recall_fired_tool_failure": self.recall_fired_tool_failure,
+            "recall_returned_total": self.recall_returned_total,
+            "recall_returned_count_sum": self.recall_returned_count_sum,
+            "no_keywords_count": self.no_keywords_count,
+            "served_attempted": self.served_attempted,
+            "served_failed": self.served_failed,
+            "served_confirmed": self.served_confirmed,
+            # Derived ratios: not telemetry seams.
+            "recall_return_rate": self.recall_return_rate,
+            "inject_yield": self.inject_yield,
+            "serve_success_rate": self.serve_success_rate,
             "consumer_injected_count": self.consumer_injected_count,
             "extraction_candidate_count": self.extraction_candidate_count,
             "accepted_count": self.accepted_count,
@@ -327,6 +377,18 @@ class ProgressVector:
             injected_count=_optional_int(d.get("injected_count")),
             injected_block_chars=_optional_int(d.get("injected_block_chars")),
             injected_block_est_tokens=_optional_int(d.get("injected_block_est_tokens")),
+            recall_fired_total=_optional_int(d.get("recall_fired_total")),
+            recall_fired_user_message=_optional_int(d.get("recall_fired_user_message")),
+            recall_fired_tool_failure=_optional_int(d.get("recall_fired_tool_failure")),
+            recall_returned_total=_optional_int(d.get("recall_returned_total")),
+            recall_returned_count_sum=_optional_int(d.get("recall_returned_count_sum")),
+            no_keywords_count=_optional_int(d.get("no_keywords_count")),
+            served_attempted=_optional_int(d.get("served_attempted")),
+            served_failed=_optional_int(d.get("served_failed")),
+            served_confirmed=_optional_int(d.get("served_confirmed")),
+            recall_return_rate=_optional_float(d.get("recall_return_rate")),
+            inject_yield=_optional_float(d.get("inject_yield")),
+            serve_success_rate=_optional_float(d.get("serve_success_rate")),
             consumer_injected_count=_optional_int(d.get("consumer_injected_count")),
             extraction_candidate_count=_optional_int(d.get("extraction_candidate_count")),
             accepted_count=_optional_int(d.get("accepted_count")),

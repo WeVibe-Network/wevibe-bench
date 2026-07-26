@@ -115,6 +115,45 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         else None
     )
 
+    recall_fired_total = _optional_int(_field(result, "recall_fired_total"))
+    recall_fired_user_message = _optional_int(_field(result, "recall_fired_user_message"))
+    recall_fired_tool_failure = _optional_int(_field(result, "recall_fired_tool_failure"))
+    recall_returned_total = _optional_int(_field(result, "recall_returned_total"))
+    recall_returned_count_sum = _optional_int(_field(result, "recall_returned_count_sum"))
+    no_keywords_count = _optional_int(_field(result, "no_keywords_count"))
+    served_attempted = _optional_int(_field(result, "served_attempted"))
+    served_failed = _optional_int(_field(result, "served_failed"))
+    served_confirmed = _optional_int(_field(result, "served_confirmed"))
+
+    result_injected = _optional_int(_field(result, "injected_count"))
+    injected_count = (
+        result_injected
+        if result_injected is not None
+        else _optional_int(_field(cell, "injection_count"))
+    )
+
+    recall_return_rate = (
+        recall_returned_total / recall_fired_total
+        if recall_returned_total is not None
+        and recall_fired_total is not None
+        and recall_fired_total > 0
+        else None
+    )
+    inject_yield = (
+        injected_count / recall_returned_count_sum
+        if injected_count is not None
+        and recall_returned_count_sum is not None
+        and recall_returned_count_sum > 0
+        else None
+    )
+    serve_success_rate = (
+        served_confirmed / served_attempted
+        if served_confirmed is not None
+        and served_attempted is not None
+        and served_attempted > 0
+        else None
+    )
+
     return ProgressVector(
         problems_before=problems_before,
         problems_after=problems_after,
@@ -128,9 +167,21 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         total_tokens=total_tokens,
         wall_seconds=_float_or_default(_field(result, "wall_seconds"), default=0.0),
         wall_cost_usd=_float_or_default(_field(result, "wall_cost_usd"), default=0.0),
-        injected_count=_optional_int(_field(cell, "injection_count")),
+        injected_count=injected_count,
         injected_block_chars=_optional_int(_field(cell, "injected_block_chars")),
         injected_block_est_tokens=_optional_int(_field(cell, "injected_block_est_tokens")),
+        recall_fired_total=recall_fired_total,
+        recall_fired_user_message=recall_fired_user_message,
+        recall_fired_tool_failure=recall_fired_tool_failure,
+        recall_returned_total=recall_returned_total,
+        recall_returned_count_sum=recall_returned_count_sum,
+        no_keywords_count=no_keywords_count,
+        served_attempted=served_attempted,
+        served_failed=served_failed,
+        served_confirmed=served_confirmed,
+        recall_return_rate=recall_return_rate,
+        inject_yield=inject_yield,
+        serve_success_rate=serve_success_rate,
         consumer_injected_count=None,
         tool_calls=_optional_int(_field(result, "tool_calls")),
         test_invocations=_optional_int(_field(result, "test_invocations")),

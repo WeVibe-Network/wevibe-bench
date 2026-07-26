@@ -581,3 +581,180 @@ def test_manifest_session_records_support_done_state_equivalent_convergence() ->
     assert convergence["resolved_total"] == 1
     assert isinstance(convergence["trend_hash"], str)
     assert len(convergence["trend_hash"]) == 8
+
+
+def _make_backgammon_cell_result(**overrides: Any) -> BackgammonCellResult:
+    base: dict[str, Any] = {
+        "verdict": "PASS",
+        "attempts_to_green": 1,
+        "termination_reason": "gates_green",
+        "conformed": True,
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "turns": 2,
+        "wall_seconds": 1.5,
+        "delivery": "YES",
+        "failed_gates": [],
+        "problems_final": [],
+        "attempt_reports": [],
+        "worktree": "/tmp/worktree",
+        "session_id": "sess-recall-funnel",
+        "memory_mode": "on",
+        "model": "openrouter/anthropic/claude-opus-4.8",
+    }
+    base.update(overrides)
+    return BackgammonCellResult(**base)
+
+
+def test_progress_from_cell_result_maps_all_recall_serve_telemetry_fields() -> None:
+    result = _make_backgammon_cell_result(
+        recall_fired_total=5,
+        recall_fired_user_message=2,
+        recall_fired_tool_failure=3,
+        recall_returned_total=4,
+        recall_returned_count_sum=9,
+        no_keywords_count=1,
+        served_attempted=4,
+        served_failed=1,
+        served_confirmed=3,
+    )
+
+    progress = progress_from_cell_result(result)
+
+    assert progress.recall_fired_total == 5
+    assert progress.recall_fired_user_message == 2
+    assert progress.recall_fired_tool_failure == 3
+    assert progress.recall_returned_total == 4
+    assert progress.recall_returned_count_sum == 9
+    assert progress.no_keywords_count == 1
+    assert progress.served_attempted == 4
+    assert progress.served_failed == 1
+    assert progress.served_confirmed == 3
+
+
+def test_progress_from_cell_result_computes_recall_funnel_ratios() -> None:
+    result = _make_backgammon_cell_result(
+        recall_fired_total=4,
+        recall_returned_total=3,
+        recall_returned_count_sum=6,
+        injected_count=3,
+        served_attempted=4,
+        served_confirmed=3,
+        served_failed=1,
+    )
+
+    progress = progress_from_cell_result(result)
+
+    assert progress.recall_return_rate == pytest.approx(0.75)
+    assert progress.inject_yield == pytest.approx(0.5)
+    assert progress.serve_success_rate == pytest.approx(0.75)
+
+
+def test_progress_from_cell_result_ratio_fields_are_none_with_zero_denominators() -> None:
+    result = _make_backgammon_cell_result(
+        recall_fired_total=0,
+        recall_returned_total=0,
+        recall_returned_count_sum=0,
+        injected_count=0,
+        served_attempted=0,
+        served_confirmed=0,
+    )
+
+    progress = progress_from_cell_result(result)
+
+    assert progress.recall_return_rate is None
+    assert progress.inject_yield is None
+    assert progress.serve_success_rate is None
+
+
+def test_progress_from_cell_result_coalesces_injected_count_result_then_cell() -> None:
+    result_value = _make_backgammon_cell_result(injected_count=7)
+    progress_value = progress_from_cell_result(result_value)
+    assert progress_value.injected_count == 7
+
+    fallback_result = _make_backgammon_cell_result(injected_count=None)
+    fallback_progress = progress_from_cell_result(
+        fallback_result,
+        cell={"injection_count": 5},
+    )
+    assert fallback_progress.injected_count == 5
+
+
+def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_only() -> None:
+    result = _make_backgammon_cell_result(
+        recall_fired_total=None,
+        recall_fired_user_message=None,
+        recall_fired_tool_failure=None,
+        recall_returned_total=None,
+        recall_returned_count_sum=None,
+        no_keywords_count=None,
+        injected_count=None,
+        served_attempted=None,
+        served_failed=None,
+        served_confirmed=None,
+    )
+
+    progress = progress_from_cell_result(result)
+
+    assert progress.recall_fired_total is None
+    assert progress.recall_fired_user_message is None
+    assert progress.recall_fired_tool_failure is None
+    assert progress.recall_returned_total is None
+    assert progress.recall_returned_count_sum is None
+    assert progress.no_keywords_count is None
+    assert progress.injected_count is None
+    assert progress.served_attempted is None
+    assert progress.served_failed is None
+    assert progress.served_confirmed is None
+
+    assert "recall_fired_total" in progress.missing_telemetry_seams
+    assert "recall_fired_user_message" in progress.missing_telemetry_seams
+    assert "recall_fired_tool_failure" in progress.missing_telemetry_seams
+    assert "recall_returned_total" in progress.missing_telemetry_seams
+    assert "recall_returned_count_sum" in progress.missing_telemetry_seams
+    assert "no_keywords_count" in progress.missing_telemetry_seams
+    assert "injected_count" in progress.missing_telemetry_seams
+    assert "served_attempted" in progress.missing_telemetry_seams
+    assert "served_failed" in progress.missing_telemetry_seams
+    assert "served_confirmed" in progress.missing_telemetry_seams
+
+    assert progress.recall_return_rate is None
+    assert progress.inject_yield is None
+    assert progress.serve_success_rate is None
+    assert "recall_return_rate" not in progress.missing_telemetry_seams
+    assert "inject_yield" not in progress.missing_telemetry_seams
+    assert "serve_success_rate" not in progress.missing_telemetry_seams
+
+
+def test_progress_vector_round_trip_preserves_recall_funnel_fields() -> None:
+    vector = ProgressVector(
+        recall_fired_total=8,
+        recall_fired_user_message=5,
+        recall_fired_tool_failure=3,
+        recall_returned_total=6,
+        recall_returned_count_sum=12,
+        no_keywords_count=2,
+        injected_count=4,
+        served_attempted=5,
+        served_failed=1,
+        served_confirmed=4,
+        recall_return_rate=0.75,
+        inject_yield=4 / 12,
+        serve_success_rate=0.8,
+        missing_telemetry_seams=[],
+    )
+
+    payload = vector.to_dict()
+    restored = ProgressVector.from_dict(payload)
+
+    assert restored.to_dict() == payload
+    assert restored.recall_fired_total == 8
+    assert restored.recall_fired_user_message == 5
+    assert restored.recall_fired_tool_failure == 3
+    assert restored.recall_returned_total == 6
+    assert restored.recall_returned_count_sum == 12
+    assert restored.no_keywords_count == 2
+    assert restored.injected_count == 4
+    assert restored.served_attempted == 5
+    assert restored.served_failed == 1
+    assert restored.served_confirmed == 4
