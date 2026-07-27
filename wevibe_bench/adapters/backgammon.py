@@ -429,6 +429,56 @@ def _default_progress(message: str) -> None:
     print(f"[bg] {stamp} {message}", flush=True)
 
 
+def build_worker_opencode_config(
+    *,
+    model: str,
+    reasoning_effort: str | None,
+    proxy_base_url: str | None,
+    gates_dir: str,
+    golden_dir: str,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": model,
+        "small_model": model,
+        "permission": {
+            "*": "allow",
+            "external_directory": {"*": "deny"},
+            "bash": {
+                "*": "allow",
+                f"*{gates_dir}*": "deny",
+                f"*{golden_dir}*": "deny",
+                "*report.mjs*": "deny",
+                "*run.mjs*": "deny",
+            },
+            "edit": {"*": "allow", "*opencode.json": "deny"},
+            "doom_loop": "deny",
+            "question": "deny",
+        },
+    }
+    provider_id, _, model_id = model.partition("/")
+    provider_config: dict[str, Any] = {}
+    if proxy_base_url is not None:
+        provider_config["openrouter"] = {
+            "options": {
+                "baseURL": proxy_base_url,
+            }
+        }
+
+    if provider_id and model_id:
+        provider_block = provider_config.setdefault(provider_id, {})
+        models_block = provider_block.setdefault("models", {})
+        model_block = models_block.setdefault(model_id, {})
+        model_block["name"] = model_id
+        if reasoning_effort is not None:
+            options = model_block.setdefault("options", {})
+            options["reasoning"] = {"effort": reasoning_effort}
+
+    if provider_config:
+        config["provider"] = provider_config
+    return config
+
+
 class BackgammonRunner(AgentRunner):
     def __init__(
         self,
@@ -1202,50 +1252,28 @@ class BackgammonRunner(AgentRunner):
     def _write_worker_permission_config(self, *, worktree: Path) -> None:
         gates_dir = str((self.task_dir / "gates").resolve())
         golden_dir = str((self.task_dir / "golden").resolve())
-        config = {
-            "$schema": "https://opencode.ai/config.json",
-            "model": self.model,
-            "small_model": self.model,
-            "permission": {
-                "*": "allow",
-                "external_directory": {"*": "deny"},
-                "bash": {
-                    "*": "allow",
-                    f"*{gates_dir}*": "deny",
-                    f"*{golden_dir}*": "deny",
-                    "*report.mjs*": "deny",
-                    "*run.mjs*": "deny",
-                },
-                "edit": {"*": "allow", "*opencode.json": "deny"},
-                "doom_loop": "deny",
-                "question": "deny",
-            },
-        }
+        config = build_worker_opencode_config(
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            proxy_base_url=self.proxy_base_url,
+            gates_dir=gates_dir,
+            golden_dir=golden_dir,
+        )
         provider_id, _, model_id = self.model.partition("/")
-        provider_config: dict[str, Any] = {}
-        if self.proxy_base_url is not None:
-            provider_config["openrouter"] = {
-                "options": {
-                    "baseURL": self.proxy_base_url,
-                }
-            }
+        if provider_id and model_id:
+            self._progress(
+                "PROGRESS step=worker-permission-config "
+                f"model_declared={model_id} provider={provider_id}"
+            )
 
         # Output token caps are enforced via Docker env
         # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, not model `options.max_tokens`
         # in opencode.json.
         if provider_id and model_id and self.reasoning_effort is not None:
-            provider_block = provider_config.setdefault(provider_id, {})
-            models_block = provider_block.setdefault("models", {})
-            model_block = models_block.setdefault(model_id, {})
-            options = model_block.setdefault("options", {})
-            options["reasoning"] = {"effort": self.reasoning_effort}
             self._progress(
                 "PROGRESS step=worker-permission-config "
                 f"reasoning_effort={self.reasoning_effort} model={self.model}"
             )
-
-        if provider_config:
-            config["provider"] = provider_config
         (worktree / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         self._progress(
             "PROGRESS step=worker-permission-config external_directory=deny "

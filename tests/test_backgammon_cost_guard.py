@@ -14,6 +14,7 @@ from wevibe_bench.adapters.backgammon import (
     DEFAULT_RUN_TIMEOUT_S,
     BackgammonRunner,
     _OpencodeRunStats,
+    build_worker_opencode_config,
     reconcile_derived_vs_billing,
 )
 from wevibe_bench.adapters.docker_worker import DockerCellConfig, _build_run_argv
@@ -85,6 +86,7 @@ def test_write_worker_config_injects_reasoning_effort(tmp_path: Path) -> None:
     config = json.loads((worktree / "opencode.json").read_text(encoding="utf-8"))
 
     options = config["provider"]["openrouter"]["models"]["anthropic/claude-opus-4.8"]["options"]
+    assert config["provider"]["openrouter"]["models"]["anthropic/claude-opus-4.8"]["name"] == "anthropic/claude-opus-4.8"
     assert options["reasoning"]["effort"] == "high"
     assert "max_tokens" not in options
     assert "permission" in config
@@ -154,7 +156,7 @@ def test_canonical_run_timeout_is_5400_and_cli_default_carries_it() -> None:
     assert args.run_timeout == DEFAULT_RUN_TIMEOUT_S
 
 
-def test_write_worker_config_no_provider_when_options_unset(tmp_path: Path) -> None:
+def test_write_worker_config_declares_model_when_reasoning_unset(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path, reasoning_effort=None, max_output_tokens=None)
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
@@ -162,7 +164,51 @@ def test_write_worker_config_no_provider_when_options_unset(tmp_path: Path) -> N
     runner._write_worker_permission_config(worktree=worktree)
     config = json.loads((worktree / "opencode.json").read_text(encoding="utf-8"))
 
-    assert "provider" not in config
+    model_block = config["provider"]["openrouter"]["models"]["anthropic/claude-opus-4.8"]
+    assert model_block["name"] == "anthropic/claude-opus-4.8"
+    assert "options" not in model_block
+
+
+def test_build_worker_opencode_config_plain_roster_declares_openrouter_model() -> None:
+    config = build_worker_opencode_config(
+        model="openrouter/kimi/kimi-k3",
+        reasoning_effort=None,
+        proxy_base_url=None,
+        gates_dir="/g",
+        golden_dir="/go",
+    )
+
+    model_block = config["provider"]["openrouter"]["models"]["kimi/kimi-k3"]
+    assert model_block["name"] == "kimi/kimi-k3"
+    assert "options" not in model_block
+
+
+def test_build_worker_opencode_config_proxy_base_url_and_models_coexist() -> None:
+    config = build_worker_opencode_config(
+        model="openrouter/kimi/kimi-k3",
+        reasoning_effort=None,
+        proxy_base_url="http://127.0.0.1:8999/api/openrouter",
+        gates_dir="/g",
+        golden_dir="/go",
+    )
+
+    openrouter = config["provider"]["openrouter"]
+    assert openrouter["options"]["baseURL"] == "http://127.0.0.1:8999/api/openrouter"
+    assert openrouter["models"]["kimi/kimi-k3"]["name"] == "kimi/kimi-k3"
+
+
+def test_build_worker_opencode_config_reasoning_effort_keeps_name_and_options() -> None:
+    config = build_worker_opencode_config(
+        model="openrouter/kimi/kimi-k3",
+        reasoning_effort="high",
+        proxy_base_url=None,
+        gates_dir="/g",
+        golden_dir="/go",
+    )
+
+    model_block = config["provider"]["openrouter"]["models"]["kimi/kimi-k3"]
+    assert model_block["name"] == "kimi/kimi-k3"
+    assert model_block["options"]["reasoning"]["effort"] == "high"
 
 
 def test_init_rejects_bad_reasoning_effort(tmp_path: Path) -> None:

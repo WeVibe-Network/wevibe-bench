@@ -23,10 +23,14 @@ import logging
 import os
 import pathlib
 import socket
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
 
+from wevibe_bench.adapters.backgammon import build_worker_opencode_config
+from wevibe_bench.adapters.docker_worker import WORKER_IMAGE, docker_available, image_exists
 from wevibe_bench.lifecycle.logging_util import fp, new_trace_id
 from wevibe_bench.lifecycle.signing import wevibe_signed_headers
 
@@ -69,6 +73,196 @@ REMEDIATION = (
 
 class PreflightError(RuntimeError):
     """Raised when a required recall tier is down/unhealthy. Message names the fix."""
+
+
+class WorkerModelProbeResult(NamedTuple):
+    exit_code: int
+    output: str
+
+
+DockerProbe = Callable[[str, str, float], WorkerModelProbeResult]
+
+
+_MODEL_REJECTION_MARKERS: tuple[str, ...] = (
+    "ProviderModelNotFoundError",
+    "Model not found",
+)
+
+
+def _default_worker_model_probe(image: str, model: str, timeout_s: float) -> WorkerModelProbeResult:
+    with tempfile.TemporaryDirectory(prefix="wevibe-worker-model-probe-") as temp_dir:
+        temp_path = pathlib.Path(temp_dir)
+        config_payload = build_worker_opencode_config(
+            model=model,
+            reasoning_effort=None,
+            proxy_base_url="http://127.0.0.1:9/api/v1",
+            gates_dir="/nonexistent-gates",
+            golden_dir="/nonexistent-golden",
+        )
+        config_path = temp_path / "opencode.json"
+        config_path.write_text(
+            json.dumps(config_payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--tmpfs",
+            "/tmp:mode=1777",
+            "-e",
+            "HOME=/tmp",
+            "-v",
+            f"{temp_dir}:/work:ro",
+            image,
+            "opencode",
+            "run",
+            "--model",
+            model,
+            "--dir",
+            "/work",
+            "--print-logs",
+        ]
+        completed = subprocess.run(
+            cmd,
+            input="ping\n",
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
+        output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
+        return WorkerModelProbeResult(exit_code=completed.returncode, output=output)
+
+
+def _first_probe_evidence_line(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return "none"
+    for line in lines:
+        lower_line = line.casefold()
+        if "error" in lower_line or "refused" in lower_line or "econn" in lower_line:
+            return line[:240]
+    return lines[0][:240]
+
+
+def verify_worker_model_acceptance(
+    *,
+    models: Sequence[str],
+    image: str = WORKER_IMAGE,
+    timeout_s: float = 60.0,
+    logger: logging.Logger | None = None,
+    docker_probe: "DockerProbe | None" = None,
+) -> None:
+    """Fail-fast preflight: prove worker opencode accepts each roster model slug."""
+    log = logger or LOGGER
+    remediation = (
+        " declare the roster model under provider.<provider-id>.models in worker opencode.json "
+        "(see build_worker_opencode_config in wevibe_bench/adapters/backgammon.py) "
+        "or use a catalog-known slug; see report "
+        "27-07-26-1038-smoke3-kimik3-harness-error-model-not-found.md"
+    )
+
+    seen: set[str] = set()
+    ordered_models: list[str] = []
+    for raw in models:
+        slug = str(raw).strip()
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        ordered_models.append(slug)
+
+    if not ordered_models:
+        log.info("preflight.worker_model_acceptance outcome=ok checked=0 reason=no_models")
+        return
+
+    docker_ok, docker_detail = docker_available()
+    if not docker_ok:
+        log.info(
+            "preflight.worker_model_acceptance outcome=fail reason=docker-unavailable image=%s detail=%s",
+            image,
+            docker_detail,
+        )
+        raise PreflightError(
+            "PREFLIGHT FAILED: worker model acceptance reason=docker-unavailable "
+            f"image={image} detail={docker_detail};" + remediation
+        )
+
+    if not image_exists(image):
+        log.info(
+            "preflight.worker_model_acceptance outcome=fail reason=image-missing image=%s",
+            image,
+        )
+        raise PreflightError(
+            "PREFLIGHT FAILED: worker model acceptance reason=image-missing "
+            f"image={image}; build/pull the worker image before running benchmarks;" + remediation
+        )
+
+    probe = docker_probe or _default_worker_model_probe
+    for model in ordered_models:
+        try:
+            result = probe(image, model, timeout_s)
+        except subprocess.TimeoutExpired:
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=probe-timeout timeout_s=%s",
+                model,
+                timeout_s,
+            )
+            raise PreflightError(
+                "PREFLIGHT FAILED: worker model acceptance "
+                f"model={model} reason=probe-timeout timeout_s={timeout_s};" + remediation
+            ) from None
+
+        evidence = _first_probe_evidence_line(result.output)
+        if any(marker in result.output for marker in _MODEL_REJECTION_MARKERS):
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=catalog-rejected exit_code=%s evidence=%s",
+                model,
+                result.exit_code,
+                evidence,
+            )
+            raise PreflightError(
+                "PREFLIGHT FAILED: worker model acceptance "
+                f"model={model} reason=catalog-rejected evidence={evidence};" + remediation
+            )
+
+        lowered = result.output.casefold()
+        if (
+            "cannot connect to the docker daemon" in lowered
+            or "is the docker daemon running" in lowered
+            or "error response from daemon" in lowered
+        ):
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=docker-unavailable exit_code=%s evidence=%s",
+                model,
+                result.exit_code,
+                evidence,
+            )
+            raise PreflightError(
+                "PREFLIGHT FAILED: worker model acceptance "
+                f"model={model} reason=docker-unavailable evidence={evidence};" + remediation
+            )
+
+        if "unable to find image" in lowered or "no such image" in lowered or "pull access denied" in lowered:
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=image-missing exit_code=%s evidence=%s",
+                model,
+                result.exit_code,
+                evidence,
+            )
+            raise PreflightError(
+                "PREFLIGHT FAILED: worker model acceptance "
+                f"model={model} reason=image-missing evidence={evidence};" + remediation
+            )
+
+        log.info(
+            "preflight.worker_model_acceptance outcome=ok model=%s exit_code=%s evidence=%s",
+            model,
+            result.exit_code,
+            evidence,
+        )
 
 
 def _http_get(

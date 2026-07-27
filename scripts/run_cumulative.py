@@ -79,7 +79,7 @@ from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_rest import McpRest
-from wevibe_bench.preflight import verify_org_checklist
+from wevibe_bench.preflight import verify_org_checklist, verify_worker_model_acceptance
 
 IS_PRIMARY_SCORED_PATH = True
 _LOG = logging.getLogger("run_cumulative")
@@ -1322,6 +1322,19 @@ def _build_real_runner_and_leader_client(
         identity=leader,
         logger=_LOG,
     )
+    roster_filter = str(getattr(args, "roster_model", "") or "").strip()
+    roster_marker = roster_filter.casefold() if roster_filter else None
+    accepted_models: list[str] = []
+    seen_models: set[str] = set()
+    for rung in config.BACKGAMMON_SCORED_LADDER_ROSTER:
+        slug = str(rung.model)
+        if roster_marker and roster_marker not in slug.casefold():
+            continue
+        if slug in seen_models:
+            continue
+        seen_models.add(slug)
+        accepted_models.append(slug)
+    verify_worker_model_acceptance(models=accepted_models, logger=_LOG)
     extract_prompt = _load_required_text(repo_root / "scaffold" / "sxe-candidate" / "E-assembled.txt")
 
     contributor_rest = _PromptInjectingCaptureRest(

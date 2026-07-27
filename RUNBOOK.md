@@ -119,6 +119,26 @@ python scripts/docker_isolation_smoke.py
 smoke proving oracle/golden/runner/host paths are absent inside the container and exported `/work` edits are scored
 host-side by a dummy oracle (NO paid model, NO live corpus).
 
+### Worker model-acceptance probe (mandatory after any roster/worker-path change)
+A model swap (or any worker-path change) is **not verified** until the worker image's OpenCode resolves the new slug
+**inside the real worker container**. Curl-only checks are never sufficient.
+
+Worker-catalog acceptance and transport acceptance are distinct gates:
+- Catalog acceptance is whether OpenCode accepts the slug at model-resolution time.
+- Transport acceptance is whether the HTTP/proxy path works once a request is emitted.
+- `ProviderModelNotFoundError` (`Model not found`) is a catalog rejection thrown pre-HTTP; curl cannot observe it.
+
+Enforcement is automatic: `verify_worker_model_acceptance` runs in `scripts/run_cumulative.py` preflight (alongside
+`verify_org_checklist`) before any paid cell. It does a scratch `docker run --rm` per roster slug and fails fast in
+seconds at $0, naming the rejected slug.
+
+Manual repro shape: generate worktree `opencode.json` via `build_worker_opencode_config`, then run `docker run --rm -i -v <worktree>:/work:ro wevibe-bench-worker:v1 opencode run --model <slug> --dir /work --print-logs`.
+`ProviderModelNotFoundError`/`Model not found` means catalog rejection; later classes (connection/auth) mean catalog
+accepted and failure is downstream.
+
+Incident refs: `27-07-26-1038-smoke3-kimik3-harness-error-model-not-found.md` (SMOKE-3 `harness_error` at turn 0)
+and `27-07-26-0941-bench-glm-to-kimi-k3-swap.md`.
+
 ### How a cell runs (informational)
 - `backgammon.py` preflights `docker_available()` + `image_exists()`.
 - The adapter starts one container per cell, mounting ONLY the worktree at `/work`.
