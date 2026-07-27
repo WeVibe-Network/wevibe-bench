@@ -162,8 +162,8 @@ class DockerCell:
         proxy_token = (self.config.proxy_token or "").strip()
         if not proxy_token:
             raise ValueError(
-                "proxy token required; direct OpenRouter key forwarding is removed "
-                "(R-13 one path, no fallback)"
+                "proxy token required; direct OrcaRouter key forwarding is removed "
+                "(worker uses spend-proxy token path only; R-13 one path, no fallback)"
             )
 
         key_present = True
@@ -197,7 +197,7 @@ class DockerCell:
             )
 
         run_env = os.environ.copy()
-        run_env["OPENROUTER_API_KEY"] = proxy_token
+        run_env["ORCAROUTER_API_KEY"] = proxy_token
 
         self._progress(
             "PROGRESS docker-run start "
@@ -620,7 +620,7 @@ def _build_run_argv(
         "-e",
         "OPENCODE_CONFIG=/etc/xdg/opencode/opencode.json",
         "-e",
-        "OPENROUTER_API_KEY",
+        "ORCAROUTER_API_KEY",
         "-v",
         mount,
     ]

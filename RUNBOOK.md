@@ -100,6 +100,28 @@ Per-run reset is CODE FIXTURE ONLY; do NOT re-wipe chain/pg/qdrant and do NOT re
 `WEVIBE_BENCH_ENDPOINTS=1` enables the bench-only `/v1/submit` + `/v1/identity/pubkeys` endpoints.
 The `/v1/health` route is always present (no bench flag needed).
 
+## Open-source quickstart (.env)
+
+For a clean open-source setup on the spend-proxy path:
+
+1. Copy `.env.example` to `.env` in this repo.
+2. Create a bench spend-proxy consumer token (shown once):
+   ```bash
+   uv run python scripts/spend_proxy_admin.py create-consumer --consumer-id bench
+   ```
+   - Admin token env is `SPEND_PROXY_ADMIN_TOKEN` (default: `spend_proxy_admin_dev`).
+   - Save the returned raw token as `ORCAROUTER_API_KEY` in `.env` (never commit this).
+   - There is no revoke endpoint today; use `list-consumers` to inspect existing consumers.
+3. Optional local overrides in `.env`:
+   - `WEVIBE_BENCH_SPEND_DB_DSN` (defaults to spend-proxy Postgres on `127.0.0.1:5440`).
+   - `WEVIBE_BENCH_SPEND_PROXY_BASE_URL` (defaults to `http://127.0.0.1:4480/v1`).
+4. Key resolution order for `ORCAROUTER_API_KEY` is:
+   - `.env` first,
+   - then process env,
+   - then fallback to `~/.config/opencode/opencode.json` at
+     `provider.orcarouter.options.apiKey`.
+   Missing key/config fails loudly (`SpendKeyError`) and points to `.env.example`.
+
 ## Docker sandbox workers (Architecture A)
 
 ### Build the pinned worker image (once / when Dockerfile changes)
@@ -154,114 +176,110 @@ and `27-07-26-0941-bench-glm-to-kimi-k3-swap.md`.
   processes.
 - OFF/ON recall reaches the host clone at `host.docker.internal:4550`; NO host keys/corpus enter the container.
 
-## OpenRouter proxy (the ONE paid transport path)
+## Spend-proxy (:4480) — the ONE paid transport path
 
-This proxy is the only paid-transport path for benchmark cells.
+This is the only paid transport path for benchmark cells. The old per-cell
+`:8789` openrouter proxy launch path is retired.
 
-- Host-side proxy process (`scripts/run_openrouter_proxy.py`) sources the REAL
-  OpenRouter upstream key at launch from OpenCode auth (`~/.local/share/opencode/auth.json`).
-  Use `--auth-path` only to override location in tests; there is no env-var path and no fallback.
-- Docker workers receive only an ephemeral per-run bearer token + proxy base URL.
-- The proxy hard-injects provider routing policy and hard-clamps output-token ceilings.
-- R-13 one path: direct provider-key forwarding/fallback is removed.
-- R-37 observability: run with a dedicated timestamped logfile under
-  `runs/openrouter-proxy/`.
+### Runtime architecture (sealed :4480 path)
 
-### Start the proxy (host shell only)
+- The bench uses the standing spend-proxy at `http://127.0.0.1:4480/v1`.
+- Upstream routing is OrcaRouter-only.
+- A dedicated bench consumer token is created once via
+  `scripts/spend_proxy_admin.py create-consumer --consumer-id bench`; token is
+  shown once and stored locally as `ORCAROUTER_API_KEY` in `.env`.
+- Worker config sets provider `orcarouter` with container base URL
+  `http://host.docker.internal:4480/v1`, `apiKey:"{env:ORCAROUTER_API_KEY}"`,
+  and a model block mirroring manager session knobs (`name` / `reasoning` /
+  `tool_call` / `limit`) plus worker-only
+  `interleaved:{field:"reasoning_content"}` and
+  `headers:{"X-Session-Id":<run_id>}`.
+- `max_reasoning_tokens` is a dead field (not used).
 
-```bash
-uv run python scripts/run_openrouter_proxy.py \
-  --run-id <id> \
-  --model openrouter/<vendor>/<model> \
-  --profile <kimik3|glm|mimo|opus> \
-  --cap-usd 12 \
-  --target-usd <lower operational target> \
-  --port 8789 \
-  --checkpoint runs/openrouter-proxy/<run>-budget.json \
-  --log runs/openrouter-proxy/<iso>.log \
-  --max-output-tokens 8192 \
-  --token-file runs/openrouter-proxy/<run>.token
-```
+### Key/config resolution and consumer lifecycle
 
-To authorize a blocked profile with live pricing at launch, add:
-`--authorize --pricing-input <USD/Mtok> --pricing-output <USD/Mtok> [--pricing-cache-read <USD/Mtok>] [--pricing-cache-write <USD/Mtok>]`.
-Pricing values must be live-verified from OpenRouter immediately before each authorized run; pricing snapshots are never baked into code.
+- Key layer SoT: `wevibe_bench/spend_key.py`.
+- `ORCAROUTER_API_KEY` resolution order:
+  1. `.env` (repo-local, gitignored),
+  2. process env,
+  3. `~/.config/opencode/opencode.json`
+     `provider.orcarouter.options.apiKey` fallback.
+- Missing key raises loud `SpendKeyError` naming all checked locations and
+  pointing to `.env.example`.
+- Optional overrides:
+  - `WEVIBE_BENCH_SPEND_DB_DSN`
+  - `WEVIBE_BENCH_SPEND_PROXY_BASE_URL`
+- Consumer admin:
+  - Create: `uv run python scripts/spend_proxy_admin.py create-consumer --consumer-id bench`
+  - List: `uv run python scripts/spend_proxy_admin.py list-consumers`
+  - Admin token env: `SPEND_PROXY_ADMIN_TOKEN` (default `spend_proxy_admin_dev`)
+  - No revoke endpoint exists today.
 
-The proxy prints `http://host.docker.internal:8789/api/v1` on startup and writes
-an ephemeral run token to `--token-file` (0600 permissions).
+### Run path and attribution
 
-### Wire the worker (the worker never gets the real key)
+- Scored ladder does not launch `:8789`; it uses standing `:4480` + bench token.
+- Every worker/extraction LLM call carries `X-Session-Id:<run_id>` for spend
+  attribution.
+- Extraction LLM leg routes through the vendored MCP clone to `:4480` and now
+  sets `X-Session-Id` on outbound calls.
+- **Important:** the clone serves from `dist/`; attribution code changes require
+  `npm run build` plus restart before they take effect.
 
-```bash
-scripts/run_backgammon.py \
-  --proxy-base-url http://host.docker.internal:8789/api/v1 \
-  --proxy-token-file runs/openrouter-proxy/<run>.token \
-  ...
-```
+### Metering (read-only) and budget semantics
 
-`run_backgammon.py` reads the token file and threads only that token into Docker
-as `OPENROUTER_API_KEY`. The real OpenRouter key never enters the worker.
+- `wevibe_bench/proxy_meter.py` (`SpendMeter`) reads Postgres (default
+  `127.0.0.1:5440`, DSN from key layer) and scopes by `session_id=<run_id>`.
+- TRUE spend (budget truth): `SUM(actual_spend_usd)` (cache-discounted real money).
+- BENCHMARK spend (scoring-only): `SUM(theoretical_spend_usd)` (synthetic full-price).
+- Direct SQL is intentional (not `/v1/spend/sessions`) because that endpoint has
+  no session filter and omits `upstream_model`.
+- `budget.json` checkpoint flow is retired and kept only as marked reference.
 
-### Policy + budget invariants enforced by proxy
+### Safeguards on the spend-proxy path
 
-- Exact per-profile provider policy is enforced on every request (SoT = `DEFAULT_PROFILES` in `wevibe_bench/adapters/openrouter_proxy.py`):
-  - active worker `kimik3` (`kimi/kimi-k3`) routes upstream `orcarouter` with no provider pins,
-  - `glm`, `hy3`, and `kimicode` are also orcarouter-direct with no provider pins,
-  - `opus` remains pinned to Anthropic.
-- Client-supplied `provider` is rejected.
-- Request model must match the selected profile model.
-- `max_tokens` is hard-clamped to `--max-output-tokens`.
-- Hard paid ceiling is absolute: `hard_cap = min(--cap-usd, 12.0)`.
-- `--target-usd` is an optional lower operational target (not the hard ceiling).
-- Before dispatch, proxy reserves a conservative worst-case USD bound.
-- If projected cumulative spend would exceed hard cap, request is refused
-  before dispatch.
-- On uncertainty (missing/invalid `usage.cost`, upstream error, stream failure),
-  reservation is retained as committed-unproven (never released).
-- Budget checkpoint persists atomically and is policy-bound to
-  `(run-id, model, profile, hard_cap)`; resume under mismatched policy is
-  refused.
-- `--reject-on-equality` is optional stricter mode (default allows projected
-  equality and refuses only projected greater-than cap).
+- Run-start pricing verify via `/v1/pricing/models`; start aborts on drift;
+  pinned pricing version:
+  `c58e194db3f6a20e7d41b8c9e2f05a17`.
+- In-run cap poll uses `SpendMeter.run_spend(run_id).true_usd`; harness aborts
+  at cap. Proxy is watch-only here (it does not refuse requests).
+- Model-identity watch compares `spend_events.upstream_model` basename against
+  requested model; mismatch aborts the cell.
+- `finish_reason:"length"` is logged as TRUNCATION (not treated as clean).
+- `tool_choice:"required"` is banned and guard-tested.
 
-### Checkpoint / restart
+### Zero-tool-turn bounded resume
 
-Restarting the proxy cannot reset spend. If the same run binding is reused, the
-ledger resumes from checkpoint. Any run-id/model/profile/cap mismatch is refused
-at startup.
+If a worker turn ends with zero tool calls and no file writes, harness resumes
+the SAME OpenCode session (`opencode run --session <id> --dir /work --format json`)
+with a short nudge, bounded to at most 2 resumes, then fails honestly.
+The large prompt is never resent.
 
-### Verification (zero-cost)
+### Per-model empirical probe matrix (REQUIRED before new rungs)
 
-Zero-cost verification procedure (fake upstream; no paid OpenRouter call):
+Before introducing any scored ladder rung beyond `kimi/kimi-k3`, run and record
+an empirical multi-turn tool-call probe through `:4480` for each candidate.
+Current pending roster:
 
-```bash
-python -m pytest \
-  tests/test_openrouter_proxy.py \
-  tests/test_openrouter_proxy_server.py \
-  tests/test_openrouter_proxy_docker_e2e.py -q
-```
+- `gemini-3.1-pro`
+- `tencent/hy3`
+- `kimi/kimi-k2.7-code`
+- `anthropic/claude-opus-4.8`
+- `minimax/minimax-m3`
 
-These suites are the policy/budget/routing/streaming/logging proof surface for
-the proxy path.
+Status note: GLM-5.2 was not profiled (deselected on 2026-07-27).
 
-### 1.18.1 residual
+### Retired: :8789 openrouter proxy + budget.json
 
-Base-URL override wiring is proven on OpenCode 1.17.20 and structurally certain
-for the worker's 1.18.1 configuration path. One remaining live-request
-byte-verification is intentionally deferred because it cannot be done zero-cost.
-Known OpenCode 1.18.1 post-completion exit hangs are handled by the driver's
-bounded `--completion-grace` termination path documented above.
+Reference-only (do not re-activate):
 
-### Later (paid) smoke — status update (21-07-26)
-The prior 15-07 passability-first gate text is now historical. Walter GO 21-07-26 authorized the full Stage-7 scored ladder
-(Opus SOURCE OFF+self-extract → kimi OFF/ON → big-pickle OFF/ON), superseding the earlier "Opus passability PASS before scored roster" block.
+- Prior flow launched `scripts/run_openrouter_proxy.py` per cell on `:8789`.
+- Worker path used `http://host.docker.internal:8789/api/v1` plus per-run token files.
+- Budgeting relied on per-run proxy checkpoint JSON (`budget.json` lineage).
 
-Execution happened and crashed: run `20260721T195407Z` completed Cell 1 as a valid 3-attempt capability FAIL, committed one org-0 memory,
-then the harness crashed on `int("FAIL")`. Recovery path is Option B (preserve Cell 1 + memory, patch harness, continue from Cell 2 without
-rerunning/rebilling Cell 1). Use the pinned continuation path in `docs/BENCHMARK-STATE.md §2B`.
-
-**$12 ceiling facts remain unchanged:** paid-cell hard ceiling enforcement is still `min(configured cap, $12)` with cumulative Stage-7/global
-ledger enforcement. This remains paid execution (Walter-authorized), not routine setup/build verification.
+This path was retired after spend-proxy `:4480` migration because standing
+consumer tokens + DB-attributed spend by session provide the single sealed
+transport/metering route. Legacy code/tests remain in-tree and explicitly
+retired-marked for reference.
 
 ## THE HARD RULE
 

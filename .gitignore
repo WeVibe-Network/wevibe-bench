@@ -50,3 +50,6 @@ tasks/**/.last-run.json
 
 # Local orchestration docs (never committed)
 AGENTS.md
+
+# Local bench env
+.env

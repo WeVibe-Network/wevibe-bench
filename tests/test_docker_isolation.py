@@ -180,7 +180,7 @@ def test_docker_cell_forwards_ephemeral_proxy_token_not_host_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    host_openrouter_key = "sk-or-host-openrouter-key"
+    host_orcarouter_key = "sk-or-host-orcarouter-key"
     captured: dict[str, object] = {}
 
     def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -194,7 +194,7 @@ def test_docker_cell_forwards_ephemeral_proxy_token_not_host_key(
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         raise AssertionError(f"unexpected docker invocation: {argv!r}")
 
-    monkeypatch.setenv("OPENROUTER_API_KEY", host_openrouter_key)
+    monkeypatch.setenv("ORCAROUTER_API_KEY", host_orcarouter_key)
     monkeypatch.setattr("wevibe_bench.adapters.docker_worker.ensure_network", lambda *_: None)
     monkeypatch.setattr("wevibe_bench.adapters.docker_worker._host_uid", lambda: 501)
     monkeypatch.setattr("wevibe_bench.adapters.docker_worker._host_gid", lambda: 20)
@@ -222,12 +222,12 @@ def test_docker_cell_forwards_ephemeral_proxy_token_not_host_key(
     assert isinstance(run_argv, list)
     assert isinstance(run_env, dict)
 
-    assert _contains_pair(run_argv, "-e", "OPENROUTER_API_KEY")
-    assert all(not part.startswith("OPENROUTER_API_KEY=") for part in run_argv)
-    assert all(host_openrouter_key not in part for part in run_argv)
+    assert _contains_pair(run_argv, "-e", "ORCAROUTER_API_KEY")
+    assert all(not part.startswith("ORCAROUTER_API_KEY=") for part in run_argv)
+    assert all(host_orcarouter_key not in part for part in run_argv)
 
-    assert run_env.get("OPENROUTER_API_KEY") == TEST_PROXY_TOKEN
-    assert run_env.get("OPENROUTER_API_KEY") != host_openrouter_key
+    assert run_env.get("ORCAROUTER_API_KEY") == TEST_PROXY_TOKEN
+    assert run_env.get("ORCAROUTER_API_KEY") != host_orcarouter_key
 
 
 def test_kill_worker_processes_uses_exec_pkill_without_container_rm(
@@ -788,21 +788,21 @@ def test_image_and_run_argv_do_not_embed_secrets(tmp_path: Path) -> None:
         assert isinstance(item, str)
         key, _, value = item.partition("=")
         key_upper = key.upper()
-        if "OPENROUTER" in key_upper or "SEED" in key_upper or "KEYSTORE" in key_upper:
+        if "ORCAROUTER" in key_upper or "SEED" in key_upper or "KEYSTORE" in key_upper:
             assert value == "", f"sensitive key must not carry a baked value: {key}"
 
     history_out = _run(["docker", "history", "--no-trunc", WORKER_IMAGE], timeout_s=30).stdout
     red_flags = (
-        "OPENROUTER_API_KEY=",
+        "ORCAROUTER_API_KEY=",
         "WEVIBE_IDENTITY_SEED_HEX=",
         "WEVIBE_KEYSTORE_PATH=",
         "WEVIBE_SEED=",
-        "--build-arg OPENROUTER_API_KEY",
+        "--build-arg ORCAROUTER_API_KEY",
     )
     for marker in red_flags:
         assert marker not in history_out
 
-    for env_name in ("OPENROUTER_API_KEY", "WEVIBE_IDENTITY_SEED_HEX", "WEVIBE_KEYSTORE_PATH"):
+    for env_name in ("ORCAROUTER_API_KEY", "WEVIBE_IDENTITY_SEED_HEX", "WEVIBE_KEYSTORE_PATH"):
         value = os.environ.get(env_name, "")
         if value:
             assert value not in inspect_env.stdout
@@ -817,8 +817,8 @@ def test_image_and_run_argv_do_not_embed_secrets(tmp_path: Path) -> None:
         proxy_token=TEST_PROXY_TOKEN,
     )
     run_argv = _build_run_argv(config=cfg, worktree=worktree, uid=1000, gid=1000, memory_mode="off")
-    assert _contains_pair(run_argv, "-e", "OPENROUTER_API_KEY")
-    assert all(not part.startswith("OPENROUTER_API_KEY=") for part in run_argv)
+    assert _contains_pair(run_argv, "-e", "ORCAROUTER_API_KEY")
+    assert all(not part.startswith("ORCAROUTER_API_KEY=") for part in run_argv)
 
 
 def test_gate_oracle_scoring_is_host_only_structurally() -> None:

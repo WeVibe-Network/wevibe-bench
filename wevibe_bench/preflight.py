@@ -22,11 +22,14 @@ import json
 import logging
 import os
 import pathlib
+import select
 import socket
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
 
 from wevibe_bench.adapters.backgammon import build_worker_opencode_config
@@ -78,6 +81,8 @@ class PreflightError(RuntimeError):
 class WorkerModelProbeResult(NamedTuple):
     exit_code: int
     output: str
+    detection: str = "unknown"
+    decisive_line: str = "none"
 
 
 DockerProbe = Callable[[str, str, float], WorkerModelProbeResult]
@@ -87,6 +92,53 @@ _MODEL_REJECTION_MARKERS: tuple[str, ...] = (
     "ProviderModelNotFoundError",
     "Model not found",
 )
+
+_MODEL_ACCEPTANCE_MARKERS: tuple[str, ...] = (
+    "llm runtime selected",
+    "llm.provider=",
+    "stream providerid=",
+    "build · ",
+    "ai_apicallerror",
+    "ai_loadapikeyerror",
+    "ai_retryerror",
+    "cannot connect to api",
+)
+
+_DOCKER_UNAVAILABLE_MARKERS: tuple[str, ...] = (
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "error response from daemon",
+)
+
+_IMAGE_MISSING_MARKERS: tuple[str, ...] = (
+    "unable to find image",
+    "no such image",
+    "pull access denied",
+)
+
+
+def _match_probe_detection(line: str) -> str | None:
+    lowered = line.casefold()
+    if any(marker.casefold() in lowered for marker in _MODEL_REJECTION_MARKERS):
+        return "catalog-rejected"
+    if any(marker in lowered for marker in _MODEL_ACCEPTANCE_MARKERS):
+        return "catalog-accepted"
+    if any(marker in lowered for marker in _DOCKER_UNAVAILABLE_MARKERS):
+        return "docker-unavailable"
+    if any(marker in lowered for marker in _IMAGE_MISSING_MARKERS):
+        return "image-missing"
+    return None
+
+
+def _first_probe_detection_from_output(output: str) -> tuple[str | None, str]:
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        matched = _match_probe_detection(line)
+        if matched is not None:
+            return matched, line[:240]
+    return None, "none"
 
 
 def _default_worker_model_probe(image: str, model: str, timeout_s: float) -> WorkerModelProbeResult:
@@ -105,11 +157,14 @@ def _default_worker_model_probe(image: str, model: str, timeout_s: float) -> Wor
             encoding="utf-8",
         )
 
+        container_name = f"wevibe-bench-model-probe-{uuid.uuid4().hex[:12]}"
         cmd = [
             "docker",
             "run",
             "--rm",
             "-i",
+            "--name",
+            container_name,
             "--tmpfs",
             "/tmp:mode=1777",
             "-e",
@@ -125,16 +180,112 @@ def _default_worker_model_probe(image: str, model: str, timeout_s: float) -> Wor
             "/work",
             "--print-logs",
         ]
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            input="ping\n",
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            check=False,
-            timeout=timeout_s,
+            bufsize=1,
         )
-        output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
-        return WorkerModelProbeResult(exit_code=completed.returncode, output=output)
+
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write("ping\n")
+                proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+                proc.stdin = None
+
+        start = time.monotonic()
+        deadline = start + timeout_s
+        output_lines: list[str] = []
+        detection = "unknown"
+        decisive_line = "none"
+        should_stop = False
+
+        while True:
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                detection = "probe-timeout"
+                decisive_line = "deadline reached before decisive marker"
+                should_stop = True
+                break
+
+            if proc.stdout is None:
+                break
+
+            ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 0.5))
+            if not ready:
+                if proc.poll() is not None:
+                    break
+                continue
+
+            raw_line = proc.stdout.readline()
+            if raw_line == "":
+                if proc.poll() is not None:
+                    break
+                continue
+
+            line = raw_line.strip()
+            if not line:
+                continue
+            output_lines.append(line)
+
+            matched = _match_probe_detection(line)
+            if matched is not None:
+                detection = matched
+                decisive_line = line[:240]
+                should_stop = True
+                break
+
+        if should_stop:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+            subprocess.run(
+                ["docker", "kill", container_name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        try:
+            tail_output, _ = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            tail_output, _ = proc.communicate(timeout=2)
+
+        if tail_output:
+            output_lines.extend(line.strip() for line in tail_output.splitlines() if line.strip())
+
+        output = "\n".join(output_lines)
+
+        if detection == "unknown" and proc.poll() is not None:
+            matched, matched_line = _first_probe_detection_from_output(output)
+            if matched is not None and matched == "catalog-rejected":
+                detection = matched
+                decisive_line = matched_line
+
+        return WorkerModelProbeResult(
+            exit_code=proc.returncode if proc.returncode is not None else -1,
+            output=output,
+            detection=detection,
+            decisive_line=decisive_line,
+        )
 
 
 def _first_probe_evidence_line(output: str) -> str:
@@ -214,12 +365,45 @@ def verify_worker_model_acceptance(
                 "PREFLIGHT FAILED: worker model acceptance "
                 f"model={model} reason=probe-timeout timeout_s={timeout_s};" + remediation
             ) from None
-
-        evidence = _first_probe_evidence_line(result.output)
-        if any(marker in result.output for marker in _MODEL_REJECTION_MARKERS):
+        except ValueError as exc:
+            evidence = str(exc)[:240]
             log.info(
-                "preflight.worker_model_acceptance outcome=fail model=%s reason=catalog-rejected exit_code=%s evidence=%s",
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=catalog-rejected detection=probe-config-validation evidence=%s",
                 model,
+                evidence,
+            )
+            raise PreflightError(
+                "PREFLIGHT FAILED: worker model acceptance "
+                f"model={model} reason=catalog-rejected evidence={evidence};" + remediation
+            ) from None
+
+        evidence = result.decisive_line if result.decisive_line != "none" else _first_probe_evidence_line(result.output)
+        detection = result.detection
+
+        if detection == "unknown":
+            derived_detection, derived_line = _first_probe_detection_from_output(result.output)
+            if derived_detection is not None:
+                detection = derived_detection
+                evidence = derived_line
+
+        if detection == "probe-timeout":
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=probe-timeout timeout_s=%s marker=%s evidence=%s",
+                model,
+                timeout_s,
+                detection,
+                evidence,
+            )
+            raise PreflightError(
+                "PREFLIGHT FAILED: worker model acceptance "
+                f"model={model} reason=probe-timeout timeout_s={timeout_s};" + remediation
+            )
+
+        if detection == "catalog-rejected":
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=catalog-rejected detection=%s exit_code=%s evidence=%s",
+                model,
+                detection,
                 result.exit_code,
                 evidence,
             )
@@ -228,15 +412,22 @@ def verify_worker_model_acceptance(
                 f"model={model} reason=catalog-rejected evidence={evidence};" + remediation
             )
 
-        lowered = result.output.casefold()
-        if (
-            "cannot connect to the docker daemon" in lowered
-            or "is the docker daemon running" in lowered
-            or "error response from daemon" in lowered
-        ):
+        if detection == "catalog-accepted":
             log.info(
-                "preflight.worker_model_acceptance outcome=fail model=%s reason=docker-unavailable exit_code=%s evidence=%s",
+                "preflight.worker_model_acceptance outcome=ok model=%s detection=%s exit_code=%s evidence=%s",
                 model,
+                detection,
+                result.exit_code,
+                evidence,
+            )
+            continue
+
+        lowered = result.output.casefold()
+        if detection == "docker-unavailable" or any(marker in lowered for marker in _DOCKER_UNAVAILABLE_MARKERS):
+            log.info(
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=docker-unavailable detection=%s exit_code=%s evidence=%s",
+                model,
+                detection,
                 result.exit_code,
                 evidence,
             )
@@ -245,10 +436,11 @@ def verify_worker_model_acceptance(
                 f"model={model} reason=docker-unavailable evidence={evidence};" + remediation
             )
 
-        if "unable to find image" in lowered or "no such image" in lowered or "pull access denied" in lowered:
+        if detection == "image-missing" or any(marker in lowered for marker in _IMAGE_MISSING_MARKERS):
             log.info(
-                "preflight.worker_model_acceptance outcome=fail model=%s reason=image-missing exit_code=%s evidence=%s",
+                "preflight.worker_model_acceptance outcome=fail model=%s reason=image-missing detection=%s exit_code=%s evidence=%s",
                 model,
+                detection,
                 result.exit_code,
                 evidence,
             )
@@ -258,8 +450,9 @@ def verify_worker_model_acceptance(
             )
 
         log.info(
-            "preflight.worker_model_acceptance outcome=ok model=%s exit_code=%s evidence=%s",
+            "preflight.worker_model_acceptance outcome=ok model=%s detection=%s exit_code=%s evidence=%s",
             model,
+            detection,
             result.exit_code,
             evidence,
         )

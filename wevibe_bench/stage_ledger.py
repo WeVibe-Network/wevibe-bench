@@ -1,12 +1,13 @@
 """Stage-level qualification budget ledger and admission CLI.
 
-This module aggregates per-run OpenRouter proxy budget checkpoint JSON files
-into stage-level totals and enforces stage/global caps.
+This module enforces stage/global caps by recording authoritative spend from the
+spend-proxy Postgres meter keyed by run/session id.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -15,6 +16,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from wevibe_bench.proxy_meter import SpendMeter
+from wevibe_bench.spend_key import resolve_spend_db_dsn
 
 try:  # R-37 trace compatibility with lifecycle logging utilities.
     from wevibe_bench.lifecycle.logging_util import new_trace_id as _new_trace_id
@@ -65,6 +69,10 @@ def _trace_id() -> str:
 
 def _json_stdout(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def _sha256_first8(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
 
 
 def _append_log(
@@ -218,6 +226,7 @@ def _write_ledger_atomic(ledger_path: Path, ledger: dict[str, Any]) -> None:
     os.replace(tmp_path, ledger_path)
 
 
+# RETIRED (27-07-26 spend-proxy :4480): budget.json superseded by spend-proxy DB metering; kept for reference. See report 27-07-26-1307.
 def _load_budget_json(budget_path: Path) -> dict[str, Any]:
     try:
         with budget_path.open("r", encoding="utf-8") as handle:
@@ -248,6 +257,36 @@ def _load_budget_json(budget_path: Path) -> dict[str, Any]:
             raw.get("committed_unproven_usd", 0.0),
             field_name="committed_unproven_usd",
         ),
+    }
+
+
+def _resolve_record_run_id(args: argparse.Namespace) -> tuple[str, str]:
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    budget_json_arg = str(getattr(args, "budget_json", "") or "").strip()
+    if run_id:
+        return run_id, budget_json_arg
+    if budget_json_arg:
+        # RETIRED compatibility path: extract run_id from checkpoint JSON only.
+        # Spend source is still spend-proxy DB, not the checkpoint amounts.
+        retired_budget = _load_budget_json(Path(budget_json_arg))
+        return str(retired_budget["run_id"]), str(retired_budget["budget_json"])
+    raise ValueError("record requires --run-id (preferred) or --budget-json (retired run_id source)")
+
+
+def _load_run_spend_budget(run_id: str) -> dict[str, Any]:
+    dsn = resolve_spend_db_dsn()
+    spend = SpendMeter(dsn).run_spend(run_id)
+    accrued = _coerce_nonnegative_float(spend.true_usd, field_name="run_spend.true_usd")
+    # spend-proxy DB has no committed_unproven reservation model for completed
+    # events. Stage ledger now maps committed_unproven_usd to 0.0 and uses
+    # true_usd as authoritative cap/budget spend.
+    return {
+        "run_id": run_id,
+        "budget_json": "retired://budget-json",
+        "accrued_usd": accrued,
+        "committed_unproven_usd": 0.0,
+        "spend_source": "spend_proxy_db",
+        "spend_dsn_fp": _sha256_first8(dsn),
     }
 
 
@@ -297,9 +336,24 @@ def _record(args: argparse.Namespace, *, trace_id: str) -> int:
     log_path = Path(args.log)
 
     try:
-        budget = _load_budget_json(Path(args.budget_json))
+        run_id, budget_json_ref = _resolve_record_run_id(args)
+        budget = _load_run_spend_budget(run_id)
+        budget["budget_json"] = budget_json_ref or budget["budget_json"]
         ledger = _load_ledger(ledger_path)
         before = _summaries(ledger)
+
+        _append_log(
+            log_path=log_path,
+            trace_id=trace_id,
+            op="spend_read",
+            stage=stage,
+            outcome="ok",
+            run_id=budget["run_id"],
+            spend_source=budget["spend_source"],
+            spend_dsn_fp=budget["spend_dsn_fp"],
+            true_usd=budget["accrued_usd"],
+            committed_unproven_usd=budget["committed_unproven_usd"],
+        )
 
         entries = list(ledger["stages"][stage])
         old_total = 0.0
@@ -386,7 +440,8 @@ def _record(args: argparse.Namespace, *, trace_id: str) -> int:
             op="record",
             stage=stage,
             outcome="error",
-            budget_json=str(args.budget_json),
+            budget_json=str(getattr(args, "budget_json", "") or ""),
+            run_id=str(getattr(args, "run_id", "") or ""),
             error_type=type(exc).__name__,
             error=str(exc),
             traceback=traceback.format_exc(),
@@ -494,7 +549,8 @@ def build_parser() -> argparse.ArgumentParser:
     record_parser = subparsers.add_parser("record", help="Record one run budget JSON into a stage ledger")
     _add_common_paths(record_parser)
     record_parser.add_argument("--stage", type=int, choices=(2, 3, 4, 5, 7, 8), required=True)
-    record_parser.add_argument("--budget-json", required=True)
+    record_parser.add_argument("--run-id", default="")
+    record_parser.add_argument("--budget-json", default="")
 
     check_parser = subparsers.add_parser("check", help="Admission check against stage/global caps")
     _add_common_paths(check_parser)

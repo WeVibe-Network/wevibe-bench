@@ -5,6 +5,7 @@ import json
 import pathlib
 import shlex
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,9 +25,23 @@ ROSTER = backgammon_scored_ladder_roster()
 ALL_MODELS = [r.model for r in ROSTER]
 
 
+@pytest.fixture(autouse=True)
+def _default_pricing_gate_ok(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        bl,
+        "verify_pricing",
+        lambda **_kwargs: SimpleNamespace(
+            ok=True,
+            version=bl.PRICING_EXPECTED_VERSION,
+            missing_models=[],
+            reason="ok",
+        ),
+    )
+
+
 def _rung_params_payload() -> dict[str, Any]:
     return {
-        "openrouter/kimi/kimi-k3": {
+        "orcarouter/kimi/kimi-k3": {
             "profile": "kimik3",
             "pricing_input": 3.0,
             "pricing_output": 15.0,
@@ -34,7 +49,7 @@ def _rung_params_payload() -> dict[str, Any]:
             "cost_limit": 12.0,
             "cost_target": 10.8,
         },
-        "openrouter/kimi/kimi-k2.7-code": {
+        "orcarouter/kimi/kimi-k2.7-code": {
             "profile": "kimicode",
             "pricing_input": 0.95,
             "pricing_output": 4.0,
@@ -42,7 +57,7 @@ def _rung_params_payload() -> dict[str, Any]:
             "cost_limit": 2.7,
             "cost_target": 2.4,
         },
-        "openrouter/tencent/hy3": {
+        "orcarouter/tencent/hy3": {
             "profile": "hy3",
             "pricing_input": 0.18,
             "pricing_output": 0.59,
@@ -291,11 +306,11 @@ def test_exact_roster_a_cell_allocation() -> None:
     assert len(plan) == 5
 
     expected = [
-        (1, "openrouter/kimi/kimi-k3", "source", "off", "all"),
-        (2, "openrouter/kimi/kimi-k2.7-code", "measure", "off", "session"),
-        (3, "openrouter/kimi/kimi-k2.7-code", "measure", "on", "session"),
-        (4, "openrouter/tencent/hy3", "measure", "off", "session"),
-        (5, "openrouter/tencent/hy3", "measure", "on", "session"),
+        (1, "orcarouter/kimi/kimi-k3", "source", "off", "all"),
+        (2, "orcarouter/kimi/kimi-k2.7-code", "measure", "off", "session"),
+        (3, "orcarouter/kimi/kimi-k2.7-code", "measure", "on", "session"),
+        (4, "orcarouter/tencent/hy3", "measure", "off", "session"),
+        (5, "orcarouter/tencent/hy3", "measure", "on", "session"),
     ]
     actual = [
         (int(c["run_number"]), str(c["model"]), str(c["role"]), str(c["memory_mode"]), str(c["phase"]))
@@ -668,8 +683,7 @@ def test_reconciled_cost_limit_prefers_proxy_cap() -> None:
 def test_build_session_extra_flags_uses_binding_cap_for_cost_limit() -> None:
     flags = bl._build_session_extra_flags(
         {"cost_target": 1.5, "output_price_per_1m": None},
-        pathlib.Path("/tmp/proxy-token"),
-        8789,
+        "token-redacted",
         binding_cap_usd=2.7,
     )
     parts = shlex.split(flags)
@@ -816,7 +830,7 @@ def test_import_refuses_tampered_detail_digest(tmp_path: pathlib.Path, monkeypat
 def test_import_refuses_wrong_run_id(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
     params_path = _seed_manifest(tmp_path)
     import_path, payload, _ = _write_import_fixture(tmp_path)
-    payload["run_id"] = f"stage{bl.STAGE_NUMBER}-run9-openrouter-anthropic-claude-opus-4-8-20260721T195407Z"
+    payload["run_id"] = f"stage{bl.STAGE_NUMBER}-run9-orcarouter-anthropic-claude-opus-4-8-20260721T195407Z"
     import_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="run_id mismatch"):
@@ -841,7 +855,7 @@ def test_import_refuses_scorecard_model_mismatch_vs_manifest(
     params_path = _seed_manifest(tmp_path)
     import_path, payload, _ = _write_import_fixture(
         tmp_path,
-        scorecard_model="openrouter/moonshotai/kimi-k2.7-code",
+        scorecard_model="orcarouter/moonshotai/kimi-k2.7-code",
     )
     payload["scorecard_sha256"] = _sha256(pathlib.Path(payload["scorecard_path"]))
     import_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1657,3 +1671,247 @@ def test_plan_budget_refusal_stops_before_any_cell(tmp_path: pathlib.Path, monke
     escalation = bl._load_json(tmp_path / bl.ESCALATE_NAME)
     assert escalation is not None and escalation["reason"] == "plan_budget_refused"
     assert recorder == []
+
+
+@pytest.mark.parametrize(
+    "reason_payload",
+    [
+        {"reason": "gate-down", "version": "", "missing_models": []},
+        {
+            "reason": f"version-mismatch got old want {bl.PRICING_EXPECTED_VERSION}",
+            "version": "old",
+            "missing_models": [],
+        },
+        {
+            "reason": "missing models: tencent/hy3",
+            "version": bl.PRICING_EXPECTED_VERSION,
+            "missing_models": ["tencent/hy3"],
+        },
+    ],
+)
+def test_pricing_drift_aborts_before_any_paid_cell(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+    reason_payload: dict[str, Any],
+) -> None:
+    captured_roster_models: list[str] = []
+
+    def _fake_verify_pricing(*, roster_models: list[str], **_kwargs: Any) -> Any:
+        captured_roster_models.extend(roster_models)
+        return SimpleNamespace(
+            ok=False,
+            version=reason_payload["version"],
+            missing_models=list(reason_payload["missing_models"]),
+            reason=reason_payload["reason"],
+        )
+
+    def _boom_run_cell(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("pricing drift must abort before cell execution")
+
+    monkeypatch.setattr(bl, "verify_pricing", _fake_verify_pricing)
+    monkeypatch.setattr(bl, "_run_cell_rep", _boom_run_cell)
+    monkeypatch.setattr(bl, "_ledger_check", lambda estimated_usd: True)
+    monkeypatch.setattr(bl, "resolve_orcarouter_api_key", lambda: ("token-redacted", "test"))
+    monkeypatch.setattr(bl, "resolve_spend_proxy_base_url", lambda: "http://127.0.0.1:4480/v1")
+    monkeypatch.setattr(bl, "resolve_spend_db_dsn", lambda: "postgresql://spend-proxy")
+
+    params_path = _write_rung_params(tmp_path)
+    exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)])
+    assert exit_code == 3
+    assert captured_roster_models == ["kimi/kimi-k3", "kimi/kimi-k2.7-code", "tencent/hy3"]
+
+    escalation = bl._load_json(tmp_path / bl.ESCALATE_NAME)
+    assert escalation is not None
+    assert escalation["reason"] == "pricing_verify_failed"
+    assert escalation["detail"]["reason"] == reason_payload["reason"]
+
+
+def test_run_budget_cap_poll_aborts_cell_when_db_sum_reaches_cap(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+) -> None:
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    params = _rung_params_payload()[str(cell["model"])]
+    runs_dir = tmp_path / "runs"
+    ladder_runs_dir = tmp_path / "ladder"
+    clone_log = tmp_path / "clone.log"
+    clone_log.write_text("", encoding="utf-8")
+    logfile_path = tmp_path / "driver.log"
+
+    args = SimpleNamespace(
+        runs_dir=str(runs_dir),
+        ladder_runs_dir=str(ladder_runs_dir),
+        clone_log=str(clone_log),
+        proxy_token="token-redacted",
+        spend_db_dsn="postgresql://spend-proxy",
+        org_id="wevibe-org-0",
+    )
+
+    class _FakeSpendMeter:
+        def __init__(self, _dsn: str) -> None:
+            self._dsn = _dsn
+
+        def run_spend(self, session_id: str) -> Any:
+            del session_id
+            return SimpleNamespace(true_usd=2.7, benchmark_usd=0.0)
+
+        def model_identity_mismatches(self, session_id: str) -> list[Any]:
+            del session_id
+            return []
+
+    def _fake_run_inner_tee(
+        cmd: list[str],
+        cell_log: pathlib.Path,
+        *,
+        env: dict[str, str] | None = None,
+        budget_watch: Any | None = None,
+        budget_poll_interval_s: float = bl.BUDGET_POLL_INTERVAL_S,
+    ) -> tuple[int, dict[str, Any] | None]:
+        del cmd, env, budget_poll_interval_s
+        assert budget_watch is not None
+        cell_log.write_text("PROGRESS inner\n", encoding="utf-8")
+        budget_abort = budget_watch()
+        assert budget_abort is not None
+        return 143, budget_abort
+
+    monkeypatch.setattr(bl, "SpendMeter", _FakeSpendMeter)
+    monkeypatch.setattr(bl, "_ledger_check", lambda estimated_usd: True)
+    monkeypatch.setattr(bl, "_ledger_record", lambda budget_json: True)
+    monkeypatch.setattr(bl, "_build_inner_cmd", lambda **_kwargs: ["python", "-V"])
+    monkeypatch.setattr(bl, "_run_inner_tee", _fake_run_inner_tee)
+
+    with pytest.raises(bl.LadderAbort, match="run_budget_cap_reached") as excinfo:
+        bl._run_cell_rep(
+            cell=cell,
+            rep=1,
+            params=params,
+            args=args,
+            trace="trace-budget",
+            logfile_path=logfile_path,
+        )
+
+    assert excinfo.value.reason == "run_budget_cap_reached"
+    assert float(excinfo.value.detail["true_usd"]) >= float(params["cap_usd"])
+
+
+def test_model_identity_mismatch_watch_aborts_cell(
+    tmp_path: pathlib.Path,
+    monkeypatch: Any,
+) -> None:
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    params = _rung_params_payload()[str(cell["model"])]
+    runs_dir = tmp_path / "runs"
+    ladder_runs_dir = tmp_path / "ladder"
+    clone_log = tmp_path / "clone.log"
+    clone_log.write_text("", encoding="utf-8")
+    logfile_path = tmp_path / "driver.log"
+    scorecard_path = tmp_path / "scorecard.json"
+    detail_path = tmp_path / "detail.json"
+    scorecard_path.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "resolved": True,
+                        "scored": True,
+                        "total_tokens": 10,
+                        "turns": 2,
+                        "wall_seconds": 1,
+                        "wall_cost_usd": 0.1,
+                    }
+                ],
+                "manifest": {"config": {"max_attempts": 3}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    detail_path.write_text(
+        json.dumps({"cells": [{"conformed": True, "attempts_to_green": 1, "failed_gates": []}]}),
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(
+        runs_dir=str(runs_dir),
+        ladder_runs_dir=str(ladder_runs_dir),
+        clone_log=str(clone_log),
+        proxy_token="token-redacted",
+        spend_db_dsn="postgresql://spend-proxy",
+        org_id="wevibe-org-0",
+    )
+
+    class _FakeSpendMeter:
+        def __init__(self, _dsn: str) -> None:
+            self._dsn = _dsn
+
+        def run_spend(self, session_id: str) -> Any:
+            del session_id
+            return SimpleNamespace(
+                calls=1,
+                true_usd=0.5,
+                benchmark_usd=0.6,
+                uncached_input_tokens=10,
+                cached_input_tokens=0,
+                output_tokens=5,
+                reasoning_tokens=0,
+                unmetered_calls=0,
+                last_call_at=None,
+            )
+
+        def model_identity_mismatches(self, session_id: str) -> list[Any]:
+            del session_id
+            return [
+                SimpleNamespace(
+                    model="kimi/kimi-k2.7-code",
+                    upstream_model="tencent/hy3",
+                    calls=1,
+                )
+            ]
+
+    def _fake_newest_artifact(
+        ladder_runs_dir_in: pathlib.Path,
+        run_label: str,
+        suffix: str,
+        not_before: float,
+    ) -> pathlib.Path:
+        del ladder_runs_dir_in, run_label, not_before
+        if suffix == "scorecard.json":
+            return scorecard_path
+        if suffix == "backgammon-detail.json":
+            return detail_path
+        raise AssertionError(f"unexpected suffix {suffix}")
+
+    def _fake_run_inner_tee(
+        cmd: list[str],
+        cell_log: pathlib.Path,
+        *,
+        env: dict[str, str] | None = None,
+        budget_watch: Any | None = None,
+        budget_poll_interval_s: float = bl.BUDGET_POLL_INTERVAL_S,
+    ) -> tuple[int, dict[str, Any] | None]:
+        del cmd, env, budget_poll_interval_s
+        if budget_watch is not None:
+            assert budget_watch() is None
+        cell_log.write_text("PROGRESS inner\n", encoding="utf-8")
+        return 0, None
+
+    monkeypatch.setattr(bl, "SpendMeter", _FakeSpendMeter)
+    monkeypatch.setattr(bl, "_ledger_check", lambda estimated_usd: True)
+    monkeypatch.setattr(bl, "_ledger_record", lambda budget_json: True)
+    monkeypatch.setattr(bl, "_build_inner_cmd", lambda **_kwargs: ["python", "-V"])
+    monkeypatch.setattr(bl, "_run_inner_tee", _fake_run_inner_tee)
+    monkeypatch.setattr(bl, "_newest_artifact", _fake_newest_artifact)
+
+    with pytest.raises(bl.LadderAbort, match="served_model_mismatch") as excinfo:
+        bl._run_cell_rep(
+            cell=cell,
+            rep=1,
+            params=params,
+            args=args,
+            trace="trace-model-watch",
+            logfile_path=logfile_path,
+        )
+
+    assert excinfo.value.reason == "served_model_mismatch"
+    mismatch = excinfo.value.detail["mismatches"][0]
+    assert mismatch["requested_model"] == "kimi/kimi-k2.7-code"
+    assert mismatch["upstream_model"] == "tencent/hy3"

@@ -17,7 +17,7 @@ TASK_DIR = (Path(__file__).resolve().parents[1] / "tasks" / "backgammon").resolv
 
 
 def test_write_worker_permission_config_pins_model_and_small_model(tmp_path: Path) -> None:
-    model = "openrouter/z-ai/glm-5.2"
+    model = "orcarouter/kimi/kimi-k3"
     runner = BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",

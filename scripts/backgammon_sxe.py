@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from build_distilled_corpus import DEFAULT_OPENCODE_AUTH, _load_openrouter_key
 from seed_corpus import _bring_up_for_resume, _load_identity, _required_env
 from wevibe_bench.benv import load_bench_env
 from wevibe_bench.lifecycle.lconfig import (
@@ -27,6 +26,11 @@ from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
 from wevibe_bench.lifecycle.mcp_rest import McpRest
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.preflight import preflight
+from wevibe_bench.spend_key import (
+    key_fingerprint,
+    resolve_orcarouter_api_key,
+    resolve_spend_proxy_base_url,
+)
 
 
 DEFAULT_RUN_LABEL = "backgammon-smoke"
@@ -144,24 +148,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_api_key() -> tuple[str, str]:
-    env_key = os.environ.get("WEVIBE_BENCH_API_KEY", "").strip()
-    if env_key:
-        return env_key, "WEVIBE_BENCH_API_KEY"
-
-    openrouter_env = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if openrouter_env:
-        return openrouter_env, "OPENROUTER_API_KEY"
-
-    auth_path = Path(DEFAULT_OPENCODE_AUTH).expanduser()
-    try:
-        return _load_openrouter_key(auth_path), str(auth_path)
-    except Exception:
-        return "", "none"
-
-
 def _resolve_extract_base_url() -> str | None:
-    value = os.environ.get("WEVIBE_BENCH_EXTRACT_BASE_URL", "").strip()
+    value = resolve_spend_proxy_base_url().strip()
     return value or None
 
 
@@ -181,19 +169,7 @@ def _resolve_extract_num_ctx() -> int | None:
 
 
 def _resolve_extract_api_key() -> tuple[str, str]:
-    token_file = os.environ.get("WEVIBE_BENCH_EXTRACT_API_KEY_FILE", "").strip()
-    if token_file:
-        token_path = Path(token_file).expanduser()
-        if not token_path.is_file():
-            raise RuntimeError(f"proxy token file not found: {token_path}")
-        try:
-            token = token_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise RuntimeError(f"unable to read proxy token file: {token_path}") from exc
-        if not token:
-            raise RuntimeError(f"proxy token file empty: {token_path}")
-        return token, "proxy_token_file"
-    return _resolve_api_key()
+    return resolve_orcarouter_api_key()
 
 
 def _load_prompt(path: Path) -> str:
@@ -773,18 +749,17 @@ def main() -> int:
         extract_num_ctx = _resolve_extract_num_ctx()
         api_key, api_key_source = _resolve_extract_api_key()
         api_key_present = bool(api_key)
-        api_key_fp = _sha256_first8(api_key) if api_key_present else "none"
+        api_key_fp = key_fingerprint(api_key) if api_key_present else "none"
         progress(
             "extract key resolved "
             f"source={api_key_source} present={api_key_present} sha256_first8={api_key_fp}"
         )
-        if extract_base_url is not None:
-            num_ctx_label = str(extract_num_ctx) if extract_num_ctx is not None else "none"
-            progress(
-                "extract transport override "
-                f"base_url={extract_base_url} num_ctx={num_ctx_label} "
-                f"key_source={api_key_source} key_fp={api_key_fp}"
-            )
+        num_ctx_label = str(extract_num_ctx) if extract_num_ctx is not None else "none"
+        progress(
+            "extract llm route "
+            f"provider=orcarouter base_url={extract_base_url} num_ctx={num_ctx_label} "
+            f"key_source={api_key_source} key_fp={api_key_fp}"
+        )
 
         def _rest_factory(base_url: str) -> _PromptInjectingRest:
             return _PromptInjectingRest(McpRest(base_url, cfg, logger), e_prompt)
@@ -808,8 +783,8 @@ def main() -> int:
             "api_key_source": api_key_source,
         }
 
-        extract_provider = "openrouter"
-        # The opencode SESSION slug is provider-prefixed (e.g. 'openrouter/anthropic/claude-opus-4.6'),
+        extract_provider = "orcarouter"
+        # The opencode SESSION slug is provider-prefixed (e.g. 'orcarouter/anthropic/claude-opus-4.6'),
         # but /v1/extract wants the RAW provider id with `provider` passed separately. For
         # self-extraction (extract_model defaults to session_model) normalize by stripping a leading
         # provider prefix that matches extract_provider.

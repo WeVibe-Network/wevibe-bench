@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
-import hashlib
 import importlib.util
 import json
 import logging
@@ -80,6 +79,11 @@ from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_rest import McpRest
 from wevibe_bench.preflight import verify_org_checklist, verify_worker_model_acceptance
+from wevibe_bench.spend_key import (
+    key_fingerprint,
+    resolve_orcarouter_api_key,
+    resolve_spend_proxy_base_url,
+)
 
 IS_PRIMARY_SCORED_PATH = True
 _LOG = logging.getLogger("run_cumulative")
@@ -189,7 +193,7 @@ def _producer_model_id_from_model(model: str) -> str:
         raise RuntimeError("producer model cannot be empty")
 
     parts = [part for part in model_value.split("/") if part]
-    if parts and parts[0] == "openrouter":
+    if parts and parts[0] == "orcarouter":
         parts = parts[1:]
 
     producer_model_id = "/".join(parts)
@@ -206,15 +210,9 @@ def _provider_pin_from_model(model: str) -> str:
     parts = [part for part in model.split("/") if part]
     if not parts:
         raise ValueError("model slug must be non-empty")
-    if len(parts) >= 2 and parts[0] == "openrouter":
+    if len(parts) >= 2 and parts[0] == "orcarouter":
         return parts[1]
     return parts[0]
-
-
-def _token_fingerprint8(secret: str | None) -> str:
-    if not secret:
-        return "none"
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
 
 
 def _build_roster(*, roster_model: str | None = None) -> tuple[list[RosterEntry], str]:
@@ -257,7 +255,7 @@ def _build_roster(*, roster_model: str | None = None) -> tuple[list[RosterEntry]
 
 
 def _resolve_extract_base_url() -> str | None:
-    value = os.environ.get("WEVIBE_BENCH_EXTRACT_BASE_URL", "").strip()
+    value = resolve_spend_proxy_base_url().strip()
     return value or None
 
 
@@ -288,29 +286,7 @@ def _resolve_extract_timeout_s() -> int:
 
 
 def _resolve_extract_api_key() -> tuple[str, str]:
-    token_file = os.environ.get("WEVIBE_BENCH_EXTRACT_API_KEY_FILE", "").strip()
-    if token_file:
-        token_path = Path(token_file).expanduser().resolve()
-        if not token_path.is_file():
-            raise RuntimeError(f"proxy token file not found: {token_path}")
-        token = token_path.read_text(encoding="utf-8").strip()
-        if not token:
-            raise RuntimeError(f"proxy token file empty: {token_path}")
-        return token, "WEVIBE_BENCH_EXTRACT_API_KEY_FILE"
-
-    for env_name in (
-        "WEVIBE_BENCH_EXTRACT_API_KEY",
-        "WEVIBE_BENCH_API_KEY",
-        "OPENROUTER_API_KEY",
-    ):
-        value = os.environ.get(env_name, "").strip()
-        if value:
-            return value, env_name
-
-    raise RuntimeError(
-        "missing extraction API key; set WEVIBE_BENCH_EXTRACT_API_KEY_FILE, "
-        "WEVIBE_BENCH_EXTRACT_API_KEY, WEVIBE_BENCH_API_KEY, or OPENROUTER_API_KEY"
-    )
+    return resolve_orcarouter_api_key()
 
 
 def _load_json_file(path: Path) -> Any:
@@ -801,7 +777,7 @@ class RealSessionRunner:
 
     @staticmethod
     def _extract_model_for_session(session: SessionRecord) -> tuple[str, str]:
-        provider = "openrouter"
+        provider = "orcarouter"
         extract_model = str(session.model)
         provider_prefix = f"{provider}/"
         if extract_model.startswith(provider_prefix):
@@ -1293,16 +1269,29 @@ def _build_real_runner_and_leader_client(
     cfg = LifecycleConfig()
     run_cfg = config.RunConfig()
     bridge_paths = _bridge_paths(run_cfg, layout.manifest_path)
-    proxy_base_url = str(getattr(args, "proxy_base_url", "") or "").strip() or None
+    proxy_base_url_arg = str(getattr(args, "proxy_base_url", "") or "").strip()
+    proxy_base_url = proxy_base_url_arg or resolve_spend_proxy_base_url()
     proxy_token: str | None = None
+    proxy_token_source = ""
     proxy_token_file = str(getattr(args, "proxy_token_file", "") or "").strip()
     if proxy_token_file:
         proxy_token = Path(proxy_token_file).expanduser().read_text(encoding="utf-8").strip()
+        proxy_token_source = f"proxy_token_file:{Path(proxy_token_file).expanduser()}"
         _LOG.info(
             "run_cumulative.proxy_token_loaded file=%s token_sha256_first8=%s",
             str(Path(proxy_token_file).expanduser()),
-            _token_fingerprint8(proxy_token),
+            key_fingerprint(proxy_token),
         )
+    else:
+        proxy_token, resolved_source = resolve_orcarouter_api_key()
+        proxy_token_source = resolved_source
+
+    _LOG.info(
+        "run_cumulative.proxy_source_resolved source=%s base_url=%s token_fp=%s",
+        proxy_token_source,
+        proxy_base_url,
+        key_fingerprint(proxy_token),
+    )
 
     consumer_decision_arg = str(getattr(args, "consumer_decision", "") or "").strip()
     consumer_decision_manifest = (
@@ -1351,6 +1340,14 @@ def _build_real_runner_and_leader_client(
         return McpRest(base_url, cfg, _LOG)
 
     extract_api_key, extract_api_key_source = _resolve_extract_api_key()
+    extract_base_url = _resolve_extract_base_url()
+    _LOG.info(
+        "run_cumulative.extract_llm_route provider=%s base_url=%s key_source=%s key_fp=%s",
+        "orcarouter",
+        extract_base_url,
+        extract_api_key_source,
+        key_fingerprint(extract_api_key),
+    )
     proof = M2Proof(
         cfg=cfg,
         orchestrator=SimpleNamespace(org_id=str(args.org), hub_client=hub_client),
@@ -1372,7 +1369,7 @@ def _build_real_runner_and_leader_client(
         contributor_rest=contributor_rest,
         extract_api_key=extract_api_key,
         extract_api_key_source=extract_api_key_source,
-        extract_base_url=_resolve_extract_base_url(),
+        extract_base_url=extract_base_url,
         extract_num_ctx=_resolve_extract_num_ctx(),
         extract_timeout_s=_resolve_extract_timeout_s(),
         proxy_base_url=proxy_base_url,

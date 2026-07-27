@@ -352,7 +352,7 @@ def test_sxe_no_silent_fallback_and_guard() -> None:
     assert "_default_direct_memory" not in source
     assert "proof_direct" not in source
     assert "DISTILLED_DEFAULT_MODEL" not in source
-    assert "openrouter/" in source
+    assert "orcarouter/" in source
 
     backgammon_sxe = importlib.import_module("backgammon_sxe")
     parser_builder = getattr(backgammon_sxe, "_build_arg_parser", None)

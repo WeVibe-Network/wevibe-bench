@@ -34,6 +34,7 @@ from wevibe_bench.adapters.cheat_detector import (
     build_oracle_markers,
     scan_events_for_oracle_access,
 )
+from wevibe_bench.config import WORKER_MODEL_REGISTRY
 from .docker_worker import (
     DockerCell,
     DockerCellConfig,
@@ -132,6 +133,9 @@ _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
 _RESERVATION_SAFETY_FACTOR = 1.10
 _HARNESS_LIMIT_REASONS = {"run_timeout", "max_steps_per_attempt", "token_cap"}
 _PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
+MAX_ZERO_TOOL_RESUMES = 2
+ZERO_TOOL_RESUME_NUDGE = "Continue. Edit files with tools — do not explain."
+_FILE_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch", "multi_edit"})
 
 # Canonical budget-bounded attempt ceiling.
 # Fixture evidence (runs/backgammon/*.scorecard.json):
@@ -258,6 +262,11 @@ class _OpencodeRunStats:
     cost_usd: float
     budget_stop_detected: bool = False
     budget_stop_signature: str | None = None
+    truncations: int = 0
+    zero_tool_turns: int = 0
+    terminal_zero_tool_turn: bool = False
+    zero_tool_resumes: int = 0
+    zero_tool_turn_honest_fail: bool = False
 
 
 @dataclass(frozen=True)
@@ -422,6 +431,10 @@ class BackgammonCellResult:
     served_attempted: int | None = None
     served_failed: int | None = None
     served_confirmed: int | None = None
+    truncations: int = 0
+    zero_tool_turns: int = 0
+    zero_tool_resumes: int = 0
+    zero_tool_turn_honest_fails: int = 0
 
 
 def _default_progress(message: str) -> None:
@@ -436,6 +449,7 @@ def build_worker_opencode_config(
     proxy_base_url: str | None,
     gates_dir: str,
     golden_dir: str,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
@@ -457,22 +471,37 @@ def build_worker_opencode_config(
         },
     }
     provider_id, _, model_id = model.partition("/")
-    provider_config: dict[str, Any] = {}
-    if proxy_base_url is not None:
-        provider_config["openrouter"] = {
-            "options": {
-                "baseURL": proxy_base_url,
-            }
-        }
+    if not provider_id or not model_id:
+        return config
 
-    if provider_id and model_id:
-        provider_block = provider_config.setdefault(provider_id, {})
-        models_block = provider_block.setdefault("models", {})
-        model_block = models_block.setdefault(model_id, {})
-        model_block["name"] = model_id
-        if reasoning_effort is not None:
-            options = model_block.setdefault("options", {})
-            options["reasoning"] = {"effort": reasoning_effort}
+    model_registry = WORKER_MODEL_REGISTRY.get(model_id)
+    if model_registry is None:
+        raise ValueError(f"unsupported worker model_id for opencode config: {model_id!r}")
+
+    provider_options: dict[str, Any] = {
+        "apiKey": "{env:ORCAROUTER_API_KEY}",
+    }
+    if proxy_base_url is not None:
+        provider_options["baseURL"] = proxy_base_url
+
+    model_block: dict[str, Any] = dict(model_registry)
+    # NOTE: Never force tool_choice="required" here. Moonshot/kimi rejects it (hard 400),
+    # and harness policy is to allow normal tool autonomy.
+    model_block["interleaved"] = {"field": "reasoning_content"}
+    if session_id:
+        model_block["headers"] = {"X-Session-Id": session_id}
+    if reasoning_effort is not None:
+        options = model_block.setdefault("options", {})
+        options["reasoning"] = {"effort": reasoning_effort}
+
+    provider_config: dict[str, Any] = {
+        provider_id: {
+            "options": provider_options,
+            "models": {
+                model_id: model_block,
+            },
+        }
+    }
 
     if provider_config:
         config["provider"] = provider_config
@@ -500,6 +529,7 @@ class BackgammonRunner(AgentRunner):
         reasoning_effort: str | None = None,
         proxy_base_url: str | None = None,
         proxy_token: str | None = None,
+        session_id: str | None = None,
         agent: str = "build",
         logger: Any = None,
         progress: Callable[[str], None] | None = None,
@@ -526,6 +556,7 @@ class BackgammonRunner(AgentRunner):
         self.reasoning_effort = None if reasoning_effort is None else str(reasoning_effort)
         self.proxy_base_url = None if proxy_base_url is None else str(proxy_base_url)
         self.proxy_token = None if proxy_token is None else str(proxy_token)
+        self.session_id = None if session_id is None else str(session_id)
         self.agent = str(agent)
 
         self._effective_output_price_per_1m = 0.0
@@ -662,6 +693,10 @@ class BackgammonRunner(AgentRunner):
         input_tokens_total = 0
         output_tokens_total = 0
         turns_total = 0
+        truncations_total = 0
+        zero_tool_turns_total = 0
+        zero_tool_resumes_total = 0
+        zero_tool_turn_honest_fails_total = 0
         events_path = Path(f"{worktree}.events.jsonl")
         user_events_path = Path(f"{worktree}.user-events.jsonl")
 
@@ -787,8 +822,10 @@ class BackgammonRunner(AgentRunner):
                         text=task_prompt,
                     )
                     self._write_worker_permission_config(worktree=worktree)
-                    first_run = self._run_opencode(
-                        cmd=active_cell.exec_argv(initial_inner),
+                    first_run = self._run_opencode_with_zero_tool_resumes(
+                        active_cell=active_cell,
+                        initial_inner=initial_inner,
+                        pure=pure,
                         worktree=worktree,
                         events_path=events_path,
                         env=run_env,
@@ -806,6 +843,11 @@ class BackgammonRunner(AgentRunner):
                     input_tokens_total += first_run.input_tokens
                     output_tokens_total += first_run.output_tokens + first_run.reasoning_tokens
                     turns_total += first_run.turns
+                    truncations_total += first_run.truncations
+                    zero_tool_turns_total += first_run.zero_tool_turns
+                    zero_tool_resumes_total += first_run.zero_tool_resumes
+                    if first_run.zero_tool_turn_honest_fail:
+                        zero_tool_turn_honest_fails_total += 1
                     worker_killed_reason = first_run.killed_reason
                     self._progress(
                         f"PROGRESS run_label={run_label} step=worker-launch-end mode=real "
@@ -820,6 +862,10 @@ class BackgammonRunner(AgentRunner):
                         verdict = "BUDGET_STOP"
                         attempts_to_green = "BUDGET_STOP"
                         termination_reason = "budget_stop_mid_attempt"
+                    elif first_run.zero_tool_turn_honest_fail:
+                        verdict = "FAIL"
+                        attempts_to_green = "FAIL"
+                        termination_reason = "zero_tool_turn_honest_fail"
                     elif (
                         first_run.exit_code not in (0, None)
                         and first_run.killed_reason not in _HARNESS_LIMIT_REASONS
@@ -948,6 +994,9 @@ class BackgammonRunner(AgentRunner):
                     if pure:
                         feedback_inner.append("--pure")
 
+                    # Never pass tool_choice="required" via worker config/CLI for these
+                    # runs; provider path rejects it and the harness guard test enforces this.
+
                     newly_passing = (
                         sorted(
                             set(attempt_reports[-2]["failed_gates"])
@@ -982,8 +1031,10 @@ class BackgammonRunner(AgentRunner):
                                 text=pass_verdict,
                             )
                             self._write_worker_permission_config(worktree=worktree)
-                            pass_run = self._run_opencode(
-                                cmd=active_cell.exec_argv(feedback_inner),
+                            pass_run = self._run_opencode_with_zero_tool_resumes(
+                                active_cell=active_cell,
+                                initial_inner=feedback_inner,
+                                pure=pure,
                                 worktree=worktree,
                                 events_path=events_path,
                                 env=run_env,
@@ -1002,6 +1053,11 @@ class BackgammonRunner(AgentRunner):
                             input_tokens_total += pass_run.input_tokens
                             output_tokens_total += pass_run.output_tokens + pass_run.reasoning_tokens
                             turns_total += pass_run.turns
+                            truncations_total += pass_run.truncations
+                            zero_tool_turns_total += pass_run.zero_tool_turns
+                            zero_tool_resumes_total += pass_run.zero_tool_resumes
+                            if pass_run.zero_tool_turn_honest_fail:
+                                zero_tool_turn_honest_fails_total += 1
                             worker_killed_reason = pass_run.killed_reason
                             self._progress(
                                 f"PROGRESS run_label={run_label} step=feedback-pass-injection-done attempt={attempt} "
@@ -1014,6 +1070,13 @@ class BackgammonRunner(AgentRunner):
                                 verdict = "BUDGET_STOP"
                                 attempts_to_green = "BUDGET_STOP"
                                 termination_reason = "budget_stop_mid_attempt"
+                                break
+                            if pass_run.zero_tool_turn_honest_fail:
+                                verdict = "FAIL"
+                                attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                                termination_reason = "zero_tool_turn_honest_fail"
+                                if attempt_reports:
+                                    attempt_reports[-1]["zero_tool_turn_honest_fail"] = True
                                 break
                             if (
                                 pass_run.exit_code not in (0, None)
@@ -1057,8 +1120,10 @@ class BackgammonRunner(AgentRunner):
 
                     self._write_worker_permission_config(worktree=worktree)
 
-                    feedback_run = self._run_opencode(
-                        cmd=active_cell.exec_argv(feedback_inner),
+                    feedback_run = self._run_opencode_with_zero_tool_resumes(
+                        active_cell=active_cell,
+                        initial_inner=feedback_inner,
+                        pure=pure,
                         worktree=worktree,
                         events_path=events_path,
                         env=run_env,
@@ -1079,6 +1144,11 @@ class BackgammonRunner(AgentRunner):
                     input_tokens_total += feedback_run.input_tokens
                     output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
                     turns_total += feedback_run.turns
+                    truncations_total += feedback_run.truncations
+                    zero_tool_turns_total += feedback_run.zero_tool_turns
+                    zero_tool_resumes_total += feedback_run.zero_tool_resumes
+                    if feedback_run.zero_tool_turn_honest_fail:
+                        zero_tool_turn_honest_fails_total += 1
                     worker_killed_reason = feedback_run.killed_reason
                     self._progress(
                         f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
@@ -1091,6 +1161,13 @@ class BackgammonRunner(AgentRunner):
                         verdict = "BUDGET_STOP"
                         attempts_to_green = "BUDGET_STOP"
                         termination_reason = "budget_stop_mid_attempt"
+                        break
+                    if feedback_run.zero_tool_turn_honest_fail:
+                        verdict = "FAIL"
+                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                        termination_reason = "zero_tool_turn_honest_fail"
+                        if attempt_reports:
+                            attempt_reports[-1]["zero_tool_turn_honest_fail"] = True
                         break
                     if (
                         feedback_run.exit_code not in (0, None)
@@ -1247,6 +1324,127 @@ class BackgammonRunner(AgentRunner):
             served_attempted=served_attempted,
             served_failed=served_failed,
             served_confirmed=served_confirmed,
+            truncations=truncations_total,
+            zero_tool_turns=zero_tool_turns_total,
+            zero_tool_resumes=zero_tool_resumes_total,
+            zero_tool_turn_honest_fails=zero_tool_turn_honest_fails_total,
+        )
+
+    def _run_opencode_with_zero_tool_resumes(
+        self,
+        *,
+        active_cell: DockerCell,
+        initial_inner: list[str],
+        pure: bool,
+        worktree: Path,
+        events_path: Path,
+        env: dict[str, str],
+        run_label: str,
+        phase: str,
+        fallback_session_id: str | None,
+        prior_cost_usd: float = 0.0,
+        kill_hook: Callable[[], None] | None = None,
+        stdin_text: str | None = None,
+    ) -> _OpencodeRunStats:
+        aggregate = self._run_opencode(
+            cmd=active_cell.exec_argv(initial_inner),
+            worktree=worktree,
+            events_path=events_path,
+            env=env,
+            run_label=run_label,
+            phase=phase,
+            fallback_session_id=fallback_session_id,
+            prior_cost_usd=prior_cost_usd,
+            kill_hook=kill_hook,
+            stdin_text=stdin_text,
+        )
+
+        resume_count = 0
+        current = aggregate
+        budget_stop_detected_any = bool(aggregate.budget_stop_detected)
+        budget_stop_signature = aggregate.budget_stop_signature
+
+        while current.terminal_zero_tool_turn and resume_count < MAX_ZERO_TOOL_RESUMES:
+            resume_session_id = current.session_id or aggregate.session_id or fallback_session_id
+            if not resume_session_id:
+                break
+            resume_count += 1
+            self._progress(
+                f"PROGRESS run_label={run_label} step=zero-tool-turn-resume phase={phase} "
+                f"resume={resume_count}/{MAX_ZERO_TOOL_RESUMES} session_id={resume_session_id}"
+            )
+            resume_inner = [
+                "opencode",
+                "run",
+                "--session",
+                str(resume_session_id),
+                "--dir",
+                "/work",
+                "--format",
+                "json",
+            ]
+            if pure:
+                resume_inner.append("--pure")
+
+            resumed = self._run_opencode(
+                cmd=active_cell.exec_argv(resume_inner),
+                worktree=worktree,
+                events_path=events_path,
+                env=env,
+                run_label=run_label,
+                phase=f"{phase}-zero-tool-resume-{resume_count}",
+                fallback_session_id=str(resume_session_id),
+                prior_cost_usd=prior_cost_usd + aggregate.cost_usd,
+                kill_hook=kill_hook,
+                stdin_text=ZERO_TOOL_RESUME_NUDGE,
+            )
+
+            budget_stop_detected_any = budget_stop_detected_any or resumed.budget_stop_detected
+            if budget_stop_signature is None and resumed.budget_stop_signature is not None:
+                budget_stop_signature = resumed.budget_stop_signature
+
+            aggregate = _OpencodeRunStats(
+                input_tokens=aggregate.input_tokens + resumed.input_tokens,
+                output_tokens=aggregate.output_tokens + resumed.output_tokens,
+                reasoning_tokens=aggregate.reasoning_tokens + resumed.reasoning_tokens,
+                turns=aggregate.turns + resumed.turns,
+                session_id=resumed.session_id or aggregate.session_id,
+                killed_reason=resumed.killed_reason or aggregate.killed_reason,
+                exit_code=resumed.exit_code,
+                cost_usd=aggregate.cost_usd + resumed.cost_usd,
+                budget_stop_detected=budget_stop_detected_any,
+                budget_stop_signature=budget_stop_signature,
+                truncations=aggregate.truncations + resumed.truncations,
+                zero_tool_turns=aggregate.zero_tool_turns + resumed.zero_tool_turns,
+                terminal_zero_tool_turn=resumed.terminal_zero_tool_turn,
+                zero_tool_resumes=resume_count,
+                zero_tool_turn_honest_fail=False,
+            )
+            current = resumed
+
+        honest_fail = bool(aggregate.terminal_zero_tool_turn)
+        if honest_fail:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=zero-tool-turn outcome=honest-fail phase={phase} "
+                f"resumes={resume_count}/{MAX_ZERO_TOOL_RESUMES}"
+            )
+
+        return _OpencodeRunStats(
+            input_tokens=aggregate.input_tokens,
+            output_tokens=aggregate.output_tokens,
+            reasoning_tokens=aggregate.reasoning_tokens,
+            turns=aggregate.turns,
+            session_id=aggregate.session_id,
+            killed_reason=aggregate.killed_reason,
+            exit_code=aggregate.exit_code,
+            cost_usd=aggregate.cost_usd,
+            budget_stop_detected=aggregate.budget_stop_detected,
+            budget_stop_signature=aggregate.budget_stop_signature,
+            truncations=aggregate.truncations,
+            zero_tool_turns=aggregate.zero_tool_turns,
+            terminal_zero_tool_turn=aggregate.terminal_zero_tool_turn,
+            zero_tool_resumes=resume_count,
+            zero_tool_turn_honest_fail=honest_fail,
         )
 
     def _write_worker_permission_config(self, *, worktree: Path) -> None:
@@ -1258,13 +1456,23 @@ class BackgammonRunner(AgentRunner):
             proxy_base_url=self.proxy_base_url,
             gates_dir=gates_dir,
             golden_dir=golden_dir,
+            session_id=self.session_id,
         )
+        session_header_set = bool(self.session_id)
         provider_id, _, model_id = self.model.partition("/")
         if provider_id and model_id:
             self._progress(
                 "PROGRESS step=worker-permission-config "
-                f"model_declared={model_id} provider={provider_id}"
+                f"model_declared={model_id} provider={provider_id} "
+                f"session_header_set={str(session_header_set).lower()}"
             )
+
+        self._progress(
+            "PROGRESS step=worker-permission-config-provider "
+            f"provider={provider_id or 'none'} model={model_id or 'none'} "
+            f"proxy_base_url_set={str(bool(self.proxy_base_url)).lower()} "
+            f"session_header_set={str(session_header_set).lower()}"
+        )
 
         # Output token caps are enforced via Docker env
         # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, not model `options.max_tokens`
@@ -1517,6 +1725,12 @@ class BackgammonRunner(AgentRunner):
             "completed_at": None,
             "budget_stop_detected": False,
             "budget_stop_signature": None,
+            "truncations": 0,
+            "zero_tool_turns": 0,
+            "terminal_zero_tool_turn": False,
+            "active_tool_uses": 0,
+            "active_file_writes": 0,
+            "active_step_index": 0,
         }
         stderr_tail: collections.deque[str] = collections.deque(maxlen=120)
         reader_failures: list[str] = []
@@ -1620,6 +1834,21 @@ class BackgammonRunner(AgentRunner):
                         if event_type == "step_start":
                             with state_lock:
                                 state["completed_at"] = None
+                                state["active_tool_uses"] = 0
+                                state["active_file_writes"] = 0
+                                state["active_step_index"] = self._to_int(state.get("active_step_index", 0)) + 1
+                                state["terminal_zero_tool_turn"] = False
+                            continue
+                        if event_type == "tool_use":
+                            part = event.get("part") if isinstance(event.get("part"), dict) else {}
+                            tool_name = part.get("tool")
+                            if not isinstance(tool_name, str):
+                                tool_name = part.get("name")
+                            tool_name_normalized = str(tool_name).strip().lower()
+                            with state_lock:
+                                state["active_tool_uses"] = self._to_int(state.get("active_tool_uses", 0)) + 1
+                                if tool_name_normalized in _FILE_WRITE_TOOL_NAMES:
+                                    state["active_file_writes"] = self._to_int(state.get("active_file_writes", 0)) + 1
                             continue
                         if event_type != "step_finish":
                             continue
@@ -1641,6 +1870,27 @@ class BackgammonRunner(AgentRunner):
                                 state["max_input"] = input_tokens
                             if reason == "stop":
                                 state["completed_at"] = time.monotonic()
+                            elif reason == "length":
+                                state["truncations"] = self._to_int(state.get("truncations", 0)) + 1
+                                self._progress(
+                                    f"PROGRESS run_label={run_label} step=TRUNCATION phase={phase} "
+                                    f"turn={state['turns']} reason=length"
+                                )
+
+                            tool_uses = self._to_int(state.get("active_tool_uses", 0))
+                            file_writes = self._to_int(state.get("active_file_writes", 0))
+                            if tool_uses == 0 and file_writes == 0:
+                                state["zero_tool_turns"] = self._to_int(state.get("zero_tool_turns", 0)) + 1
+                                state["terminal_zero_tool_turn"] = True
+                                self._progress(
+                                    f"PROGRESS run_label={run_label} step=zero-tool-turn phase={phase} "
+                                    f"turn={state['turns']} tool_uses=0 file_writes=0"
+                                )
+                            else:
+                                state["terminal_zero_tool_turn"] = False
+
+                            state["active_tool_uses"] = 0
+                            state["active_file_writes"] = 0
                 except Exception as exc:  # noqa: BLE001 - log and continue teardown.
                     reader_failures.append(f"stdout reader failure ({phase}): {exc}")
                 finally:
@@ -1815,6 +2065,9 @@ class BackgammonRunner(AgentRunner):
             cost_usd = float(state["sum_cost"])
             budget_stop_detected = bool(state.get("budget_stop_detected", False))
             budget_stop_signature = state.get("budget_stop_signature")
+            truncations = self._to_int(state.get("truncations", 0))
+            zero_tool_turns = self._to_int(state.get("zero_tool_turns", 0))
+            terminal_zero_tool_turn = bool(state.get("terminal_zero_tool_turn", False))
 
         if exit_code not in (0, None) and stderr_tail:
             self._progress(
@@ -1855,6 +2108,9 @@ class BackgammonRunner(AgentRunner):
             cost_usd=cost_usd,
             budget_stop_detected=budget_stop_detected,
             budget_stop_signature=None if budget_stop_signature is None else str(budget_stop_signature),
+            truncations=truncations,
+            zero_tool_turns=zero_tool_turns,
+            terminal_zero_tool_turn=terminal_zero_tool_turn,
         )
 
     def _emit_cost_target_warning_if_reached(

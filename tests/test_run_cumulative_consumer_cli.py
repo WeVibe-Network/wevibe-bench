@@ -238,8 +238,8 @@ def test_real_session_runner_consumer_gate_outcome_on_and_off(
 
     on_session = SessionRecord(
         sequence_index=1,
-        model="openrouter/model-a",
-        provider_pin="openrouter",
+        model="orcarouter/model-a",
+        provider_pin="orcarouter",
         memory_mode="on",
         phase_group="on",
         phase="RUN_SESSION",
@@ -264,8 +264,8 @@ def test_real_session_runner_consumer_gate_outcome_on_and_off(
 
     off_session = SessionRecord(
         sequence_index=0,
-        model="openrouter/model-a",
-        provider_pin="openrouter",
+        model="orcarouter/model-a",
+        provider_pin="orcarouter",
         memory_mode="off",
         phase_group="off_baseline",
         phase="RUN_SESSION",

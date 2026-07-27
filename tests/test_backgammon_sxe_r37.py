@@ -518,12 +518,18 @@ def _run_main_capture_extract_call(
     *,
     env: dict[str, str | None],
 ) -> tuple[int, dict[str, Any], list[str]]:
+    # Test-isolation hardening: force dotenv resolution to a non-existent fixture path
+    # so ambient repo/root `.env` cannot override the controlled per-test env map.
+    monkeypatch.setenv("WEVIBE_BENCH_DOTENV", str(tmp_path / "does-not-exist.env"))
+
     for key in (
         "WEVIBE_BENCH_EXTRACT_BASE_URL",
         "WEVIBE_BENCH_EXTRACT_API_KEY_FILE",
         "WEVIBE_BENCH_EXTRACT_NUM_CTX",
         "WEVIBE_BENCH_API_KEY",
         "OPENROUTER_API_KEY",
+        "ORCAROUTER_API_KEY",
+        "WEVIBE_BENCH_SPEND_PROXY_BASE_URL",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -541,7 +547,7 @@ def _run_main_capture_extract_call(
         run_label=run_label,
         source_mode=source_mode,
         org_id=sx.DEFAULT_ORG_ID,
-        session_model="openrouter/opencode/big-pickle",
+        session_model="orcarouter/opencode/big-pickle",
         extract_model=None,
         extract_timeout=60,
         runs_dir=str(runs_dir),
@@ -692,48 +698,50 @@ def test_extract_override_env_forwards_proxy_base_url_num_ctx_and_token(
     tmp_path: pathlib.Path,
 ) -> None:
     proxy_token = "proxy-token-override"
-    token_file = tmp_path / "proxy.token"
-    token_file.write_text(proxy_token + "\n", encoding="utf-8")
 
     exit_code, extract_kwargs, log_lines = _run_main_capture_extract_call(
         monkeypatch,
         tmp_path,
         env={
-            "OPENROUTER_API_KEY": "openrouter-direct-key",
-            "WEVIBE_BENCH_EXTRACT_BASE_URL": "http://127.0.0.1:8789/api/v1",
-            "WEVIBE_BENCH_EXTRACT_API_KEY_FILE": str(token_file),
+            "ORCAROUTER_API_KEY": proxy_token,
+            "WEVIBE_BENCH_SPEND_PROXY_BASE_URL": "http://127.0.0.1:4480/v1",
             "WEVIBE_BENCH_EXTRACT_NUM_CTX": "131072",
         },
     )
 
     assert exit_code == 0
-    assert extract_kwargs["base_url"] == "http://127.0.0.1:8789/api/v1"
+    assert extract_kwargs["base_url"] == "http://127.0.0.1:4480/v1"
     assert extract_kwargs["num_ctx"] == 131072
     assert extract_kwargs["api_key"] == proxy_token
-    assert extract_kwargs["provider"] == "openrouter"
+    assert extract_kwargs["provider"] == "orcarouter"
 
     expected_line = (
-        "extract transport override "
-        "base_url=http://127.0.0.1:8789/api/v1 "
+        "extract llm route "
+        "provider=orcarouter "
+        "base_url=http://127.0.0.1:4480/v1 "
         "num_ctx=131072 "
-        f"key_source=proxy_token_file key_fp={sx._sha256_first8(proxy_token)}"
+        f"key_source=env:ORCAROUTER_API_KEY key_fp={sx._sha256_first8(proxy_token)}"
     )
     assert any(expected_line in line for line in log_lines)
 
 
-def test_extract_override_unset_keeps_direct_openrouter_behavior(
+def test_extract_override_unset_uses_spend_proxy_default_route(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
-    direct_key = "openrouter-direct-key"
+    proxy_token = "proxy-token-default"
     exit_code, extract_kwargs, log_lines = _run_main_capture_extract_call(
         monkeypatch,
         tmp_path,
-        env={"OPENROUTER_API_KEY": direct_key},
+        env={"ORCAROUTER_API_KEY": proxy_token},
     )
 
     assert exit_code == 0
-    assert extract_kwargs["base_url"] is None
+    assert extract_kwargs["base_url"] == "http://127.0.0.1:4480/v1"
     assert extract_kwargs["num_ctx"] is None
-    assert extract_kwargs["api_key"] == direct_key
-    assert not any("extract transport override " in line for line in log_lines)
+    assert extract_kwargs["api_key"] == proxy_token
+    assert any(
+        "extract llm route provider=orcarouter base_url=http://127.0.0.1:4480/v1 num_ctx=none "
+        f"key_source=env:ORCAROUTER_API_KEY key_fp={sx._sha256_first8(proxy_token)}" in line
+        for line in log_lines
+    )

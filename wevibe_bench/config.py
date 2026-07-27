@@ -341,7 +341,7 @@ class LadderRung:
 # SOURCE = kimi-k3; MEASURE rungs top→bottom: kimi-k2.7-code (BRACKET) → hy3.
 # GLM-5.2 deselected 2026-07-27 (SMOKE-2 ON-arm essay-mode collapse); glm
 # proxy profile + pricing retained for history.
-# Slugs are OrcaRouter-catalog-verified bare ids. The `openrouter/` prefix is
+# Slugs are OrcaRouter-catalog-verified bare ids. The `orcarouter/` prefix is
 # only the worker→proxy opencode provider selector; host-side proxy profile
 # `upstream="orcarouter"` selects the real upstream.
 # `xiaomi/mimo-v2.5-pro` is dropped (absent from OrcaRouter catalog; no
@@ -350,23 +350,55 @@ class LadderRung:
 # DeepInfra / novita / siliconflow pins are void on this substrate.
 BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
     LadderRung(
-        model="openrouter/kimi/kimi-k3",
+        model="orcarouter/kimi/kimi-k3",
         role="source",
         memory_modes=("off",),
     ),
     LadderRung(
-        model="openrouter/kimi/kimi-k2.7-code",
+        model="orcarouter/kimi/kimi-k2.7-code",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class="BRACKET",
     ),
     LadderRung(
-        model="openrouter/tencent/hy3",
+        model="orcarouter/tencent/hy3",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class=None,
     ),
 )
+
+# Worker opencode model declarations mirror manager session provider.orcarouter
+# model blocks exactly (name/reasoning/tool_call/limit shape). Any worker-only
+# additions (interleaved + optional headers) are layered by
+# adapters.backgammon.build_worker_opencode_config.
+WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+    "kimi/kimi-k3": {
+        "name": "Kimi K3",
+        "reasoning": True,
+        "tool_call": True,
+        "limit": {
+            "context": 1_048_576,
+            "output": 128_000,
+        },
+    },
+    "kimi/kimi-k2.7-code": {
+        "name": "Kimi K2.7 Code",
+        "tool_call": True,
+        "limit": {
+            "context": 262_144,
+            "output": 262_144,
+        },
+    },
+    "tencent/hy3": {
+        "name": "Hy3",
+        "tool_call": True,
+        "limit": {
+            "context": 262_144,
+            "output": 262_144,
+        },
+    },
+}
 
 # Schema version for the frozen ladder run manifest. Bump whenever the manifest
 # structure or the roster's interpretation changes, so that resuming a run frozen

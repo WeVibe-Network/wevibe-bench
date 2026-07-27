@@ -31,6 +31,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -48,7 +49,7 @@ from wevibe_bench.adapters.backgammon import (
 from wevibe_bench.adapters.openrouter_proxy import (
     DEFAULT_OPENCODE_AUTH_PATH,
     DEFAULT_PROFILES,
-    key_fingerprint,
+    key_fingerprint as upstream_key_fingerprint,
     load_upstream_key,
 )
 from wevibe_bench.config import (
@@ -58,6 +59,13 @@ from wevibe_bench.config import (
     backgammon_scored_ladder_roster,
 )
 from wevibe_bench.lifecycle import qdrant_probe
+from wevibe_bench.proxy_meter import SpendMeter, verify_pricing
+from wevibe_bench.spend_key import (
+    key_fingerprint as spend_key_fingerprint,
+    resolve_orcarouter_api_key,
+    resolve_spend_db_dsn,
+    resolve_spend_proxy_base_url,
+)
 
 
 STAGE_NUMBER = 8
@@ -68,7 +76,7 @@ CHECKPOINT_NAME = "scored-ladder-checkpoint.json"
 MANIFEST_NAME = "scored-ladder-manifest.json"
 ESCALATE_NAME = "SCORED-LADDER-ESCALATE.json"
 SUMMARY_NAME = "scored-ladder-summary.json"
-DEFAULT_PROXY_PORT = 8789
+DEFAULT_WORKER_SPEND_PROXY_BASE_URL = "http://host.docker.internal:4480/v1"
 PROXY_START_TIMEOUT_S = 45
 PROXY_STOP_TIMEOUT_S = 15
 RUN_TIMEOUT_S = 5400
@@ -81,6 +89,8 @@ DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_CLONE_LOG = "runs/clone4550.log"
 BINDING_BUDGET_METER = "proxy_budget_ledger.hard_cap_usd"
 PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
+PRICING_EXPECTED_VERSION = "c58e194db3f6a20e7d41b8c9e2f05a17"
+BUDGET_POLL_INTERVAL_S = 2.0
 
 REQUIRED_RUNG_PARAM_FIELDS = (
     "profile",
@@ -174,6 +184,24 @@ def _proxy_script_path() -> Path:
 def _slugify_model(model: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", model.replace("/", "-")).strip("-").lower()
     return slug or "model"
+
+
+def _bare_spend_model_id(model: str) -> str:
+    raw = str(model).strip()
+    if raw.startswith("orcarouter/"):
+        return raw[len("orcarouter/") :]
+    return raw
+
+
+def _pricing_roster_models(cells: list[dict[str, Any]]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for cell in cells:
+        bare_model = _bare_spend_model_id(str(cell.get("model") or ""))
+        if bare_model and bare_model not in seen:
+            ordered.append(bare_model)
+            seen.add(bare_model)
+    return ordered
 
 
 def _save_json_atomic(path: Path, payload: Any) -> None:
@@ -1259,7 +1287,9 @@ def _median(values: list[float]) -> float:
 
 
 def _entry_accrued_usd(entry: dict[str, Any]) -> float | None:
-    value = entry.get("accrued_usd")
+    value = entry.get("true_usd")
+    if value is None:
+        value = entry.get("accrued_usd")
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -1377,6 +1407,7 @@ def _build_proxy_cmd(
     proxy_dir: Path,
     stamp: str,
 ) -> tuple[list[str], Path, Path, Path]:
+    # RETIRED (27-07-26 spend-proxy :4480): superseded by standing spend-proxy + DB metering; kept for reference. See report 27-07-26-1307.
     proxy_log = proxy_dir / f"{stamp}-{run_id}.log"
     proxy_checkpoint = proxy_dir / f"{run_id}-checkpoint.json"
     token_file = proxy_dir / f"{run_id}.token"
@@ -1419,6 +1450,7 @@ def _build_proxy_cmd(
 
 
 def _start_proxy(cmd: list[str], console_log: Path) -> subprocess.Popen[bytes]:
+    # RETIRED (27-07-26 spend-proxy :4480): superseded by standing spend-proxy + DB metering; kept for reference. See report 27-07-26-1307.
     console_log.parent.mkdir(parents=True, exist_ok=True)
     handle = console_log.open("ab")
     try:
@@ -1428,6 +1460,7 @@ def _start_proxy(cmd: list[str], console_log: Path) -> subprocess.Popen[bytes]:
 
 
 def _stop_proxy(proc: subprocess.Popen[bytes]) -> None:
+    # RETIRED (27-07-26 spend-proxy :4480): superseded by standing spend-proxy + DB metering; kept for reference. See report 27-07-26-1307.
     if proc.poll() is None:
         proc.terminate()
         try:
@@ -1439,8 +1472,7 @@ def _stop_proxy(proc: subprocess.Popen[bytes]) -> None:
 
 def _build_session_extra_flags(
     params: dict[str, Any],
-    token_file: Path,
-    port: int,
+    proxy_token: str,
     *,
     binding_cap_usd: float,
 ) -> str:
@@ -1460,9 +1492,9 @@ def _build_session_extra_flags(
         "--reasoning-effort",
         REASONING_EFFORT,
         "--proxy-base-url",
-        f"http://host.docker.internal:{port}/api/v1",
-        "--proxy-token-file",
-        str(token_file),
+        DEFAULT_WORKER_SPEND_PROXY_BASE_URL,
+        "--proxy-token",
+        str(proxy_token),
     ]
     output_price = params.get("output_price_per_1m")
     if output_price is not None and float(output_price) > 0:
@@ -1475,6 +1507,7 @@ def _build_inner_cmd(
     cell: dict[str, Any],
     rep: int,
     run_label: str,
+    run_id: str,
     extra_session_flags: str,
     ladder_runs_dir: Path,
     org_id: str,
@@ -1502,6 +1535,8 @@ def _build_inner_cmd(
         str(ladder_runs_dir),
         "--extra-session-flags",
         extra_session_flags,
+        "--session-id",
+        run_id,
     ]
     if str(cell["phase"]) == "all":
         cmd.extend(["--extract-timeout", str(EXTRACT_TIMEOUT_S), "--org-id", org_id])
@@ -1509,6 +1544,7 @@ def _build_inner_cmd(
 
 
 def _build_inner_env(proxy_checkpoint: Path) -> dict[str, str]:
+    # RETIRED (27-07-26 spend-proxy :4480): superseded by standing spend-proxy + DB metering; kept for reference. See report 27-07-26-1307.
     env = os.environ.copy()
     env[PROXY_CHECKPOINT_ENV] = str(proxy_checkpoint)
     return env
@@ -1605,7 +1641,14 @@ def _persist_error_entry(checkpoint: dict[str, Any], checkpoint_path: Path, entr
     _save_json_atomic(checkpoint_path, checkpoint)
 
 
-def _run_inner_tee(cmd: list[str], cell_log: Path, *, env: dict[str, str] | None = None) -> int:
+def _run_inner_tee(
+    cmd: list[str],
+    cell_log: Path,
+    *,
+    env: dict[str, str] | None = None,
+    budget_watch: Any | None = None,
+    budget_poll_interval_s: float = BUDGET_POLL_INTERVAL_S,
+) -> tuple[int, dict[str, Any] | None]:
     """Run the inner ladder, teeing stdout+stderr to the cell log.
 
     PROGRESS / RESULT_JSON lines are also relayed to this driver's stdout so a
@@ -1613,6 +1656,7 @@ def _run_inner_tee(cmd: list[str], cell_log: Path, *, env: dict[str, str] | None
     """
 
     cell_log.parent.mkdir(parents=True, exist_ok=True)
+    budget_abort: dict[str, Any] | None = None
     with cell_log.open("w", encoding="utf-8") as fh:
         proc = subprocess.Popen(
             cmd,
@@ -1622,6 +1666,46 @@ def _run_inner_tee(cmd: list[str], cell_log: Path, *, env: dict[str, str] | None
             text=True,
             env=env,
         )
+
+        stop_budget_watch = threading.Event()
+        watch_thread: threading.Thread | None = None
+
+        def _budget_watch_loop() -> None:
+            nonlocal budget_abort
+            if budget_watch is None:
+                return
+            interval_s = max(0.1, float(budget_poll_interval_s))
+            while not stop_budget_watch.is_set():
+                poll = budget_watch()
+                if poll is not None:
+                    budget_abort = dict(poll)
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    except OSError:
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        except OSError:
+                            pass
+                    return
+                if stop_budget_watch.wait(interval_s):
+                    return
+
+        if budget_watch is not None:
+            watch_thread = threading.Thread(
+                target=_budget_watch_loop,
+                name=f"budget-watch-{cell_log.stem}",
+                daemon=True,
+            )
+            watch_thread.start()
+
         assert proc.stdout is not None
         for line in proc.stdout:
             fh.write(line)
@@ -1629,7 +1713,11 @@ def _run_inner_tee(cmd: list[str], cell_log: Path, *, env: dict[str, str] | None
             if "PROGRESS" in line or "RESULT_JSON" in line:
                 print(line.rstrip("\n"), flush=True)
         proc.stdout.close()
-        return int(proc.wait())
+        return_code = int(proc.wait())
+        stop_budget_watch.set()
+        if watch_thread is not None:
+            watch_thread.join(timeout=2)
+        return return_code, budget_abort
 
 
 def _read_text_or_empty(path: Path) -> str:
@@ -1663,7 +1751,6 @@ def _run_cell_rep(
 
     runs_dir = Path(str(args.runs_dir)).expanduser().resolve()
     ladder_runs_dir = Path(str(args.ladder_runs_dir)).expanduser().resolve()
-    proxy_dir = _repo_root() / "runs" / "openrouter-proxy"
     clone_log = Path(str(args.clone_log)).expanduser()
 
     def progress(phase: str, extra: str = "") -> None:
@@ -1686,6 +1773,8 @@ def _run_cell_rep(
     stats: dict[str, Any] | None = None
     anomalies: dict[str, Any] | None = None
     assertions: dict[str, Any] | None = None
+    benchmark_spend = 0.0
+    spend_meter = SpendMeter(str(args.spend_db_dsn))
 
     try:
         binding_cap_usd, reconciled_cost_limit = _reconciled_cost_limit_usd(params)
@@ -1715,56 +1804,69 @@ def _run_cell_rep(
 
         clone_offset = clone_log.stat().st_size if clone_log.is_file() else 0
 
-        model_slug_for_proxy = model.removeprefix("openrouter/")
-        proxy_cmd, proxy_log, proxy_checkpoint, token_file = _build_proxy_cmd(
-            run_id=run_id,
-            model_slug=model_slug_for_proxy,
-            params=params,
-            port=int(args.proxy_port),
-            proxy_dir=proxy_dir,
-            stamp=stamp,
+        proxy_log = runs_dir / f"{stamp}-{run_label}-proxy.log"
+        proxy_checkpoint = runs_dir / f"{run_id}-spend-meter.json"
+        proxy_log.write_text(
+            (
+                "# RETIRED (27-07-26 spend-proxy :4480): superseded by standing spend-proxy + DB metering; "
+                "kept for reference. See report 27-07-26-1307.\n"
+            ),
+            encoding="utf-8",
         )
-        progress("proxy-start", f"port={args.proxy_port} run_id={run_id}")
-        proxy_proc = _start_proxy(proxy_cmd, runs_dir / "proxy-console.log")
-        try:
-            deadline = time.monotonic() + PROXY_START_TIMEOUT_S
-            while not _port_listening(int(args.proxy_port)):
-                if proxy_proc.poll() is not None or time.monotonic() > deadline:
-                    raise LadderAbort(
-                        "proxy_start_failed",
-                        {"run_id": run_id, "exit_code": proxy_proc.poll(), "log": str(proxy_log)},
-                    )
-                time.sleep(1.0)
-            time.sleep(2.0)
 
-            extra_session_flags = _build_session_extra_flags(
-                params,
-                token_file,
-                int(args.proxy_port),
-                binding_cap_usd=binding_cap_usd,
+        extra_session_flags = _build_session_extra_flags(
+            params,
+            str(args.proxy_token),
+            binding_cap_usd=binding_cap_usd,
+        )
+        inner_cmd = _build_inner_cmd(
+            cell=cell,
+            rep=rep,
+            run_label=run_label,
+            run_id=run_id,
+            extra_session_flags=extra_session_flags,
+            ladder_runs_dir=ladder_runs_dir,
+            org_id=str(args.org_id),
+        )
+        cell_log = runs_dir / f"{stamp}-{run_label}-cell.log"
+        progress("cell-start", f"cell_log={cell_log}")
+        started = time.perf_counter()
+        def _poll_budget_cap() -> dict[str, Any] | None:
+            run_spend = spend_meter.run_spend(run_id)
+            true_usd = float(run_spend.true_usd)
+            cap_usd = float(binding_cap_usd)
+            remaining_usd = cap_usd - true_usd
+            progress(
+                "budget-poll",
+                f"run_id={run_id} true_usd={true_usd:.6f} cap_usd={cap_usd:.6f} remaining_usd={remaining_usd:.6f}",
             )
-            inner_cmd = _build_inner_cmd(
-                cell=cell,
-                rep=rep,
-                run_label=run_label,
-                extra_session_flags=extra_session_flags,
-                ladder_runs_dir=ladder_runs_dir,
-                org_id=str(args.org_id),
-            )
-            inner_env = _build_inner_env(proxy_checkpoint)
-            cell_log = runs_dir / f"{stamp}-{run_label}-cell.log"
-            progress("cell-start", f"cell_log={cell_log}")
-            started = time.perf_counter()
-            inner_rc = _run_inner_tee(inner_cmd, cell_log, env=inner_env)
-            dur_s = time.perf_counter() - started
-        finally:
-            _stop_proxy(proxy_proc)
+            if true_usd >= cap_usd:
+                return {
+                    "run_id": run_id,
+                    "true_usd": true_usd,
+                    "cap_usd": cap_usd,
+                    "remaining_usd": remaining_usd,
+                }
+            return None
 
-        if proxy_checkpoint.is_file():
-            if not _ledger_record(proxy_checkpoint):
-                progress("ledger-post-record-refused", f"checkpoint={proxy_checkpoint}")
-        else:
-            progress("ledger-post-record-skipped", "proxy_checkpoint_missing=1")
+        inner_rc, budget_abort = _run_inner_tee(
+            inner_cmd,
+            cell_log,
+            env=None,
+            budget_watch=_poll_budget_cap,
+            budget_poll_interval_s=BUDGET_POLL_INTERVAL_S,
+        )
+        dur_s = time.perf_counter() - started
+
+        if budget_abort is not None:
+            raise LadderAbort(
+                "run_budget_cap_reached",
+                {
+                    "run_id": run_id,
+                    "cell_log": str(cell_log),
+                    **budget_abort,
+                },
+            )
 
         if inner_rc != 0:
             raise LadderAbort(
@@ -1822,20 +1924,59 @@ def _run_cell_rep(
 
         anomalies = _detect_anomalies(proxy_log_text, cell_log_text, stats)
 
-        proxy_cp = _load_json(proxy_checkpoint) if proxy_checkpoint.is_file() else None
-        if isinstance(proxy_cp, dict):
-            accrued = proxy_cp.get("accrued_actual_usd")
-            accrued_derived = proxy_cp.get("accrued_derived_usd", 0.0)
-            committed = proxy_cp.get("committed_unproven_usd")
-            if stats is not None:
-                try:
-                    actual_cost = float(accrued or 0.0)
-                    derived_cost = float(accrued_derived or 0.0)
-                    stats["cost_usd"] = actual_cost + derived_cost
-                    stats["cost_actual_usd"] = actual_cost
-                    stats["cost_derived_usd"] = derived_cost
-                except (TypeError, ValueError):
-                    pass
+        spend = spend_meter.run_spend(run_id)
+        accrued = spend.true_usd
+        accrued_derived = 0.0
+        benchmark_spend = spend.benchmark_usd
+        committed = binding_cap_usd
+        if stats is not None:
+            stats["cost_usd"] = float(spend.true_usd)
+            stats["cost_actual_usd"] = float(spend.true_usd)
+            stats["cost_derived_usd"] = 0.0
+            stats["cost_benchmark_usd"] = float(spend.benchmark_usd)
+
+        spend_payload = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "calls": int(spend.calls),
+            "true_usd": float(spend.true_usd),
+            "benchmark_usd": float(spend.benchmark_usd),
+            "uncached_input_tokens": int(spend.uncached_input_tokens),
+            "cached_input_tokens": int(spend.cached_input_tokens),
+            "output_tokens": int(spend.output_tokens),
+            "reasoning_tokens": int(spend.reasoning_tokens),
+            "unmetered_calls": int(spend.unmetered_calls),
+            "last_call_at": spend.last_call_at,
+            "committed_unproven_usd": float(binding_cap_usd),
+        }
+
+        mismatches = spend_meter.model_identity_mismatches(run_id)
+        mismatch_rows = [
+            {
+                "requested_model": str(row.model),
+                "upstream_model": str(row.upstream_model) if row.upstream_model is not None else None,
+                "calls": int(row.calls),
+            }
+            for row in mismatches
+        ]
+        progress(
+            "model-identity-watch",
+            f"run_id={run_id} mismatch_count={len(mismatch_rows)} rows={json.dumps(mismatch_rows, separators=(',', ':'))}",
+        )
+        if mismatch_rows:
+            raise LadderAbort(
+                "served_model_mismatch",
+                {
+                    "run_id": run_id,
+                    "requested_model": model,
+                    "mismatches": mismatch_rows,
+                    "proxy_checkpoint": str(proxy_checkpoint),
+                },
+            )
+
+        _save_json_atomic(proxy_checkpoint, spend_payload)
+        if not _ledger_record(proxy_checkpoint):
+            progress("ledger-post-record-refused", f"checkpoint={proxy_checkpoint}")
 
         try:
             progress_cost_actual = float(accrued or 0.0)
@@ -1850,7 +1991,7 @@ def _run_cell_rep(
             f"verdict={stats['verdict']} tokens={stats['total_tokens']:.0f} "
             f"cost_actual_usd={progress_cost_actual:.4f} "
             f"cost_derived_usd={progress_cost_derived:.4f} "
-            f"cost_settled_usd={progress_cost_settled:.4f} dur_s={dur_s:.1f}",
+            f"cost_settled_usd={progress_cost_settled:.4f} benchmark_usd={benchmark_spend:.4f} dur_s={dur_s:.1f}",
         )
 
         return {
@@ -1871,6 +2012,8 @@ def _run_cell_rep(
             "proxy_log": str(proxy_log),
             "proxy_checkpoint": str(proxy_checkpoint),
             "accrued_usd": accrued,
+            "true_usd": accrued,
+            "benchmark_usd": benchmark_spend,
             "accrued_derived_usd": accrued_derived,
             "committed_unproven_usd": committed,
             "stats": stats,
@@ -1919,7 +2062,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ladder-runs-dir", default=str(_default_ladder_runs_dir()), help="--runs-dir passed to scripts/backgammon_ladder.py (scorecards/details live here).")
     parser.add_argument("--rung-params", default=None, help="JSON file with per-model proxy/pricing/cost params (required unless --dry-run).")
     parser.add_argument("--clone-log", default=str(_repo_root() / DEFAULT_CLONE_LOG), help="Recall clone logfile for ON-cell delivery assertion.")
-    parser.add_argument("--proxy-port", type=int, default=DEFAULT_PROXY_PORT)
+    parser.add_argument("--proxy-port", type=int, default=None)
     parser.add_argument("--org-id", default=DEFAULT_ORG_ID)
     parser.add_argument(
         "--import-cell",
@@ -1944,6 +2087,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         help="Append preregistration disclosure text to the manifest (repeatable).",
     )
+    # RETIRED (27-07-26 spend-proxy :4480): superseded by standing spend-proxy + DB metering; kept for reference. See report 27-07-26-1307.
     return parser
 
 
@@ -2165,6 +2309,13 @@ def main() -> int:
     if session_only_line is not None:
         _emit(logfile_path, session_only_line)
 
+    if args.proxy_port is not None:
+        _emit(
+            logfile_path,
+            f"[{_utc_iso()}] WARNING trace={trace} event=deprecated_flag flag=--proxy-port "
+            "ignored=true reason=standing_spend_proxy_4480",
+        )
+
     checkpoint_path = runs_dir / CHECKPOINT_NAME
     checkpoint = _load_checkpoint(checkpoint_path)
     manifest_path = runs_dir / MANIFEST_NAME
@@ -2254,15 +2405,70 @@ def main() -> int:
     if rung_params is None:
         raise RuntimeError("--rung-params is required for a real run")
 
+    proxy_token, proxy_token_source = resolve_orcarouter_api_key()
+    spend_proxy_base_url = resolve_spend_proxy_base_url()
+    spend_db_dsn = resolve_spend_db_dsn()
+    args.proxy_token = proxy_token
+    args.spend_db_dsn = spend_db_dsn
+    _emit(
+        logfile_path,
+        f"[{_utc_iso()}] PROGRESS trace={trace} route=spend-proxy "
+        f"resolved_base_url={spend_proxy_base_url} worker_base_url={DEFAULT_WORKER_SPEND_PROXY_BASE_URL} "
+        f"token_source={proxy_token_source} token_fp={spend_key_fingerprint(proxy_token)} session_tagging=enabled",
+    )
+    _emit(
+        logfile_path,
+        f"[{_utc_iso()}] PROGRESS trace={trace} spend_db_dsn_source=resolved dsn_set=true",
+    )
+
     any_orcarouter_selected = any(
         _cell_routes_orcarouter(cell=cell, params=rung_params[str(cell["model"])])
         for cell in selected
     )
+    if any_orcarouter_selected:
+        pricing_models = _pricing_roster_models(selected)
+        pricing_verdict = verify_pricing(
+            roster_models=pricing_models,
+            expected_version=PRICING_EXPECTED_VERSION,
+            base_url=spend_proxy_base_url,
+            bearer_token=proxy_token,
+        )
+        missing_models = set(pricing_verdict.missing_models)
+        model_presence = {model: (model not in missing_models) for model in pricing_models}
+        _emit(
+            logfile_path,
+            f"[{_utc_iso()}] PRICING-VERIFY trace={trace} ok={pricing_verdict.ok} "
+            f"version={pricing_verdict.version} expected={PRICING_EXPECTED_VERSION} "
+            f"reason={pricing_verdict.reason} model_presence={json.dumps(model_presence, sort_keys=True, separators=(',', ':'))}",
+        )
+        if not pricing_verdict.ok:
+            abort = LadderAbort(
+                "pricing_verify_failed",
+                {
+                    "reason": pricing_verdict.reason,
+                    "version": pricing_verdict.version,
+                    "expected_version": PRICING_EXPECTED_VERSION,
+                    "roster_models": pricing_models,
+                    "missing_models": list(pricing_verdict.missing_models),
+                    "model_presence": model_presence,
+                },
+            )
+            _write_escalation(
+                runs_dir,
+                logfile_path,
+                trace=trace,
+                cell=None,
+                rep=None,
+                abort=abort,
+                completed_cells=_completed_ok(checkpoint),
+            )
+            return 3
+
     billing_baseline_cents: float | None = None
     if any_orcarouter_selected:
         try:
             orcarouter_api_key = load_upstream_key("orcarouter", DEFAULT_OPENCODE_AUTH_PATH)
-            orcarouter_key_fp = key_fingerprint(orcarouter_api_key)
+            orcarouter_key_fp = upstream_key_fingerprint(orcarouter_api_key)
             billing_baseline_cents = fetch_orcarouter_billing_usage_cents(api_key=orcarouter_api_key)
             _emit(
                 logfile_path,
@@ -2485,7 +2691,7 @@ def main() -> int:
         billing_final_cents: float | None = None
         try:
             orcarouter_api_key = load_upstream_key("orcarouter", DEFAULT_OPENCODE_AUTH_PATH)
-            orcarouter_key_fp = key_fingerprint(orcarouter_api_key)
+            orcarouter_key_fp = upstream_key_fingerprint(orcarouter_api_key)
             billing_final_cents = fetch_orcarouter_billing_usage_cents(api_key=orcarouter_api_key)
             _emit(
                 logfile_path,

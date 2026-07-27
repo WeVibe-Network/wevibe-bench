@@ -31,7 +31,7 @@ def _make_runner(
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
-        model="openrouter/anthropic/claude-opus-4.8",
+        model="orcarouter/kimi/kimi-k3",
         cost_limit_usd=cost_limit_usd,
         max_attempts=max_attempts,
         max_output_tokens=max_output_tokens,

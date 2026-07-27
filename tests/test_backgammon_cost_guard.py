@@ -34,7 +34,7 @@ def _contains_pair(argv: list[str], left: str, right: str) -> bool:
 def _make_runner(
     tmp_path: Path,
     *,
-    model: str = "openrouter/anthropic/claude-opus-4.8",
+    model: str = "orcarouter/kimi/kimi-k3",
     reasoning_effort: str | None = None,
     cost_limit_usd: float | None = None,
     cost_target_usd: float | None = None,
@@ -85,8 +85,13 @@ def test_write_worker_config_injects_reasoning_effort(tmp_path: Path) -> None:
     runner._write_worker_permission_config(worktree=worktree)
     config = json.loads((worktree / "opencode.json").read_text(encoding="utf-8"))
 
-    options = config["provider"]["openrouter"]["models"]["anthropic/claude-opus-4.8"]["options"]
-    assert config["provider"]["openrouter"]["models"]["anthropic/claude-opus-4.8"]["name"] == "anthropic/claude-opus-4.8"
+    model_block = config["provider"]["orcarouter"]["models"]["kimi/kimi-k3"]
+    options = model_block["options"]
+    assert model_block["name"] == "Kimi K3"
+    assert model_block["reasoning"] is True
+    assert model_block["tool_call"] is True
+    assert model_block["limit"] == {"context": 1_048_576, "output": 128_000}
+    assert model_block["interleaved"] == {"field": "reasoning_content"}
     assert options["reasoning"]["effort"] == "high"
     assert "max_tokens" not in options
     assert "permission" in config
@@ -164,50 +169,60 @@ def test_write_worker_config_declares_model_when_reasoning_unset(tmp_path: Path)
     runner._write_worker_permission_config(worktree=worktree)
     config = json.loads((worktree / "opencode.json").read_text(encoding="utf-8"))
 
-    model_block = config["provider"]["openrouter"]["models"]["anthropic/claude-opus-4.8"]
-    assert model_block["name"] == "anthropic/claude-opus-4.8"
+    model_block = config["provider"]["orcarouter"]["models"]["kimi/kimi-k3"]
+    assert model_block["name"] == "Kimi K3"
+    assert model_block["reasoning"] is True
+    assert model_block["tool_call"] is True
+    assert model_block["limit"] == {"context": 1_048_576, "output": 128_000}
+    assert model_block["interleaved"] == {"field": "reasoning_content"}
     assert "options" not in model_block
 
 
-def test_build_worker_opencode_config_plain_roster_declares_openrouter_model() -> None:
+def test_build_worker_opencode_config_plain_roster_declares_orcarouter_model() -> None:
     config = build_worker_opencode_config(
-        model="openrouter/kimi/kimi-k3",
+        model="orcarouter/kimi/kimi-k3",
         reasoning_effort=None,
         proxy_base_url=None,
         gates_dir="/g",
         golden_dir="/go",
     )
 
-    model_block = config["provider"]["openrouter"]["models"]["kimi/kimi-k3"]
-    assert model_block["name"] == "kimi/kimi-k3"
+    model_block = config["provider"]["orcarouter"]["models"]["kimi/kimi-k3"]
+    assert model_block["name"] == "Kimi K3"
+    assert model_block["reasoning"] is True
+    assert model_block["tool_call"] is True
+    assert model_block["limit"] == {"context": 1_048_576, "output": 128_000}
+    assert model_block["interleaved"] == {"field": "reasoning_content"}
+    assert config["provider"]["orcarouter"]["options"]["apiKey"] == "{env:ORCAROUTER_API_KEY}"
     assert "options" not in model_block
 
 
 def test_build_worker_opencode_config_proxy_base_url_and_models_coexist() -> None:
     config = build_worker_opencode_config(
-        model="openrouter/kimi/kimi-k3",
+        model="orcarouter/kimi/kimi-k3",
         reasoning_effort=None,
-        proxy_base_url="http://127.0.0.1:8999/api/openrouter",
+        proxy_base_url="http://127.0.0.1:8999/api/orcarouter",
         gates_dir="/g",
         golden_dir="/go",
     )
 
-    openrouter = config["provider"]["openrouter"]
-    assert openrouter["options"]["baseURL"] == "http://127.0.0.1:8999/api/openrouter"
-    assert openrouter["models"]["kimi/kimi-k3"]["name"] == "kimi/kimi-k3"
+    orcarouter = config["provider"]["orcarouter"]
+    assert orcarouter["options"]["baseURL"] == "http://127.0.0.1:8999/api/orcarouter"
+    assert orcarouter["options"]["apiKey"] == "{env:ORCAROUTER_API_KEY}"
+    assert orcarouter["models"]["kimi/kimi-k3"]["name"] == "Kimi K3"
 
 
 def test_build_worker_opencode_config_reasoning_effort_keeps_name_and_options() -> None:
     config = build_worker_opencode_config(
-        model="openrouter/kimi/kimi-k3",
+        model="orcarouter/kimi/kimi-k3",
         reasoning_effort="high",
         proxy_base_url=None,
         gates_dir="/g",
         golden_dir="/go",
     )
 
-    model_block = config["provider"]["openrouter"]["models"]["kimi/kimi-k3"]
-    assert model_block["name"] == "kimi/kimi-k3"
+    model_block = config["provider"]["orcarouter"]["models"]["kimi/kimi-k3"]
+    assert model_block["name"] == "Kimi K3"
     assert model_block["options"]["reasoning"]["effort"] == "high"
 
 
@@ -244,7 +259,7 @@ def test_pricing_table_contains_truthful_big_pickle_zero_row() -> None:
     "model_selector",
     [
         "opencode/big-pickle",
-        "openrouter/opencode/big-pickle",
+        "orcarouter/opencode/big-pickle",
     ],
 )
 def test_zero_price_model_fallback_attempt_estimate_is_zero(
@@ -264,7 +279,7 @@ def test_zero_price_model_fallback_attempt_estimate_is_zero(
 @pytest.mark.parametrize(
     "unknown_model",
     [
-        "openrouter/not-in-table/model-x",
+        "orcarouter/not-in-table/model-x",
         "opencode/not-in-table",
     ],
 )

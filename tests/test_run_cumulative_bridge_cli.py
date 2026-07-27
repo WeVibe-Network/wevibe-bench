@@ -391,8 +391,8 @@ def test_run_session_on_requires_bridge_ready_before_run_cell(
 
     on_session = SessionRecord(
         sequence_index=1,
-        model="openrouter/model-a",
-        provider_pin="openrouter",
+        model="orcarouter/model-a",
+        provider_pin="orcarouter",
         memory_mode="on",
         phase_group="on",
         phase="RUN_SESSION",
@@ -403,8 +403,8 @@ def test_run_session_on_requires_bridge_ready_before_run_cell(
 
     off_session = SessionRecord(
         sequence_index=0,
-        model="openrouter/model-a",
-        provider_pin="openrouter",
+        model="orcarouter/model-a",
+        provider_pin="orcarouter",
         memory_mode="off",
         phase_group="off_baseline",
         phase="RUN_SESSION",
@@ -427,7 +427,7 @@ def test_run_session_on_drops_live_manifest_in_bridge_inbox_before_run_cell(
 
     monkeypatch.setenv("WEVIBE_BENCH_CONSUMER_STATE_DIR", str(tmp_path / "plugin-state"))
 
-    run_id = "cumulative-0001-on-openrouter-model-a"
+    run_id = "cumulative-0001-on-orcarouter-model-a"
     session_id = "session-live-drop"
     session_fp = SessionRecord.session_fp_of(session_id)
 
@@ -494,8 +494,8 @@ def test_run_session_on_drops_live_manifest_in_bridge_inbox_before_run_cell(
 
     on_session = SessionRecord(
         sequence_index=1,
-        model="openrouter/model-a",
-        provider_pin="openrouter",
+        model="orcarouter/model-a",
+        provider_pin="orcarouter",
         memory_mode="on",
         phase_group="on",
         phase="RUN_SESSION",
@@ -507,8 +507,8 @@ def test_run_session_on_drops_live_manifest_in_bridge_inbox_before_run_cell(
 
     off_session = SessionRecord(
         sequence_index=0,
-        model="openrouter/model-a",
-        provider_pin="openrouter",
+        model="orcarouter/model-a",
+        provider_pin="orcarouter",
         memory_mode="off",
         phase_group="off_baseline",
         phase="RUN_SESSION",

@@ -178,7 +178,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--proxy-base-url", default=None)
-    parser.add_argument("--proxy-token-file", default=None)
+    parser.add_argument("--proxy-token", default=None)
+    parser.add_argument("--session-id", default=None)
     parser.add_argument("--agent", default="build")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--runs-dir", default=str(_default_runs_dir()))
@@ -192,9 +193,12 @@ def main() -> int:
     memory_modes = _parse_memory_modes(args.memory_modes)
     mock_mode = None if args.mock == "none" else args.mock
     run_ts = _utc_compact()
-    proxy_token: str | None = None
-    if args.proxy_token_file:
-        proxy_token = Path(args.proxy_token_file).expanduser().read_text(encoding="utf-8").strip()
+    proxy_token: str | None = str(args.proxy_token).strip() if args.proxy_token is not None else None
+    if proxy_token == "":
+        proxy_token = None
+    session_id: str | None = str(args.session_id).strip() if args.session_id is not None else None
+    if session_id == "":
+        session_id = None
 
     if args.cost_limit is not None and args.cost_limit <= 0:
         raise ValueError("--cost-limit must be > 0")
@@ -246,6 +250,8 @@ def main() -> int:
         start_line += f" reasoning_effort={args.reasoning_effort}"
     if args.proxy_base_url is not None:
         start_line += f" proxy_base_url={args.proxy_base_url}"
+    if session_id is not None:
+        start_line += " session_header_set=true"
     progress(start_line)
 
     cfg = RunConfig(
@@ -325,6 +331,7 @@ def main() -> int:
             reasoning_effort=cfg.reasoning_effort,
             proxy_base_url=args.proxy_base_url,
             proxy_token=proxy_token,
+            session_id=session_id,
             agent=args.agent,
             logger=logger,
             progress=progress,

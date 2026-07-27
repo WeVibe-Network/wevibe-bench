@@ -122,6 +122,8 @@ def build_session_cmd(
         str(args.mock),
         "--runs-dir",
         str(args.runs_dir),
+        "--session-id",
+        str(args.session_id),
     ]
     if bool(args.resume):
         cmd.append("--resume")
@@ -287,6 +289,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--org-id", default=DEFAULT_ORG_ID)
     parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
     parser.add_argument("--mock", choices=("none", "golden", "scaffold"), default="none")
+    parser.add_argument("--session-id", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--runs-dir", default=str(_default_runs_dir()))
