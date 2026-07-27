@@ -509,19 +509,22 @@ class ConsumerBridge:
         digest = compute_manifest_digest(manifest.to_dict())
         existing = self.state.consumed_manifests.get(self._scope_key)
         if existing is not None and existing.manifest_digest == digest:
-            observation = self._observe_ack_and_outcomes()
-            status = {
-                "decision_emitted": False,
-                "reason": "already_delivered",
-                "manifest_digest": digest,
-                "already_delivered_cids": sorted(already_delivered_cids(self.state, self._scope_key)),
-                "lease_expired": False,
-                "lease_remaining_ms": self._lease_remaining_ms(self._now_ms()),
-                "recalled": len(recalled_cids),
-                **observation,
-            }
-            self._log_progress(status)
-            return status
+            delivered_cids = already_delivered_cids(self.state, self._scope_key)
+            undelivered_cids = set(recalled_cids) - delivered_cids
+            if not undelivered_cids:
+                observation = self._observe_ack_and_outcomes()
+                status = {
+                    "decision_emitted": False,
+                    "reason": "already_delivered",
+                    "manifest_digest": digest,
+                    "already_delivered_cids": sorted(delivered_cids),
+                    "lease_expired": False,
+                    "lease_remaining_ms": self._lease_remaining_ms(self._now_ms()),
+                    "recalled": len(recalled_cids),
+                    **observation,
+                }
+                self._log_progress(status)
+                return status
 
         try:
             outcome = self.coordinator.apply_manifest(

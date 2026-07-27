@@ -22,6 +22,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from types import ModuleType, SimpleNamespace
@@ -29,12 +30,17 @@ from typing import Any, Callable, Mapping, NamedTuple
 
 from wevibe_bench import config
 from wevibe_bench.benv import load_bench_env
-from wevibe_bench.cumulative.bridge_state import atomic_write_state, load_state
+from wevibe_bench.cumulative.bridge_state import (
+    atomic_write_state,
+    compute_manifest_digest,
+    load_state,
+)
 from wevibe_bench.cumulative.consumer_bridge import (
     DEFAULT_HEARTBEAT_CADENCE_MS,
     DEFAULT_LEASE_TTL_MS,
     DEFAULT_POLL_INTERVAL_MS,
     ConsumerBridge,
+    manifest_inbox_name,
     scope_key,
 )
 from wevibe_bench.cumulative.catalog import PrivateCatalog, PrivateReviewCard
@@ -44,12 +50,14 @@ from wevibe_bench.cumulative.consumer_decision import (
     ConsumerCandidateDecision,
     ConsumerDecisionManifest,
     default_primary_manifest,
+    resolve_fate,
     validate_correlation,
     validate_one_per_candidate,
     validate_schema,
 )
 from wevibe_bench.cumulative.consumer_gate import (
     ConsumerGateCoordinator,
+    ConsumerGateOutcome,
     default_plugin_state_dir,
 )
 from wevibe_bench.cumulative.decision import (
@@ -654,6 +662,34 @@ def _durable_consumer_gate_counts(bridge_state_path: Path | None, run_id: str) -
     return len(accepted_cids), len(accepted_cids & drained_cids)
 
 
+def _atomic_write_json_private(path: Path, payload: Mapping[str, Any]) -> None:
+    if not isinstance(path, Path):
+        raise ValueError("path must be a pathlib.Path")
+    if not isinstance(payload, Mapping):
+        raise ValueError("payload must be a mapping")
+
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.tmp-",
+        dir=path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 class RealSessionRunner:
     """Real per-session runtime seam composed from BackgammonRunner + M2Proof."""
 
@@ -903,15 +939,29 @@ class RealSessionRunner:
             recalled_cids=recalled_cids,
         )
 
-        # LIVE timing note: in the eventual live benchmark daemon, apply_manifest+
-        # heartbeat must run *during* the worker session so the plugin transform
-        # drains decisions before injection. That runtime timing bridge is deferred
-        # (out of this zero-provider scope). This hook currently performs durable
-        # correlation + benchmark recording for the session checkpoint.
-        outcome = coordinator.apply_manifest(
-            manifest,
+        # LIVE write path is run_session (drops manifest into bridge inbox before
+        # run_cell). This post-hoc hook is now reconcile/measurement only: it
+        # reads recalled candidates, computes expected fates for served-store
+        # checks, and records counts (prefer durable bridge-state truth).
+        decisions: list[tuple[str, str]] = []
+        for cid in recalled_cids:
+            resolved = resolve_fate(manifest, session_id=raw_session_id, candidate_cid=cid)
+            decisions.append((cid, resolved.fate))
+
+        accept_count = sum(1 for _, fate in decisions if fate == "accept")
+        deny_count = sum(1 for _, fate in decisions if fate == "deny")
+        block_count = sum(1 for _, fate in decisions if fate == "block")
+        report_count = sum(1 for _, fate in decisions if fate == "report")
+        outcome = ConsumerGateOutcome(
             run_id=run_id,
             session_id=raw_session_id,
+            coordinator_trace=manifest.coordinator_trace,
+            accept_count=accept_count,
+            deny_count=deny_count,
+            block_count=block_count,
+            report_count=report_count,
+            decisions=decisions,
+            decisions_path="",
         )
 
         accepted_cids, denied_cids, blocked_cids, reported_cids = self._partition_decisions_by_fate(
@@ -984,6 +1034,61 @@ class RealSessionRunner:
         )
         if on_session and self._bridge_state_path is not None:
             assert_bridge_ready(self._bridge_state_path)
+
+            try:
+                bridge_state = load_state(self._bridge_state_path)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "consumer bridge state unreadable for live manifest drop "
+                    f"({self._bridge_state_path}): {exc}"
+                ) from exc
+            if bridge_state is None:
+                raise ValueError(
+                    "consumer bridge state missing after readiness check; "
+                    f"cannot drop live manifest ({self._bridge_state_path})"
+                )
+
+            bridge_run_id = str(bridge_state.run_id).strip()
+            bridge_session_id = str(bridge_state.session_id).strip()
+            bridge_session_fp = str(bridge_state.session_fp).strip()
+            if not bridge_run_id or not bridge_session_id or not bridge_session_fp:
+                raise ValueError(
+                    "consumer bridge state missing required run/session correlation fields "
+                    "(run_id, session_id, session_fp) for live manifest drop"
+                )
+
+            if bridge_run_id != state.run_label:
+                raise ValueError(
+                    "consumer bridge run_id mismatch for live manifest drop: "
+                    f"bridge={bridge_run_id!r} benchmark={state.run_label!r}"
+                )
+
+            manifest = self._manifest_for_consumer_gate(
+                run_id=bridge_run_id,
+                session_id=bridge_session_id,
+                recalled_cids=[],
+            )
+            manifest_payload = manifest.to_dict()
+            manifest_digest = compute_manifest_digest(manifest_payload)
+
+            inbox_dir = self._bridge_state_path.parent / "inbox"
+            if not inbox_dir.is_dir():
+                raise ValueError(
+                    "consumer bridge inbox directory missing; live manifest drop requires the "
+                    "default bridge layout and does not support --manifest-inbox overrides in this path: "
+                    f"{inbox_dir}"
+                )
+
+            inbox_name = manifest_inbox_name(state.run_label, bridge_session_fp)
+            inbox_path = inbox_dir / inbox_name
+            _atomic_write_json_private(inbox_path, manifest_payload)
+            _LOG.info(
+                "consumer_gate.manifest_dropped run_id=%s session_fp=%s digest=%s path=%s",
+                state.run_label,
+                bridge_session_fp,
+                manifest_digest,
+                inbox_path,
+            )
 
         runner = self._runner_cls(
             task_dir=self._task_dir,

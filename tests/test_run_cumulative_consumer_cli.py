@@ -259,13 +259,8 @@ def test_real_session_runner_consumer_gate_outcome_on_and_off(
     assert on_record.served_store_missing_accepted == ()
     assert on_record.served_store_nonaccept_leaked == ()
 
-    decisions_payload = json.loads((state_dir / "wevibe-plugin-decisions.json").read_text(encoding="utf-8"))
-    assert {entry["memoryID"]: entry["action"] for entry in decisions_payload} == {
-        "cid-accept": "accept",
-        "cid-deny": "deny",
-        "cid-block": "block",
-        "cid-report": "report",
-    }
+    # Post-hoc runner hook no longer writes plugin decisions; live bridge owns writes.
+    assert not (state_dir / "wevibe-plugin-decisions.json").exists()
 
     off_session = SessionRecord(
         sequence_index=0,

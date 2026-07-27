@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from wevibe_bench.cumulative.bridge_state import WorkerLease, load_state
+from wevibe_bench.cumulative.bridge_state import (
+    DeliveredDecision,
+    WorkerLease,
+    load_state,
+    record_delivery,
+)
 from wevibe_bench.cumulative.consumer_bridge import (
     DEFAULT_LEASE_TTL_MS,
     ConsumerBridge,
@@ -152,6 +157,155 @@ def test_manifest_arrival_delivered_once_then_idempotent(tmp_path: Path) -> None
     decisions = _read_json(state_dir / DECISIONS_FILENAME)
     assert isinstance(decisions, list)
     assert len(decisions) == 2
+
+
+def test_manifest_reapplied_when_recalled_queue_grows(tmp_path: Path) -> None:
+    clock = FakeClock()
+    run_id = "run-manifest-growth"
+    session_id = "session-manifest-growth"
+    bridge, state_dir, inbox, _, session_fp = _build_bridge(
+        tmp_path,
+        run_id=run_id,
+        session_id=session_id,
+        queue_payload=[_queue_entry("cid-a"), _queue_entry("cid-b")],
+        clock=clock,
+    )
+
+    manifest = _manifest(
+        run_id=run_id,
+        default_fate="accept",
+        coordinator_trace="trace-growth",
+        decisions=(),
+    )
+    _write_manifest(inbox, run_id=run_id, session_fp=session_fp, manifest=manifest)
+
+    first = bridge.poll_once()
+    assert first["decision_emitted"] is True
+    assert first["reason"] == "delivered"
+
+    first_decisions = _read_json(state_dir / DECISIONS_FILENAME)
+    assert isinstance(first_decisions, list)
+    assert {(entry["memoryID"], entry["action"]) for entry in first_decisions} == {
+        ("cid-a", "accept"),
+        ("cid-b", "accept"),
+    }
+
+    _write_json(
+        state_dir / QUEUE_FILENAME,
+        [_queue_entry("cid-a"), _queue_entry("cid-b"), _queue_entry("cid-c")],
+    )
+
+    second = bridge.poll_once()
+    assert second["decision_emitted"] is True
+    assert second["reason"] == "delivered"
+
+    second_decisions = _read_json(state_dir / DECISIONS_FILENAME)
+    assert isinstance(second_decisions, list)
+    assert {(entry["memoryID"], entry["action"]) for entry in second_decisions} == {
+        ("cid-a", "accept"),
+        ("cid-b", "accept"),
+        ("cid-c", "accept"),
+    }
+
+    third = bridge.poll_once()
+    assert third["decision_emitted"] is False
+    assert third["reason"] == "already_delivered"
+
+
+def test_record_delivery_same_digest_merges_new_cids(tmp_path: Path) -> None:
+    clock = FakeClock()
+    run_id = "run-record-merge"
+    session_id = "session-record-merge"
+    bridge, _, _, _, _ = _build_bridge(
+        tmp_path,
+        run_id=run_id,
+        session_id=session_id,
+        queue_payload=[_queue_entry("cid-a")],
+        clock=clock,
+    )
+    scope_key = f"{run_id}::{session_id}"
+    digest = "digest-same"
+
+    record_delivery(
+        bridge.state,
+        scope_key,
+        digest,
+        "trace-1",
+        [
+            DeliveredDecision(
+                candidate_cid="cid-a",
+                fate="accept",
+                delivered_at_ms=1,
+                ack_status="pending",
+                outcome_ref=None,
+            )
+        ],
+        1,
+    )
+
+    record_delivery(
+        bridge.state,
+        scope_key,
+        digest,
+        "trace-2",
+        [
+            DeliveredDecision(
+                candidate_cid="cid-a",
+                fate="accept",
+                delivered_at_ms=2,
+                ack_status="pending",
+                outcome_ref=None,
+            ),
+            DeliveredDecision(
+                candidate_cid="cid-b",
+                fate="deny",
+                delivered_at_ms=2,
+                ack_status="pending",
+                outcome_ref=None,
+            ),
+        ],
+        2,
+    )
+
+    record = bridge.state.consumed_manifests[scope_key]
+    assert record.applied_at_ms == 2
+    assert {decision.candidate_cid: decision.fate for decision in record.delivered} == {
+        "cid-a": "accept",
+        "cid-b": "deny",
+    }
+    assert record.coordinator_trace == "trace-2"
+
+    record_delivery(
+        bridge.state,
+        scope_key,
+        digest,
+        "trace-3",
+        [
+            DeliveredDecision(
+                candidate_cid="cid-a",
+                fate="accept",
+                delivered_at_ms=3,
+                ack_status="pending",
+                outcome_ref=None,
+            ),
+            DeliveredDecision(
+                candidate_cid="cid-b",
+                fate="deny",
+                delivered_at_ms=3,
+                ack_status="pending",
+                outcome_ref=None,
+            ),
+        ],
+        3,
+    )
+
+    unchanged = bridge.state.consumed_manifests[scope_key]
+    assert unchanged.applied_at_ms == 3
+    assert {decision.candidate_cid: decision.fate for decision in unchanged.delivered} == {
+        "cid-a": "accept",
+        "cid-b": "deny",
+    }
+    assert unchanged.coordinator_trace == "trace-2"
 
 
 def test_no_manifest_emits_no_decision(tmp_path: Path) -> None:

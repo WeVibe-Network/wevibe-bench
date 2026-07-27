@@ -597,10 +597,47 @@ def record_delivery(
         )
         return
 
+    existing_by_cid = {decision.candidate_cid: decision for decision in existing.delivered}
     if existing.manifest_digest == normalized_digest:
+        merged_delivered = list(existing.delivered)
+        merged = False
+        for candidate_cid, next_fate in incoming_fates.items():
+            previous_decision = existing_by_cid.get(candidate_cid)
+            if previous_decision is not None:
+                if previous_decision.fate != next_fate:
+                    raise ConsumerConflictError(
+                        "conflicting replay rejected: "
+                        f"candidate_cid={candidate_cid!r}, "
+                        f"previous={previous_decision.fate!r}, new={next_fate!r}"
+                    )
+                continue
+
+            matched_decision = next(
+                decision
+                for decision in normalized_delivered
+                if decision.candidate_cid == candidate_cid
+            )
+            merged_delivered.append(matched_decision)
+            merged = True
+
+        if merged:
+            state.consumed_manifests[normalized_scope_key] = ConsumedManifestRecord(
+                scope_key=normalized_scope_key,
+                manifest_digest=normalized_digest,
+                coordinator_trace=normalized_trace,
+                applied_at_ms=normalized_applied_at_ms,
+                delivered=tuple(merged_delivered),
+            )
+        else:
+            state.consumed_manifests[normalized_scope_key] = ConsumedManifestRecord(
+                scope_key=existing.scope_key,
+                manifest_digest=existing.manifest_digest,
+                coordinator_trace=existing.coordinator_trace,
+                applied_at_ms=normalized_applied_at_ms,
+                delivered=existing.delivered,
+            )
         return
 
-    existing_by_cid = {decision.candidate_cid: decision for decision in existing.delivered}
     for candidate_cid, next_fate in incoming_fates.items():
         previous_decision = existing_by_cid.get(candidate_cid)
         if previous_decision is None:

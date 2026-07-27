@@ -414,6 +414,111 @@ def test_run_session_on_requires_bridge_ready_before_run_cell(
     assert calls["count"] == 1
 
 
+def test_run_session_on_drops_live_manifest_in_bridge_inbox_before_run_cell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_run_cumulative_module()
+    module._load_sxe_helpers = lambda _repo_root: (
+        lambda **_kwargs: ([], {}, []),
+        lambda _session_dir: {},
+        lambda _session_dir, **_kwargs: "session-from-events",
+    )
+
+    monkeypatch.setenv("WEVIBE_BENCH_CONSUMER_STATE_DIR", str(tmp_path / "plugin-state"))
+
+    run_id = "cumulative-0001-on-openrouter-model-a"
+    session_id = "session-live-drop"
+    session_fp = SessionRecord.session_fp_of(session_id)
+
+    bridge_state_path = tmp_path / "bridge" / "bridge-state.json"
+    bridge_state = resume_or_create_state(
+        bridge_state_path,
+        run_id=run_id,
+        session_id=session_id,
+        session_fp=session_fp,
+        container_name="bridge-live-drop",
+    )
+    now_ms = int(time.time() * 1000)
+    bridge_state.lease = WorkerLease(
+        pid=1234,
+        started_at_ms=now_ms,
+        ttl_ms=20_000,
+        expires_at_ms=now_ms + 20_000,
+    )
+    bridge_state.resume_marker = "active"
+    atomic_write_state(bridge_state_path, bridge_state)
+
+    inbox = bridge_state_path.parent / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    expected_name = manifest_inbox_name(run_id, session_fp)
+    expected_path = inbox / expected_name
+
+    calls = {"count": 0}
+
+    class _SentinelRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            return
+
+        def run_cell(self, *_args: Any, **_kwargs: Any) -> Any:
+            calls["count"] += 1
+            assert expected_path.is_file(), "live manifest drop must happen before run_cell"
+            payload = _read_json(expected_path)
+            assert payload["schema_version"] == 1
+            assert payload["policy_id"] == "primary-auto-accept-eligible-v1"
+            assert payload["default_fate"] == "accept"
+            assert payload["decisions"] == []
+            assert payload["run_id"] == run_id
+            assert payload["coordinator_trace"] == f"consumer-gate://{run_id}/{session_id}"
+            return SimpleNamespace(session_id=session_id, verdict="ok")
+
+    runner = module.RealSessionRunner(
+        task="backgammon",
+        org_id="org-test",
+        runs_dir=tmp_path / "runs",
+        repo_root=Path(__file__).resolve().parents[1],
+        proof=SimpleNamespace(),
+        hub_client=SimpleNamespace(),
+        leader=SimpleNamespace(),
+        contributor_rest=SimpleNamespace(last_job_id=None),
+        extract_api_key="extract-key",
+        extract_api_key_source="unit-test",
+        extract_base_url=None,
+        extract_num_ctx=None,
+        extract_timeout_s=10,
+        consumer_decision_manifest=None,
+        served_store_host_path=tmp_path / "served-store.json",
+        bridge_state_path=bridge_state_path,
+    )
+    monkeypatch.setattr(runner, "_runner_cls", _SentinelRunner)
+
+    on_session = SessionRecord(
+        sequence_index=1,
+        model="openrouter/model-a",
+        provider_pin="openrouter",
+        memory_mode="on",
+        phase_group="on",
+        phase="RUN_SESSION",
+    )
+    on_result = runner.run_session(on_session)
+    assert on_result.session_id == session_id
+    assert calls["count"] == 1
+    assert expected_path.is_file()
+
+    off_session = SessionRecord(
+        sequence_index=0,
+        model="openrouter/model-a",
+        provider_pin="openrouter",
+        memory_mode="off",
+        phase_group="off_baseline",
+        phase="RUN_SESSION",
+    )
+    off_result = runner.run_session(off_session)
+    assert off_result.session_id == session_id
+    assert calls["count"] == 2
+    assert not (inbox / manifest_inbox_name("cumulative-0000-off-model-a", session_fp)).exists()
+
+
 def test_bridge_run_foreground_writes_all_four_fates_shape(tmp_path: Path, capsys: Any) -> None:
     module = _load_run_cumulative_module()
 
