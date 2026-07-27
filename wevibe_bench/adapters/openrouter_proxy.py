@@ -258,6 +258,18 @@ def DEFAULT_PROFILES() -> dict[str, ProviderProfile]:
             pin_constraints=None,
             expected_upstream_model="kimi-k2.7-code",
         ),
+        "kimik3": ProviderProfile(
+            name="kimik3",
+            model_id="kimi/kimi-k3",
+            provider_object=None,
+            pricing=None,
+            max_output_tokens=32768,
+            max_reasoning_tokens=8192,
+            upstream="orcarouter",
+            authorized=False,
+            pin_constraints=None,
+            expected_upstream_model="kimi-k3",
+        ),
         "ring": ProviderProfile(
             name="ring",
             model_id="inclusionai/ring-2.6-1t",

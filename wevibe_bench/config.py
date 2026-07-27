@@ -191,7 +191,7 @@ def benchmark_schedule_fingerprint(
 # are HISTORY, not current benchmark truth.
 #
 # Roster:
-#   z-ai/glm-5.2   (tier UNKNOWN)
+#   kimi/kimi-k3   (tier UNKNOWN)
 #   kimi/kimi-k2.7-code  (tier UNKNOWN)
 #   tencent/hy3    (tier UNKNOWN)
 #
@@ -205,7 +205,7 @@ _DEFAULT_SCHEDULE: BenchmarkSchedule = BenchmarkSchedule(
         BenchmarkWave(
             wave_id="baseline",
             models=(
-                "z-ai/glm-5.2",
+                "kimi/kimi-k3",
                 "kimi/kimi-k2.7-code",
                 "tencent/hy3",
             ),
@@ -338,7 +338,9 @@ class LadderRung:
 
 # Canonical Stage-7 scored-ladder roster (Walter-pinned OrcaRouter migration,
 # 2026-07-24) — the single source of truth for the ordered rungs. Knowledge
-# SOURCE = GLM-5.2; MEASURE rungs top→bottom: kimi-k2.7-code (BRACKET) → hy3.
+# SOURCE = kimi-k3; MEASURE rungs top→bottom: kimi-k2.7-code (BRACKET) → hy3.
+# GLM-5.2 deselected 2026-07-27 (SMOKE-2 ON-arm essay-mode collapse); glm
+# proxy profile + pricing retained for history.
 # Slugs are OrcaRouter-catalog-verified bare ids. The `openrouter/` prefix is
 # only the worker→proxy opencode provider selector; host-side proxy profile
 # `upstream="orcarouter"` selects the real upstream.
@@ -348,7 +350,7 @@ class LadderRung:
 # DeepInfra / novita / siliconflow pins are void on this substrate.
 BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
     LadderRung(
-        model="openrouter/z-ai/glm-5.2",
+        model="openrouter/kimi/kimi-k3",
         role="source",
         memory_modes=("off",),
     ),

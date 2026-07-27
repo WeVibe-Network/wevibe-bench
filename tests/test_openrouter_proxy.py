@@ -248,7 +248,7 @@ def test_apply_policy_for_orcarouter_profile_skips_provider_injection() -> None:
 def test_default_profiles_include_roster_candidates_with_constraints() -> None:
     profiles = DEFAULT_PROFILES()
 
-    assert set(profiles) == {"glm", "mimo", "mimo25", "hy3", "kimicode", "ring", "opus", "bigpickle"}
+    assert set(profiles) == {"glm", "mimo", "mimo25", "hy3", "kimicode", "kimik3", "ring", "opus", "bigpickle"}
     assert list(profiles.keys())[-1] == "bigpickle"
     assert profiles["glm"].model_id == "z-ai/glm-5.2"
     assert profiles["glm"].upstream == "orcarouter"
@@ -258,6 +258,9 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
     assert profiles["hy3"].upstream == "orcarouter"
     assert profiles["kimicode"].model_id == "kimi/kimi-k2.7-code"
     assert profiles["kimicode"].upstream == "orcarouter"
+    assert profiles["kimik3"].model_id == "kimi/kimi-k3"
+    assert profiles["kimik3"].upstream == "orcarouter"
+    assert profiles["kimik3"].expected_upstream_model == "kimi-k3"
     assert profiles["ring"].model_id == "inclusionai/ring-2.6-1t"
     assert profiles["opus"].model_id == "anthropic/claude-opus-4.8"
     assert profiles["bigpickle"].model_id == "opencode/big-pickle"
@@ -299,6 +302,7 @@ def test_default_profiles_include_roster_candidates_with_constraints() -> None:
     assert profiles["glm"].pin_constraints is None
     assert profiles["hy3"].pin_constraints is None
     assert profiles["kimicode"].pin_constraints is None
+    assert profiles["kimik3"].pin_constraints is None
     assert profiles["opus"].pin_constraints is None
 
 
@@ -896,7 +900,8 @@ def test_bigpickle_profile_pins_expected_upstream_identity() -> None:
     assert profiles["glm"].expected_upstream_model == "glm-5.2"
     assert profiles["hy3"].expected_upstream_model == "hy3-preview"
     assert profiles["kimicode"].expected_upstream_model == "kimi-k2.7-code"
-    for name in ("glm", "hy3", "kimicode"):
+    assert profiles["kimik3"].expected_upstream_model == "kimi-k3"
+    for name in ("glm", "hy3", "kimicode", "kimik3"):
         assert profiles[name].expected_upstream_key_fp is None
 
 

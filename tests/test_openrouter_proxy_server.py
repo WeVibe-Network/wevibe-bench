@@ -455,7 +455,7 @@ def test_main_rejects_provider_order_for_hardcoded_profiles(
     assert "--provider-order" in err
 
 
-@pytest.mark.parametrize("profile_name", ("glm", "hy3", "kimicode"))
+@pytest.mark.parametrize("profile_name", ("glm", "hy3", "kimicode", "kimik3"))
 def test_main_rejects_provider_pin_flags_for_orcarouter_profiles(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

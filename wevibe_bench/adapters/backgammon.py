@@ -97,6 +97,14 @@ _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
         "cache_read": 0.26,
         "cache_write": 1.4,  # OrcaRouter has no cache-write field; use input rate.
     },
+    "kimi/kimi-k3": {
+        # OrcaRouter pricing_version c58e194db3f6a20e7d41b8c9e2f05a17
+        # fetched 2026-07-27 (model_ratio=1.5, completion_ratio=5, cache_ratio=0.1).
+        "input": 3.0,
+        "output": 15.0,
+        "cache_read": 0.3,
+        "cache_write": 3.0,  # OrcaRouter has no cache-write field; use input rate.
+    },
     "kimi/kimi-k2.7-code": {
         "input": 0.95,
         "output": 4.0,

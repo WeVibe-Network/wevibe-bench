@@ -359,7 +359,7 @@ def _build_manifest(
         "trace": trace,
     }
     manifest["preregistration"] = {
-        "roster": "GLM-5.2 SOURCE OFF (+ self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> hy3 MEASURE OFF/ON; OrcaRouter upstream via host proxy profiles (glm, kimicode, hy3); memories flow down",
+        "roster": "kimi-k3 SOURCE OFF (+ self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> hy3 MEASURE OFF/ON; OrcaRouter upstream via host proxy profiles (kimik3, kimicode, hy3); memories flow down",
         "task": "locked backgammon prompt/CONTRACT/oracle",
         "feedback": "problems-only",
         "disclosures": disclosures,

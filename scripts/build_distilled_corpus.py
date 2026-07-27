@@ -30,7 +30,7 @@ from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 
 
 DEFAULT_TRANSCRIPT_DIR = "~/Desktop/benchmark/SWEContextBench/cases/SWEContextBench Lite Past Experience"
-DEFAULT_MODEL = "z-ai/glm-5.2"
+DEFAULT_MODEL = "kimi/kimi-k3"
 DEFAULT_OUT = "~/Desktop/benchmark/datasets/swecontextbench/distilled_corpus.json"
 DEFAULT_TOPIC = "swecontextbench-distilled"
 DEFAULT_MAX_TRANSCRIPT_CHARS = 120_000

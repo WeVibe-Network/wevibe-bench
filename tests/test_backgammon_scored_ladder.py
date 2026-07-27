@@ -26,10 +26,10 @@ ALL_MODELS = [r.model for r in ROSTER]
 
 def _rung_params_payload() -> dict[str, Any]:
     return {
-        "openrouter/z-ai/glm-5.2": {
-            "profile": "glm",
-            "pricing_input": 1.4,
-            "pricing_output": 4.4,
+        "openrouter/kimi/kimi-k3": {
+            "profile": "kimik3",
+            "pricing_input": 3.0,
+            "pricing_output": 15.0,
             "cap_usd": 12.0,
             "cost_limit": 12.0,
             "cost_target": 10.8,
@@ -291,7 +291,7 @@ def test_exact_roster_a_cell_allocation() -> None:
     assert len(plan) == 5
 
     expected = [
-        (1, "openrouter/z-ai/glm-5.2", "source", "off", "all"),
+        (1, "openrouter/kimi/kimi-k3", "source", "off", "all"),
         (2, "openrouter/kimi/kimi-k2.7-code", "measure", "off", "session"),
         (3, "openrouter/kimi/kimi-k2.7-code", "measure", "on", "session"),
         (4, "openrouter/tencent/hy3", "measure", "off", "session"),
@@ -1133,7 +1133,7 @@ def test_dry_run_prints_plan_without_execution(tmp_path: pathlib.Path, monkeypat
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--dry-run"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "glm-5.2" in out and "kimi-k2.7-code" in out and "hy3" in out
+    assert "kimi-k3" in out and "kimi-k2.7-code" in out and "hy3" in out
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)

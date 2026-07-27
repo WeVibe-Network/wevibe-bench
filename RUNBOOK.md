@@ -153,7 +153,7 @@ This proxy is the only paid-transport path for benchmark cells.
 uv run python scripts/run_openrouter_proxy.py \
   --run-id <id> \
   --model openrouter/<vendor>/<model> \
-  --profile <glm|mimo|opus> \
+  --profile <kimik3|glm|mimo|opus> \
   --cap-usd 12 \
   --target-usd <lower operational target> \
   --port 8789 \
@@ -184,13 +184,10 @@ as `OPENROUTER_API_KEY`. The real OpenRouter key never enters the worker.
 
 ### Policy + budget invariants enforced by proxy
 
-- Exact per-profile `provider` object is hard-injected on every request:
-  - pinned `order`/`only` (SoT = `DEFAULT_PROFILES` in `wevibe_bench/adapters/openrouter_proxy.py`:
-    GLM `z-ai/glm-5.2`→`novita`, MiMo `xiaomi/mimo-v2.5-pro`→`deepinfra`, Opus `anthropic/claude-opus-4.8`→`anthropic`),
-  - `allow_fallbacks: false`,
-  - `require_parameters: true`,
-  - `quantizations` only when configured (GLM `["fp8"]`; MiMo/Opus omit — no fp8-tagged endpoint).
-  - All three pins live-verified 15-07-26 (HTTP 200 via Novita/DeepInfra/Anthropic) — see `docs/BENCHMARK-ROSTER.md`.
+- Exact per-profile provider policy is enforced on every request (SoT = `DEFAULT_PROFILES` in `wevibe_bench/adapters/openrouter_proxy.py`):
+  - active worker `kimik3` (`kimi/kimi-k3`) routes upstream `orcarouter` with no provider pins,
+  - `glm`, `hy3`, and `kimicode` are also orcarouter-direct with no provider pins,
+  - `opus` remains pinned to Anthropic.
 - Client-supplied `provider` is rejected.
 - Request model must match the selected profile model.
 - `max_tokens` is hard-clamped to `--max-output-tokens`.
