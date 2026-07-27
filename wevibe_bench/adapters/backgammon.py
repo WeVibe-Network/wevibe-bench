@@ -877,20 +877,6 @@ class BackgammonRunner(AgentRunner):
                         termination_reason = "attempts_exhausted_by_budget"
                         break
 
-                    feedback_checks = [
-                        str(p.get("check", "")).strip()
-                        for p in problems
-                        if isinstance(p, dict) and str(p.get("check", "")).strip()
-                    ]
-                    feedback = self._build_feedback_prompt(checks=feedback_checks)
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
-                        f"checks={len(feedback_checks)}"
-                    )
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
-                        f"problem_count={len(problems)} session_id={session_id}"
-                    )
                     feedback_inner = [
                         "opencode",
                         "run",
@@ -903,6 +889,100 @@ class BackgammonRunner(AgentRunner):
                     ]
                     if pure:
                         feedback_inner.append("--pure")
+
+                    newly_passing = (
+                        sorted(
+                            set(attempt_reports[-2]["failed_gates"])
+                            - set(attempt_reports[-1]["failed_gates"])
+                        )
+                        if len(attempt_reports) >= 2
+                        else []
+                    )
+                    still_failing = sorted(set(attempt_reports[-1]["failed_gates"]))
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-verdict-composed attempt={attempt} "
+                        f"newly_passing_count={len(newly_passing)} still_failing_count={len(still_failing)}"
+                    )
+
+                    next_attempt_cost_usd = 0.0
+                    if newly_passing:
+                        pass_verdict = self._build_pass_verdict(newly_passing=newly_passing)
+                        if pass_verdict:
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=feedback-pass-injection attempt={attempt} "
+                                f"newly_passing_count={len(newly_passing)} session_id={session_id}"
+                            )
+                            self._emit_cost_target_warning_if_reached(
+                                run_label=run_label,
+                                phase=f"verdict-pass-{attempt}",
+                                cumulative_cost_usd=cell_cost_usd,
+                            )
+                            self._append_user_event(
+                                run_label=run_label,
+                                sidecar_path=user_events_path,
+                                attempt=next_attempt,
+                                text=pass_verdict,
+                            )
+                            self._write_worker_permission_config(worktree=worktree)
+                            pass_run = self._run_opencode(
+                                cmd=active_cell.exec_argv(feedback_inner),
+                                worktree=worktree,
+                                events_path=events_path,
+                                env=run_env,
+                                run_label=run_label,
+                                phase=f"verdict-pass-{attempt}",
+                                fallback_session_id=session_id,
+                                prior_cost_usd=cell_cost_usd,
+                                kill_hook=active_cell.kill_worker_processes,
+                                stdin_text=pass_verdict,
+                            )
+                            next_attempt_cost_usd += pass_run.cost_usd
+                            cell_cost_usd += pass_run.cost_usd
+                            if pass_run.session_id:
+                                session_id = pass_run.session_id
+
+                            input_tokens_total += pass_run.input_tokens
+                            output_tokens_total += pass_run.output_tokens + pass_run.reasoning_tokens
+                            turns_total += pass_run.turns
+                            worker_killed_reason = pass_run.killed_reason
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=feedback-pass-injection-done attempt={attempt} "
+                                f"exit={pass_run.exit_code} killed={pass_run.killed_reason or 'none'} "
+                                f"turns={pass_run.turns} input={pass_run.input_tokens} "
+                                f"output={pass_run.output_tokens} reasoning={pass_run.reasoning_tokens} "
+                                f"cost_usd={pass_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
+                            )
+                            if pass_run.budget_stop_detected:
+                                verdict = "BUDGET_STOP"
+                                attempts_to_green = "BUDGET_STOP"
+                                termination_reason = "budget_stop_mid_attempt"
+                                break
+                            if (
+                                pass_run.exit_code not in (0, None)
+                                and pass_run.killed_reason not in _HARNESS_LIMIT_REASONS
+                            ):
+                                verdict = "FAIL"
+                                attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                                termination_reason = "harness_error"
+                                break
+
+                    feedback_checks = [
+                        str(p.get("check", "")).strip()
+                        for p in problems
+                        if isinstance(p, dict) and str(p.get("check", "")).strip()
+                    ]
+                    feedback = self._build_feedback_prompt(
+                        checks=feedback_checks,
+                        had_pass_verdict=bool(newly_passing),
+                    )
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
+                        f"checks={len(feedback_checks)}"
+                    )
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
+                        f"problem_count={len(problems)} session_id={session_id}"
+                    )
 
                     self._emit_cost_target_warning_if_reached(
                         run_label=run_label,
@@ -931,8 +1011,9 @@ class BackgammonRunner(AgentRunner):
                         kill_hook=active_cell.kill_worker_processes,
                         stdin_text=feedback,
                     )
-                    attempt_costs_usd[next_attempt] = feedback_run.cost_usd
-                    observed_attempt_costs.append(feedback_run.cost_usd)
+                    next_attempt_cost_usd += feedback_run.cost_usd
+                    attempt_costs_usd[next_attempt] = next_attempt_cost_usd
+                    observed_attempt_costs.append(next_attempt_cost_usd)
                     cell_cost_usd += feedback_run.cost_usd
                     if feedback_run.session_id:
                         session_id = feedback_run.session_id
@@ -1272,10 +1353,40 @@ class BackgammonRunner(AgentRunner):
         return f"{memory_blob}\n{base_prompt}"
 
     @staticmethod
-    def _build_feedback_prompt(*, checks: list[str]) -> str:
+    def _build_pass_verdict(*, newly_passing: list[str]) -> str:
+        if not newly_passing:
+            return ""
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in newly_passing:
+            first_line = str(item).split("\n", 1)[0]
+            sanitized = " ".join(first_line.split())
+            if len(sanitized) > 80:
+                sanitized = sanitized[:80]
+            if not sanitized or sanitized in seen:
+                continue
+            seen.add(sanitized)
+            deduped.append(sanitized)
+
+        if not deduped:
+            return ""
+        if len(deduped) == 1:
+            return f"That fixed it — {deduped[0]} works now."
+
+        shown = deduped[:3]
+        joined = ", ".join(shown)
+        remaining = len(deduped) - len(shown)
+        if remaining > 0:
+            joined = f"{joined} and {remaining} more"
+        return f"That fixed it — {joined} all pass now."
+
+    @staticmethod
+    def _build_feedback_prompt(*, checks: list[str], had_pass_verdict: bool = False) -> str:
         header = (
-            "The following gate checks are failing. Fix the implementation so they pass. "
-            "Do not explain, just edit the code."
+            "The rest are still failing — fix the implementation so they pass. Do not explain, just edit the code."
+            if had_pass_verdict
+            else "These are still failing — fix the implementation so they pass. Do not explain, just edit the code."
         )
         deduped: list[str] = []
         seen: set[str] = set()

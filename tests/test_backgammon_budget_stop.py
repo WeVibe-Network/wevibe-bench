@@ -360,6 +360,166 @@ def test_opencode_argv_omits_prompt_positional_and_delivers_prompts_via_stdin(
     assert captured_stdin == [task_prompt, feedback_prompt]
 
 
+def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_fidelity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=3)
+    _patch_fake_docker(monkeypatch)
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
+
+    gate_calls = {"count": 0}
+
+    def _fake_gate(**kwargs: Any) -> dict[str, Any]:
+        gate_calls["count"] += 1
+        if gate_calls["count"] == 1:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "[G02] B"}],
+                "failed_gates": ["[G01] A", "[G02] B", "[G03] C"],
+            }
+        if gate_calls["count"] == 2:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "[G02] B"}],
+                "failed_gates": ["[G02] B"],
+            }
+        return {
+            "verdict": "PASS",
+            "conformed": True,
+            "problems": [],
+            "failed_gates": [],
+        }
+
+    monkeypatch.setattr(runner, "_run_gate_report", _fake_gate)
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        calls.append({"phase": kwargs.get("phase"), "stdin_text": kwargs.get("stdin_text")})
+        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0)
+
+    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+
+    result = runner._run_cell_impl(
+        run_label="feedback-gap-pass-verdict",
+        run_dir=tmp_path / "feedback-gap-pass-verdict",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "PASS"
+    assert len(calls) == 4
+
+    pass_verdict = "That fixed it — [G01] A, [G03] C all pass now."
+    failure_feedback = runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=True)
+    assert failure_feedback.startswith(
+        "The rest are still failing — fix the implementation so they pass. Do not explain, just edit the code."
+    )
+
+    phases = [entry["phase"] for entry in calls]
+    stdin_texts = [entry["stdin_text"] for entry in calls]
+    assert phases == ["initial", "feedback-1", "verdict-pass-2", "feedback-2"]
+    assert stdin_texts == [
+        "INITIAL PROMPT",
+        runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False),
+        pass_verdict,
+        failure_feedback,
+    ]
+
+    verdict_idx = phases.index("verdict-pass-2")
+    feedback_idx = phases.index("feedback-2")
+    assert verdict_idx < feedback_idx
+    assert calls[verdict_idx]["stdin_text"] == pass_verdict
+    assert calls[feedback_idx]["stdin_text"] == failure_feedback
+
+    sidecar_path = Path(f"{result.worktree}.user-events.jsonl")
+    sidecar_rows = [json.loads(line) for line in sidecar_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [row["attempt"] for row in sidecar_rows] == [1, 2, 3, 3]
+    assert [row["text"] for row in sidecar_rows[:3]] == [
+        "INITIAL PROMPT",
+        runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False),
+        pass_verdict,
+    ]
+    assert sidecar_rows[2]["text"] == pass_verdict
+    assert sidecar_rows[3]["text"].startswith(
+        "The rest are still failing — fix the implementation so they pass. Do not explain, just edit the code."
+    )
+
+    assert [row["text"] for row in sidecar_rows] == stdin_texts
+
+
+def test_zero_progress_gap_has_no_pass_verdict_and_uses_false_header(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=3)
+    _patch_fake_docker(monkeypatch)
+    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
+
+    gate_calls = {"count": 0}
+
+    def _fake_gate(**kwargs: Any) -> dict[str, Any]:
+        gate_calls["count"] += 1
+        if gate_calls["count"] in {1, 2}:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "[G02] B"}],
+                "failed_gates": ["[G02] B"],
+            }
+        return {
+            "verdict": "PASS",
+            "conformed": True,
+            "problems": [],
+            "failed_gates": [],
+        }
+
+    monkeypatch.setattr(runner, "_run_gate_report", _fake_gate)
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        calls.append({"phase": kwargs.get("phase"), "stdin_text": kwargs.get("stdin_text")})
+        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0)
+
+    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+
+    result = runner._run_cell_impl(
+        run_label="feedback-gap-zero-progress",
+        run_dir=tmp_path / "feedback-gap-zero-progress",
+        task_id="backgammon",
+        injected_memory=[],
+    )
+
+    assert result.verdict == "PASS"
+
+    phases = [entry["phase"] for entry in calls]
+    assert phases == ["initial", "feedback-1", "feedback-2"]
+    assert all(phase != "verdict-pass-1" for phase in phases)
+    assert all(phase != "verdict-pass-2" for phase in phases)
+
+    expected_false_header_prompt = runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False)
+    assert calls[1]["stdin_text"] == expected_false_header_prompt
+    assert calls[2]["stdin_text"] == expected_false_header_prompt
+
+    sidecar_path = Path(f"{result.worktree}.user-events.jsonl")
+    sidecar_rows = [json.loads(line) for line in sidecar_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [row["text"] for row in sidecar_rows] == [
+        "INITIAL PROMPT",
+        expected_false_header_prompt,
+        expected_false_header_prompt,
+    ]
+    assert all(
+        row["text"].startswith(
+            "These are still failing — fix the implementation so they pass. Do not explain, just edit the code."
+        )
+        for row in sidecar_rows[1:]
+    )
+
+
 @pytest.mark.parametrize(
     ("conformed", "expected_attempts_to_green"),
     [
