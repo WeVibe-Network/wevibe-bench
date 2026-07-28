@@ -135,6 +135,7 @@ class DockerCellConfig:
     home_dir: str = "/home/worker"
     output_token_max: int | None = None
     worker_logs_dir: Path | None = None
+    session_db_host_path: Path | None = None
 
 
 class DockerCell:
@@ -158,6 +159,8 @@ class DockerCell:
 
         worktree = Path(self.config.worktree).expanduser().resolve()
         worktree.mkdir(parents=True, exist_ok=True)
+        if self.config.session_db_host_path is not None:
+            self.config.session_db_host_path.mkdir(parents=True, exist_ok=True)
 
         proxy_token = (self.config.proxy_token or "").strip()
         if not proxy_token:
@@ -624,6 +627,22 @@ def _build_run_argv(
         "-v",
         mount,
     ]
+
+    if config.session_db_host_path is not None:
+        host_session_db = Path(config.session_db_host_path).expanduser().resolve()
+        # Docker pre-creates the bind destination's parent chain (.local, .local/share)
+        # as root:0755 on the HOME tmpfs, which makes opencode's own
+        # `mkdir ~/.local/state` (XDG_STATE_HOME) fail EACCES under --user. A 1777
+        # tmpfs on .local keeps the state sibling writable; the bind mount itself
+        # still lands on .local/share/opencode (mounts are depth-sorted).
+        run_cmd.extend(
+            [
+                "--tmpfs",
+                f"{config.home_dir}/.local:mode=1777",
+                "-v",
+                f"{host_session_db}:{config.home_dir}/.local/share/opencode:rw",
+            ]
+        )
 
     if config.output_token_max is not None:
         # Enforced output-cap lever for opencode workers: this EXPERIMENTAL env flag

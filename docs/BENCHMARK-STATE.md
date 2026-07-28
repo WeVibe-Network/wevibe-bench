@@ -333,6 +333,24 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   persistence directive is design INTENT until this path is proven through real transport, then enforcement is
   permanent.
 
+## 8A. Live-session observability invariant (BINDING, Walter-locked 2026-07-27)
+
+> "No benchmark run executes blind. Every run must expose its live worker session state (the opencode session DB or an equivalent event stream) at a known, timestamped path under the run directory, and a poller must observe it in realtime alongside the spend and stream signals. A run that cannot be observed live does not start."
+
+- Mechanism contract: `<run_dir>/session-db/opencode.db` is exposed via host `<run_dir>/session-db`
+  bind-mounted to worker `/home/worker/.local/share/opencode`; launch progress emits
+  `step=session-db` with the path.
+- Poller verdict contract is one-path via `scripts/session_db_poll.py`
+  (`--run-dir <dir> [--proxy-budget <path>] [--proxy-log <path>] [--window-s 900]`) and emits
+  one evidence line + `VERDICT=ALIVE|DEAD|UNKNOWN`.
+- Kill authorization is DEAD-only: kill only after the evidence line is logged; UNKNOWN
+  (session-db absent/warmup) escalates and never authorizes a kill.
+- Canonical violation prevented: SMOKE-3-retry false-kill 2026-07-27, where wall-clock silence
+  masked a live in-flight turn (`outstanding` proved alive; settled 4m37s post-kill) —
+  `wevibe-meta/workspace/reports/27-07-26-1204-smoke3-retry-kimik3-zerotool-reasoning-turn.md`.
+- Cross-reference: §2D already records the $0.39 poller false-hang kill; D6 forensics in §8 proved
+  post-mortem value of worker `opencode.db`, now promoted to a LIVE observable precondition.
+
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
 - **2026-07-25 (post OrcaRouter migration + step-6 smoke + R0/R1 + zero-progress gate):** qdrant
   `org_wevibe-org-0_memories` = **17** (8 pre-fix UNSTAMPED, Option A leave-and-disclose + 9 born-stamped

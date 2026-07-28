@@ -1489,11 +1489,14 @@ class BackgammonRunner(AgentRunner):
         )
 
     def _build_cell_config(self, *, worktree: Path, container_name: str) -> DockerCellConfig:
+        session_db_dir = worktree.parent / "session-db"
+        session_db_dir.mkdir(parents=True, exist_ok=True)
         cell_config = DockerCellConfig(
             worktree=worktree,
             memory_mode=self.memory_mode,
             container_name=container_name,
         )
+        cell_config.session_db_host_path = session_db_dir
         cell_config.plugin_state_host_path = str(worktree / ".wevibe" / "state")
         cell_config.output_token_max = self.max_output_tokens
         cell_config.proxy_base_url = self.proxy_base_url
@@ -1737,6 +1740,11 @@ class BackgammonRunner(AgentRunner):
 
         started = time.monotonic()
         events_path.parent.mkdir(parents=True, exist_ok=True)
+        container_name = cmd[5] if len(cmd) > 5 and cmd[:2] == ["docker", "exec"] else "none"
+        self._progress(
+            f"PROGRESS run_label={run_label} step=session-db path={worktree.parent / 'session-db'} "
+            f"container={container_name} — live worker session observable here"
+        )
 
         with events_path.open("a", encoding="utf-8") as events_fh:
             proc = subprocess.Popen(

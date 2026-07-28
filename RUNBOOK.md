@@ -29,6 +29,20 @@ It checks the hub (`:4440/health`) and the mcp (`/v1/health`) with the CORRECT p
 loud `PreflightError` that names the exact remediation. If you see a PreflightError, READ IT — it
 tells you which tier is down and the exact command to fix it. Do not "work around" it.
 
+### Live-session observability (pre-run precondition, BINDING)
+
+> "No benchmark run executes blind. Every run must expose its live worker session state (the opencode session DB or an equivalent event stream) at a known, timestamped path under the run directory, and a poller must observe it in realtime alongside the spend and stream signals. A run that cannot be observed live does not start."
+
+Operator checklist before declaring a run started:
+- Confirm the run dir will carry `session-db/opencode.db` (mount is automatic; launch progress
+  line `step=session-db` proves the live path).
+- Spawn the R-31 poller using `docs/POLLER-BRIEF.md`, pointed at the run dir plus proxy
+  budget/log paths, BEFORE start declaration.
+- Poller verdict comes ONLY from `scripts/session_db_poll.py`; never improvise hang detection.
+- Kill is authorized ONLY on `VERDICT=DEAD`, and only after the evidence line is logged first.
+- Budget thresholds remain watch-only and report-only (never auto-kill), per
+  `D-BENCH-BUDGET-WATCH`.
+
 ## Bringing services up
 
 ### Hub (`:4440`)
