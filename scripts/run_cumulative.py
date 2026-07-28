@@ -83,6 +83,7 @@ from wevibe_bench.spend_key import (
     key_fingerprint,
     resolve_orcarouter_api_key,
     resolve_spend_proxy_base_url,
+    resolve_worker_spend_proxy_base_url,
 )
 
 IS_PRIMARY_SCORED_PATH = True
@@ -1270,7 +1271,7 @@ def _build_real_runner_and_leader_client(
     run_cfg = config.RunConfig()
     bridge_paths = _bridge_paths(run_cfg, layout.manifest_path)
     proxy_base_url_arg = str(getattr(args, "proxy_base_url", "") or "").strip()
-    proxy_base_url = proxy_base_url_arg or resolve_spend_proxy_base_url()
+    proxy_base_url = proxy_base_url_arg or resolve_worker_spend_proxy_base_url()
     proxy_token: str | None = None
     proxy_token_source = ""
     proxy_token_file = str(getattr(args, "proxy_token_file", "") or "").strip()
@@ -2308,7 +2309,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "(for conformance deny/block/report runs)."
         ),
     )
-    run_parser.add_argument("--proxy-base-url", default=None)
+    run_parser.add_argument(
+        "--proxy-base-url",
+        default=None,
+        help=(
+            "Spend-proxy base URL baked into worker container opencode.json; default resolves via "
+            "WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL env/.env else "
+            "http://host.docker.internal:4480/v1 (container-facing; host loopback "
+            "127.0.0.1 is dead inside cells)."
+        ),
+    )
     run_parser.add_argument("--proxy-token-file", default=None)
 
     resume_parser = subparsers.add_parser(

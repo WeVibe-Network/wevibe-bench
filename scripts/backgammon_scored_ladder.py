@@ -61,6 +61,7 @@ from wevibe_bench.config import (
 from wevibe_bench.lifecycle import qdrant_probe
 from wevibe_bench.proxy_meter import SpendMeter, verify_pricing
 from wevibe_bench.spend_key import (
+    DEFAULT_WORKER_SPEND_PROXY_BASE_URL,
     key_fingerprint as spend_key_fingerprint,
     resolve_orcarouter_api_key,
     resolve_spend_db_dsn,
@@ -76,7 +77,6 @@ CHECKPOINT_NAME = "scored-ladder-checkpoint.json"
 MANIFEST_NAME = "scored-ladder-manifest.json"
 ESCALATE_NAME = "SCORED-LADDER-ESCALATE.json"
 SUMMARY_NAME = "scored-ladder-summary.json"
-DEFAULT_WORKER_SPEND_PROXY_BASE_URL = "http://host.docker.internal:4480/v1"
 PROXY_START_TIMEOUT_S = 45
 PROXY_STOP_TIMEOUT_S = 15
 RUN_TIMEOUT_S = 5400

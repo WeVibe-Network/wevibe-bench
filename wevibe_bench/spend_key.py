@@ -23,6 +23,10 @@ _DEFAULT_DOTENV_PATH = _REPO_ROOT / ".env"
 _DEFAULT_OPENCODE_CONFIG_PATH = Path("~/.config/opencode/opencode.json")
 _DEFAULT_SPEND_DB_DSN = "postgresql://spend_proxy:spend_proxy_dev@127.0.0.1:5440/spend_proxy"
 _DEFAULT_SPEND_PROXY_BASE_URL = "http://127.0.0.1:4480/v1"
+# Container-facing default for worker cells; Docker launch adds
+# --add-host host.docker.internal:host-gateway (docker_worker.py), which is
+# reachable on macOS Docker Desktop and Linux.
+DEFAULT_WORKER_SPEND_PROXY_BASE_URL = "http://host.docker.internal:4480/v1"
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -213,3 +217,37 @@ def resolve_spend_proxy_base_url(
 
     logger.info("spend_key.resolve_spend_proxy_base_url outcome=resolved source=default")
     return _DEFAULT_SPEND_PROXY_BASE_URL
+
+
+def resolve_worker_spend_proxy_base_url(
+    *, env: Mapping[str, str] | None = None, dotenv_path: str | os.PathLike[str] | None = None
+) -> str:
+    """Resolve the CONTAINER-facing spend-proxy base URL (worker opencode.json baseURL).
+
+    Workers run inside Docker cells where 127.0.0.1 is the container's own
+    loopback. Cells launch with --add-host host.docker.internal:host-gateway,
+    so host.docker.internal reaches the host-published proxy. Resolution:
+    env WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL, then .env, then default.
+    Deliberately NO fallback to the host-facing WEVIBE_BENCH_SPEND_PROXY_BASE_URL
+    (that would re-import the dead-loopback bug; R-13 one path per context).
+    """
+    env_map = os.environ if env is None else env
+    from_env = str(env_map.get("WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL", "")).strip()
+    if from_env:
+        logger.info(
+            "spend_key.resolve_worker_spend_proxy_base_url outcome=resolved source=env:WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL"
+        )
+        return from_env
+
+    env_file = _resolve_dotenv_path(env=env_map, dotenv_path=dotenv_path)
+    dot = _read_dotenv(env_file, env=env_map)
+    from_dotenv = dot.get("WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL", "").strip()
+    if from_dotenv:
+        logger.info(
+            "spend_key.resolve_worker_spend_proxy_base_url outcome=resolved source=dotenv path=%s",
+            str(env_file),
+        )
+        return from_dotenv
+
+    logger.info("spend_key.resolve_worker_spend_proxy_base_url outcome=resolved source=default")
+    return DEFAULT_WORKER_SPEND_PROXY_BASE_URL

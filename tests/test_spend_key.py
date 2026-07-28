@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from wevibe_bench.spend_key import (
+    DEFAULT_WORKER_SPEND_PROXY_BASE_URL,
     SpendKeyError,
     _read_dotenv,
     key_fingerprint,
     resolve_orcarouter_api_key,
     resolve_spend_db_dsn,
     resolve_spend_proxy_base_url,
+    resolve_worker_spend_proxy_base_url,
 )
 
 
@@ -116,6 +118,34 @@ def test_resolve_spend_proxy_base_url_defaults_and_overrides(tmp_path: Path) -> 
             dotenv_path=dotenv,
         )
         == "http://from-env/v1"
+    )
+
+
+def test_resolve_worker_spend_proxy_base_url_defaults_and_overrides(tmp_path: Path) -> None:
+    default = resolve_worker_spend_proxy_base_url(env={}, dotenv_path=tmp_path / ".env")
+    assert default == "http://host.docker.internal:4480/v1"
+    assert default == DEFAULT_WORKER_SPEND_PROXY_BASE_URL
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL=http://from-dotenv/v1\n",
+        encoding="utf-8",
+    )
+    assert resolve_worker_spend_proxy_base_url(env={}, dotenv_path=dotenv) == "http://from-dotenv/v1"
+    assert (
+        resolve_worker_spend_proxy_base_url(
+            env={"WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL": "http://from-env/v1"},
+            dotenv_path=dotenv,
+        )
+        == "http://from-env/v1"
+    )
+
+    assert (
+        resolve_worker_spend_proxy_base_url(
+            env={"WEVIBE_BENCH_SPEND_PROXY_BASE_URL": "http://127.0.0.1:4480/v1"},
+            dotenv_path=tmp_path / "missing.env",
+        )
+        == DEFAULT_WORKER_SPEND_PROXY_BASE_URL
     )
 
 
