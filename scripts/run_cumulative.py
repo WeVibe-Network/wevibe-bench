@@ -286,6 +286,23 @@ def _resolve_extract_timeout_s() -> int:
     return value
 
 
+def _resolve_positive_int_env(
+    name: str,
+    *,
+    optional: bool,
+) -> tuple[int | None, str]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return (None if optional else config.RunConfig().max_attempts), "default"
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value, "env"
+
+
 def _resolve_extract_api_key() -> tuple[str, str]:
     return resolve_orcarouter_api_key()
 
@@ -737,7 +754,18 @@ class RealSessionRunner:
             self._session_id_from_events,
         ) = _load_sxe_helpers(self._repo_root)
 
-        self._max_attempts = config.RunConfig().max_attempts
+        self._max_attempts, self._max_attempts_source = _resolve_positive_int_env(
+            "WEVIBE_BENCH_MAX_ATTEMPTS",
+            optional=False,
+        )
+        self._max_steps_per_attempt, self._max_steps_per_attempt_source = _resolve_positive_int_env(
+            "WEVIBE_BENCH_MAX_STEPS_PER_ATTEMPT",
+            optional=True,
+        )
+        self._run_timeout_s, self._run_timeout_s_source = _resolve_positive_int_env(
+            "WEVIBE_BENCH_RUN_TIMEOUT_S",
+            optional=True,
+        )
         self._session_states: dict[int, _SessionRunState] = {}
 
         from wevibe_bench.adapters.backgammon import BackgammonRunner
@@ -1067,16 +1095,41 @@ class RealSessionRunner:
                 inbox_path,
             )
 
+        max_steps_per_attempt = getattr(self, "_max_steps_per_attempt", None)
+        run_timeout_s = getattr(self, "_run_timeout_s", None)
+        max_attempts_source = getattr(self, "_max_attempts_source", "default")
+        max_steps_source = getattr(self, "_max_steps_per_attempt_source", "default")
+        run_timeout_source = getattr(self, "_run_timeout_s_source", "default")
+
+        runner_kwargs: dict[str, Any] = {
+            "task_dir": self._task_dir,
+            "work_root": state.run_dir,
+            "model": session.model,
+            "memory_mode": session.memory_mode,
+            "max_attempts": self._max_attempts,
+            "proxy_base_url": self._proxy_base_url,
+            "proxy_token": self._proxy_token,
+            "logger": _LOG,
+            "progress": self._progress,
+        }
+        if max_steps_per_attempt is not None:
+            runner_kwargs["max_steps_per_attempt"] = max_steps_per_attempt
+        if run_timeout_s is not None:
+            runner_kwargs["run_timeout_s"] = run_timeout_s
+
+        _LOG.info(
+            "run_cumulative.pacing max_attempts=%s max_steps_per_attempt=%s run_timeout_s=%s "
+            "max_attempts_source=%s max_steps_per_attempt_source=%s run_timeout_s_source=%s",
+            self._max_attempts,
+            max_steps_per_attempt,
+            run_timeout_s,
+            max_attempts_source,
+            max_steps_source,
+            run_timeout_source,
+        )
+
         runner = self._runner_cls(
-            task_dir=self._task_dir,
-            work_root=state.run_dir,
-            model=session.model,
-            memory_mode=session.memory_mode,
-            max_attempts=self._max_attempts,
-            proxy_base_url=self._proxy_base_url,
-            proxy_token=self._proxy_token,
-            logger=_LOG,
-            progress=self._progress,
+            **runner_kwargs,
         )
         result = runner.run_cell(state.run_label, state.run_dir, task_id="backgammon")
         state.last_session_id = result.session_id or state.last_session_id
