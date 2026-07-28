@@ -9,6 +9,7 @@ from wevibe_bench.adapters.backgammon import (
     BACKGAMMON_PROMPT,
     BackgammonCellResult,
     BackgammonRunner,
+    WORKER_WORKING_STYLE_PREAMBLE,
 )
 from wevibe_bench.backends.base import RecalledMemory
 
@@ -56,7 +57,8 @@ def test_cumulative_on_prompt_is_base_prompt_without_memory_blob(
 
     prompt = runner._build_task_prompt(injected_memory=_sample_injected_memory())
 
-    assert prompt.startswith(BACKGAMMON_PROMPT)
+    assert prompt.startswith(WORKER_WORKING_STYLE_PREAMBLE)
+    assert BACKGAMMON_PROMPT in prompt
     assert "DIRECT_INJECTION_MEMORY_MARKER" not in prompt
     assert "# WEVIBE MEMORY CONTEXT" not in prompt
     assert format_called["value"] is False

@@ -13,10 +13,13 @@ from wevibe_bench.adapters.backgammon import (
     DEFAULT_MAX_STEPS_PER_ATTEMPT,
     DEFAULT_RUN_TIMEOUT_S,
     BackgammonRunner,
+    BACKGAMMON_PROMPT,
+    WORKER_WORKING_STYLE_PREAMBLE,
     _OpencodeRunStats,
     build_worker_opencode_config,
     reconcile_derived_vs_billing,
 )
+from wevibe_bench.backends.base import RecalledMemory
 from wevibe_bench.adapters.docker_worker import DockerCellConfig, _build_run_argv
 from wevibe_bench.config import RunConfig
 
@@ -175,7 +178,7 @@ def test_write_worker_config_declares_model_when_reasoning_unset(tmp_path: Path)
     assert model_block["tool_call"] is True
     assert model_block["limit"] == {"context": 1_048_576, "output": 128_000}
     assert model_block["interleaved"] == {"field": "reasoning_content"}
-    assert "options" not in model_block
+    assert model_block["options"]["reasoning"]["effort"] == "low"
 
 
 def test_build_worker_opencode_config_plain_roster_declares_orcarouter_model() -> None:
@@ -229,6 +232,100 @@ def test_build_worker_opencode_config_reasoning_effort_keeps_name_and_options() 
 def test_init_rejects_bad_reasoning_effort(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         _make_runner(tmp_path, reasoning_effort="ultra")
+
+
+def test_build_task_prompt_prepends_working_style_preamble_in_all_paths(tmp_path: Path) -> None:
+    runner_off = _make_runner(tmp_path)
+    prompt_off = runner_off._build_task_prompt(injected_memory=[])
+    assert prompt_off.startswith(WORKER_WORKING_STYLE_PREAMBLE)
+    assert BACKGAMMON_PROMPT in prompt_off
+    assert "Contract:" in prompt_off
+    assert "=== CAPTURE & COMPLIANCE PROTOCOL ===" in prompt_off
+
+    runner_on = BackgammonRunner(
+        task_dir=TASK_DIR,
+        work_root=tmp_path / "work-root-on",
+        model="orcarouter/kimi/kimi-k3",
+        memory_mode="on",
+    )
+    prompt_on = runner_on._build_task_prompt(injected_memory=[])
+    assert prompt_on.startswith(WORKER_WORKING_STYLE_PREAMBLE)
+    assert BACKGAMMON_PROMPT in prompt_on
+    assert "Contract:" in prompt_on
+    assert "=== CAPTURE & COMPLIANCE PROTOCOL ===" in prompt_on
+
+    prompt_with_memory = runner_off._build_task_prompt(
+        injected_memory=[
+            RecalledMemory(
+                cid="cid-123",
+                score=0.95,
+                vector_score=0.90,
+                combined_score=0.93,
+                keyword_score=0.89,
+                matched_keywords=["doubling", "bear-off"],
+                text="Remember legal move ordering and bar re-entry priority.",
+            )
+        ]
+    )
+    assert prompt_with_memory.startswith(WORKER_WORKING_STYLE_PREAMBLE)
+    assert prompt_with_memory.find("# WEVIBE MEMORY CONTEXT") > 0
+
+
+def test_init_defaults_reasoning_effort_low_for_reasoning_models(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("WEVIBE_BENCH_REASONING_EFFORT", raising=False)
+    runner = _make_runner(tmp_path, model="orcarouter/kimi/kimi-k3", reasoning_effort=None)
+
+    assert runner.reasoning_effort == "low"
+
+    worktree = tmp_path / "reasoning-default-worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    runner._write_worker_permission_config(worktree=worktree)
+    config = json.loads((worktree / "opencode.json").read_text(encoding="utf-8"))
+    effort = config["provider"]["orcarouter"]["models"]["kimi/kimi-k3"]["options"]["reasoning"]["effort"]
+    assert effort == "low"
+
+
+def test_init_explicit_reasoning_effort_beats_default(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path, model="orcarouter/kimi/kimi-k3", reasoning_effort="high")
+    assert runner.reasoning_effort == "high"
+
+
+def test_init_env_reasoning_effort_beats_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEVIBE_BENCH_REASONING_EFFORT", "medium")
+    runner = _make_runner(tmp_path, model="orcarouter/kimi/kimi-k3", reasoning_effort=None)
+    assert runner.reasoning_effort == "medium"
+
+
+def test_init_non_reasoning_model_keeps_reasoning_effort_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("WEVIBE_BENCH_REASONING_EFFORT", raising=False)
+    runner = _make_runner(tmp_path, model="orcarouter/kimi/kimi-k2.7-code", reasoning_effort=None)
+
+    assert runner.reasoning_effort is None
+
+    worktree = tmp_path / "non-reasoning-worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    runner._write_worker_permission_config(worktree=worktree)
+    config = json.loads((worktree / "opencode.json").read_text(encoding="utf-8"))
+    model_block = config["provider"]["orcarouter"]["models"]["kimi/kimi-k2.7-code"]
+    assert "options" not in model_block
+
+
+def test_init_rejects_invalid_env_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEVIBE_BENCH_REASONING_EFFORT", "ultra")
+    with pytest.raises(ValueError, match="reasoning_effort must be one of"):
+        _make_runner(tmp_path, model="orcarouter/kimi/kimi-k3", reasoning_effort=None)
 
 
 @pytest.mark.parametrize("bad_limit", [0, -1])

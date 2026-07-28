@@ -314,13 +314,7 @@ def test_progress_from_cell_result_maps_injected_block_fields_when_present() -> 
         injected_block_est_tokens=600,
     )
 
-    progress = progress_from_cell_result(
-        result,
-        cell={
-            "injected_block_chars": 2400,
-            "injected_block_est_tokens": 600,
-        },
-    )
+    progress = progress_from_cell_result(result)
 
     assert progress.injected_block_chars == 2400
     assert progress.injected_block_est_tokens == 600
@@ -350,13 +344,7 @@ def test_progress_from_cell_result_preserves_none_for_injected_block_fields() ->
         injected_block_est_tokens=None,
     )
 
-    progress = progress_from_cell_result(
-        result,
-        cell={
-            "injected_block_chars": None,
-            "injected_block_est_tokens": None,
-        },
-    )
+    progress = progress_from_cell_result(result)
 
     assert progress.injected_block_chars is None
     assert progress.injected_block_est_tokens is None

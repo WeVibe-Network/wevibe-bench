@@ -49,6 +49,16 @@ from wevibe_bench.runner import AgentRunner, TaskOutcome
 _LOG = logging.getLogger(__name__)
 
 
+WORKER_WORKING_STYLE_PREAMBLE = (
+    "WORKING STYLE (READ FIRST, HIGHEST PRIORITY): You are an autonomous coding agent that ACTS with tools. "
+    "Do NOT deliberate, plan out the whole system, or think through architecture before acting. "
+    "Do NOT produce long internal reasoning. Start using tools IMMEDIATELY: within your FIRST action, create or edit a source file. "
+    "Build incrementally, one small concrete file-edit at a time, verifying as you go. "
+    "Every turn MUST contain at least one tool call that makes progress (write/edit/bash) — never spend a turn only thinking. "
+    "Keep any reasoning to a few words. Your output is working code produced via tool calls, not deliberation."
+)
+
+
 BACKGAMMON_PROMPT = (
     "Build me a fully functioning backgammon game that runs on localhost. "
     "When the server is started I should be able to navigate to the URL, start "
@@ -133,9 +143,11 @@ _MODEL_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
 _RESERVATION_SAFETY_FACTOR = 1.10
 _HARNESS_LIMIT_REASONS = {"run_timeout", "max_steps_per_attempt", "token_cap"}
 _PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
+_REASONING_EFFORT_ENV = "WEVIBE_BENCH_REASONING_EFFORT"
 MAX_ZERO_TOOL_RESUMES = 2
 ZERO_TOOL_RESUME_NUDGE = "Continue. Edit files with tools — do not explain."
 _FILE_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch", "multi_edit"})
+DEFAULT_REASONING_EFFORT = "low"  # bounded default; relay attempts cap at 600s; override via WEVIBE_BENCH_REASONING_EFFORT
 
 # Canonical budget-bounded attempt ceiling.
 # Fixture evidence (runs/backgammon/*.scorecard.json):
@@ -508,6 +520,13 @@ def build_worker_opencode_config(
     return config
 
 
+def _model_id_from_slug(model: str) -> str:
+    model_slug = str(model)
+    if model_slug.startswith("orcarouter/"):
+        return model_slug[len("orcarouter/") :]
+    return model_slug
+
+
 class BackgammonRunner(AgentRunner):
     def __init__(
         self,
@@ -553,7 +572,20 @@ class BackgammonRunner(AgentRunner):
         self.max_output_tokens = None if max_output_tokens is None else int(max_output_tokens)
         self.max_steps_per_attempt = None if max_steps_per_attempt is None else int(max_steps_per_attempt)
         self.output_price_per_1m = None if output_price_per_1m is None else float(output_price_per_1m)
-        self.reasoning_effort = None if reasoning_effort is None else str(reasoning_effort)
+        resolved_reasoning_effort: str | None
+        if reasoning_effort is not None:
+            resolved_reasoning_effort = str(reasoning_effort)
+        else:
+            env_reasoning_effort = os.getenv(_REASONING_EFFORT_ENV)
+            if env_reasoning_effort is not None and env_reasoning_effort.strip():
+                resolved_reasoning_effort = env_reasoning_effort.strip()
+            else:
+                model_registry = WORKER_MODEL_REGISTRY.get(_model_id_from_slug(self.model))
+                if model_registry is not None and bool(model_registry.get("reasoning")):
+                    resolved_reasoning_effort = DEFAULT_REASONING_EFFORT
+                else:
+                    resolved_reasoning_effort = None
+        self.reasoning_effort = resolved_reasoning_effort
         self.proxy_base_url = None if proxy_base_url is None else str(proxy_base_url)
         self.proxy_token = None if proxy_token is None else str(proxy_token)
         self.session_id = None if session_id is None else str(session_id)
@@ -1591,13 +1623,15 @@ class BackgammonRunner(AgentRunner):
             f"{s_prompt_text}"
         )
 
-        if self.memory_mode == "on":
-            return base_prompt
+        final_prompt = base_prompt
+        if self.memory_mode != "on":
+            memory_blob = _format_memory(injected_memory)
+            if memory_blob:
+                final_prompt = f"{memory_blob}\n{base_prompt}"
 
-        memory_blob = _format_memory(injected_memory)
-        if not memory_blob:
-            return base_prompt
-        return f"{memory_blob}\n{base_prompt}"
+        # Kimi-k3 reasoning-monster mitigation (prompt behavior): keep this preamble index-0.
+        # See report ledger 27-07-26-2203.
+        return f"{WORKER_WORKING_STYLE_PREAMBLE}\n\n{final_prompt}"
 
     @staticmethod
     def _build_pass_verdict(*, newly_passing: list[str]) -> str:
