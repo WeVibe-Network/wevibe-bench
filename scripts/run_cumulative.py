@@ -2506,6 +2506,18 @@ def main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
+    # R-37 no-silent-ops: configure root logging so harness PROGRESS lines are
+    # actually emitted on the run/resume paths. Without this, no basicConfig
+    # exists outside the bridge subcommand, so every _LOG.info (including the
+    # adapter's worker-nonzero stderr_tail diagnostics) was silently dropped.
+    # Logs go to stderr; machine-readable results stay on stdout (_print_json)
+    # — output contract unchanged. Idempotent: the bridge subcommand's own
+    # basicConfig (same level/format) harmlessly no-ops after this one.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
     handlers: dict[str, Callable[[argparse.Namespace], int]] = {
         "run": _handle_run,
         "resume": _handle_resume,
