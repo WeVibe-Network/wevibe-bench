@@ -110,6 +110,13 @@ def _required_env_lever(env: Mapping[str, str], key: str) -> str:
     return value
 
 
+def _env_lever_with_default(env: Mapping[str, str], key: str, default: str) -> dict[str, Any]:
+    value = str(env.get(key, "")).strip()
+    if value:
+        return _lever(value, "hub-env")
+    return _lever(default, "documented-default")
+
+
 def _collect_available() -> dict[str, Any]:
     env_output = _run_command(["docker", "exec", "wevibe-hub", "env"])
     hub_env = _parse_env_output(env_output)
@@ -136,6 +143,12 @@ def _collect_available() -> dict[str, Any]:
             _required_env_lever(hub_env, "RETRIEVAL_NEW_MEM_BOOST_WINDOW"), "hub-env"
         ),
         "L11_contestedThreshold": _lever("0.20", "compiled-const"),
+        "L12_RETRIEVAL_OPEN_LOOP_FRACTION": _env_lever_with_default(
+            hub_env, "RETRIEVAL_OPEN_LOOP_FRACTION", "0.0"
+        ),
+        "L13_RETRIEVAL_COUNTERFACTUAL_LOGGING": _env_lever_with_default(
+            hub_env, "RETRIEVAL_COUNTERFACTUAL_LOGGING", "false"
+        ),
     }
 
     return {
