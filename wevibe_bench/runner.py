@@ -210,6 +210,13 @@ def _cell_from_outcome(
     keyword_matched_count: int | None = None,
     keyword_served_count: int | None = None,
     vector_only_serve_count: int | None = None,
+    http_429_count: int = 0,
+    http_402_count: int = 0,
+    retry_count: int = 0,
+    upstream_error_count: int = 0,
+    max_request_ms: int | None = None,
+    median_request_ms: int | None = None,
+    wall_near_timeout: bool = False,
 ) -> Cell:
     _ = wave_index
     pattern_position = f"{wave_id}:{position_in_wave}" if wave_id else None
@@ -239,6 +246,13 @@ def _cell_from_outcome(
         keyword_matched_count=keyword_matched_count,
         keyword_served_count=keyword_served_count,
         vector_only_serve_count=vector_only_serve_count,
+        http_429_count=http_429_count,
+        http_402_count=http_402_count,
+        retry_count=retry_count,
+        upstream_error_count=upstream_error_count,
+        max_request_ms=max_request_ms,
+        median_request_ms=median_request_ms,
+        wall_near_timeout=wall_near_timeout,
     )
 
 

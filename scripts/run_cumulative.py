@@ -86,9 +86,11 @@ from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_rest import McpRest
 from wevibe_bench.preflight import verify_org_checklist, verify_worker_model_acceptance
+from wevibe_bench.proxy_meter import SpendMeter
 from wevibe_bench.spend_key import (
     key_fingerprint,
     resolve_orcarouter_api_key,
+    resolve_spend_db_dsn,
     resolve_spend_proxy_base_url,
     resolve_worker_spend_proxy_base_url,
 )
@@ -774,6 +776,7 @@ class RealSessionRunner:
             "WEVIBE_BENCH_RUN_TIMEOUT_S",
             optional=True,
         )
+        self._spend_meter = SpendMeter(resolve_spend_db_dsn())
         self._session_states: dict[int, _SessionRunState] = {}
 
         from wevibe_bench.adapters.backgammon import BackgammonRunner
@@ -813,6 +816,7 @@ class RealSessionRunner:
         clone._max_steps_per_attempt_source = self._max_steps_per_attempt_source
         clone._run_timeout_s = self._run_timeout_s
         clone._run_timeout_s_source = self._run_timeout_s_source
+        clone._spend_meter = self._spend_meter
         clone._session_states = {}
         clone._runner_cls = self._runner_cls
         return clone
@@ -836,6 +840,54 @@ class RealSessionRunner:
 
     def _progress(self, message: str) -> None:
         _LOG.info("run_cumulative.progress %s", message)
+
+    @staticmethod
+    def _wall_near_timeout(wall_seconds: Any, run_timeout_s: int | None) -> bool:
+        if run_timeout_s is None:
+            return False
+        try:
+            return float(wall_seconds) >= 0.98 * float(run_timeout_s)
+        except (TypeError, ValueError):
+            return False
+
+    def _populate_contention_covariates(self, result: Any) -> None:
+        from wevibe_bench.contention import ContentionCovariates
+
+        retry_count = int(getattr(result, "zero_tool_resumes", 0) or 0)
+        wall_seconds_raw = getattr(result, "wall_seconds", None)
+        wall_seconds = float(wall_seconds_raw) if wall_seconds_raw is not None else None
+        wall_near_timeout = self._wall_near_timeout(
+            wall_seconds,
+            getattr(self, "_run_timeout_s", None),
+        )
+        spend_meter = getattr(self, "_spend_meter", None)
+        if spend_meter is None:
+            spend_meter = SpendMeter(resolve_spend_db_dsn())
+            self._spend_meter = spend_meter
+
+        try:
+            contention = spend_meter.contention_covariates(
+                getattr(result, "session_id", None),
+                retry_count=retry_count,
+                wall_seconds=wall_seconds,
+                wall_near_timeout=wall_near_timeout,
+            )
+        except Exception as exc:  # observability failure must not discard an expensive cell
+            _LOG.exception(
+                "run_cumulative.contention_covariates_failed session_fp=%s error_type=%s",
+                SessionRecord.session_fp_of(result.session_id)
+                if isinstance(getattr(result, "session_id", None), str)
+                and result.session_id.strip()
+                else "none",
+                type(exc).__name__,
+            )
+            contention = ContentionCovariates.empty(
+                retry_count=retry_count,
+                wall_seconds=wall_seconds,
+                wall_near_timeout=wall_near_timeout,
+            )
+
+        result.contention = contention
 
     def _state_for_session(self, session: SessionRecord) -> _SessionRunState:
         state = self._session_states.get(session.sequence_index)
@@ -1178,6 +1230,7 @@ class RealSessionRunner:
         )
         result = runner.run_cell(state.run_label, state.run_dir, task_id="backgammon")
         state.last_session_id = result.session_id or state.last_session_id
+        self._populate_contention_covariates(result)
 
         _LOG.info(
             "run_cumulative.run_session sequence_index=%d memory_mode=%s verdict=%s session_fp=%s",

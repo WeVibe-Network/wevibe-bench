@@ -35,6 +35,7 @@ from wevibe_bench.adapters.cheat_detector import (
     scan_events_for_oracle_access,
 )
 from wevibe_bench.config import WORKER_MODEL_REGISTRY
+from wevibe_bench.contention import ContentionCovariates
 from .docker_worker import (
     DockerCell,
     DockerCellConfig,
@@ -447,6 +448,7 @@ class BackgammonCellResult:
     zero_tool_turns: int = 0
     zero_tool_resumes: int = 0
     zero_tool_turn_honest_fails: int = 0
+    contention: ContentionCovariates | None = None
 
 
 def _default_progress(message: str) -> None:

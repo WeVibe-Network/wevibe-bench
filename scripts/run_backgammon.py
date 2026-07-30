@@ -19,7 +19,9 @@ from wevibe_bench.benv import load_bench_env
 from wevibe_bench.config import RunConfig, BenchmarkSchedule, BenchmarkWave
 from wevibe_bench.lifecycle.logging_util import run_logger
 from wevibe_bench.preflight import preflight
+from wevibe_bench.proxy_meter import SpendMeter
 from wevibe_bench.scorecard import Cell, Scorecard
+from wevibe_bench.spend_key import resolve_spend_db_dsn
 
 
 DEFAULT_MODEL = "openrouter/google/gemini-3.1-pro-preview"
@@ -186,6 +188,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _wall_near_timeout(wall_seconds: float, run_timeout_s: int) -> bool:
+    return float(wall_seconds or 0.0) >= 0.98 * float(run_timeout_s)
+
+
 def main() -> int:
     load_bench_env()
     args = _build_arg_parser().parse_args()
@@ -217,6 +223,7 @@ def main() -> int:
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     logger = run_logger(args.run_label, str(runs_dir))
+    spend_meter = SpendMeter(resolve_spend_db_dsn())
     raw_logfile_raw = str(getattr(logger, "logfile_path", "")).strip()
     logfile_path = runs_dir / f"{run_ts}-{args.run_label}.log"
     if raw_logfile_raw:
@@ -338,6 +345,12 @@ def main() -> int:
         )
 
         result = runner.run_cell(f"{args.run_label}-{mode}", run_dir)
+        result.contention = spend_meter.contention_covariates(
+            result.session_id,
+            retry_count=result.zero_tool_resumes,
+            wall_seconds=result.wall_seconds,
+            wall_near_timeout=_wall_near_timeout(result.wall_seconds, args.run_timeout),
+        )
         executed[mode] = result
 
         progress(
@@ -357,6 +370,13 @@ def main() -> int:
             "wall_seconds": float(result.wall_seconds),
             "conformed": bool(result.conformed),
             "failed_gates": _as_str_list(result.failed_gates),
+            "http_429_count": result.contention.http_429_count,
+            "http_402_count": result.contention.http_402_count,
+            "retry_count": result.contention.retry_count,
+            "upstream_error_count": result.contention.upstream_error_count,
+            "max_request_ms": result.contention.max_request_ms,
+            "median_request_ms": result.contention.median_request_ms,
+            "wall_near_timeout": result.contention.wall_near_timeout,
             "scorecard_path": "",
         }
         _upsert_checkpoint_cell(checkpoint, checkpoint_cell)
@@ -400,6 +420,21 @@ def main() -> int:
                 delivery=delivery,
                 scored=True,
                 not_scored_reason=None,
+                http_429_count=_as_int(cell_data.get("http_429_count")),
+                http_402_count=_as_int(cell_data.get("http_402_count")),
+                retry_count=_as_int(cell_data.get("retry_count")),
+                upstream_error_count=_as_int(cell_data.get("upstream_error_count")),
+                max_request_ms=(
+                    _as_int(cell_data.get("max_request_ms"))
+                    if cell_data.get("max_request_ms") is not None
+                    else None
+                ),
+                median_request_ms=(
+                    _as_int(cell_data.get("median_request_ms"))
+                    if cell_data.get("median_request_ms") is not None
+                    else None
+                ),
+                wall_near_timeout=bool(cell_data.get("wall_near_timeout", False)),
             )
         )
 

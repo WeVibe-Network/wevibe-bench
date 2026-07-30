@@ -51,6 +51,13 @@ class Cell:
     keyword_matched_count: int | None = None
     keyword_served_count: int | None = None
     vector_only_serve_count: int | None = None
+    http_429_count: int = 0
+    http_402_count: int = 0
+    retry_count: int = 0
+    upstream_error_count: int = 0
+    max_request_ms: int | None = None
+    median_request_ms: int | None = None
+    wall_near_timeout: bool = False
     # DEFERRED: replaced by memory_mode field
 
     @property
@@ -90,6 +97,13 @@ class Cell:
             "keyword_matched_count": self.keyword_matched_count,
             "keyword_served_count": self.keyword_served_count,
             "vector_only_serve_count": self.vector_only_serve_count,
+            "http_429_count": self.http_429_count,
+            "http_402_count": self.http_402_count,
+            "retry_count": self.retry_count,
+            "upstream_error_count": self.upstream_error_count,
+            "max_request_ms": self.max_request_ms,
+            "median_request_ms": self.median_request_ms,
+            "wall_near_timeout": self.wall_near_timeout,
         }
 
 

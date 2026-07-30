@@ -254,6 +254,13 @@ class ProgressVector:
     tool_calls: int | None = None
     test_invocations: int | None = None
     agentic_cycles: int | None = None
+    http_429_count: int | None = None
+    http_402_count: int | None = None
+    retry_count: int | None = None
+    upstream_error_count: int | None = None
+    max_request_ms: int | None = None
+    median_request_ms: int | None = None
+    wall_near_timeout: bool | None = None
     missing_telemetry_seams: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -284,6 +291,11 @@ class ProgressVector:
                 "tool_calls": self.tool_calls,
                 "test_invocations": self.test_invocations,
                 "agentic_cycles": self.agentic_cycles,
+                "http_429_count": self.http_429_count,
+                "http_402_count": self.http_402_count,
+                "retry_count": self.retry_count,
+                "upstream_error_count": self.upstream_error_count,
+                "wall_near_timeout": self.wall_near_timeout,
             },
         )
 
@@ -315,6 +327,11 @@ class ProgressVector:
                 "tool_calls": self.tool_calls,
                 "test_invocations": self.test_invocations,
                 "agentic_cycles": self.agentic_cycles,
+                "http_429_count": self.http_429_count,
+                "http_402_count": self.http_402_count,
+                "retry_count": self.retry_count,
+                "upstream_error_count": self.upstream_error_count,
+                "wall_near_timeout": self.wall_near_timeout,
             },
         )
         return {
@@ -356,6 +373,13 @@ class ProgressVector:
             "tool_calls": self.tool_calls,
             "test_invocations": self.test_invocations,
             "agentic_cycles": self.agentic_cycles,
+            "http_429_count": self.http_429_count,
+            "http_402_count": self.http_402_count,
+            "retry_count": self.retry_count,
+            "upstream_error_count": self.upstream_error_count,
+            "max_request_ms": self.max_request_ms,
+            "median_request_ms": self.median_request_ms,
+            "wall_near_timeout": self.wall_near_timeout,
             "missing_telemetry_seams": missing_telemetry_seams,
         }
 
@@ -399,6 +423,13 @@ class ProgressVector:
             tool_calls=_optional_int(d.get("tool_calls")),
             test_invocations=_optional_int(d.get("test_invocations")),
             agentic_cycles=_optional_int(d.get("agentic_cycles")),
+            http_429_count=_optional_int(d.get("http_429_count")),
+            http_402_count=_optional_int(d.get("http_402_count")),
+            retry_count=_optional_int(d.get("retry_count")),
+            upstream_error_count=_optional_int(d.get("upstream_error_count")),
+            max_request_ms=_optional_int(d.get("max_request_ms")),
+            median_request_ms=_optional_int(d.get("median_request_ms")),
+            wall_near_timeout=_optional_bool(d.get("wall_near_timeout")),
             missing_telemetry_seams=_string_list(d.get("missing_telemetry_seams")),
         )
 

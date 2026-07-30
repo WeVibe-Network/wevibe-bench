@@ -81,6 +81,28 @@ def _str_list(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _contention_fields(result: Any) -> dict[str, Any]:
+    contention = _field(result, "contention")
+    if contention is _MISSING or contention is None:
+        return {}
+
+    return {
+        "http_429_count": _int_or_default(_field(contention, "http_429_count"), default=0),
+        "http_402_count": _int_or_default(_field(contention, "http_402_count"), default=0),
+        "retry_count": _int_or_default(_field(contention, "retry_count"), default=0),
+        "upstream_error_count": _int_or_default(
+            _field(contention, "upstream_error_count"),
+            default=0,
+        ),
+        "max_request_ms": _optional_int(_field(contention, "max_request_ms")),
+        "median_request_ms": _optional_int(_field(contention, "median_request_ms")),
+        "wall_near_timeout": _bool_or_default(
+            _field(contention, "wall_near_timeout"),
+            default=False,
+        ),
+    }
+
+
 def _problems_after_from_result(result: Any) -> int | None:
     problems_final = _field(result, "problems_final")
     if problems_final is _MISSING or problems_final is None:
@@ -154,6 +176,8 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         else None
     )
 
+    contention_fields = _contention_fields(result)
+
     return ProgressVector(
         problems_before=problems_before,
         problems_after=problems_after,
@@ -189,6 +213,7 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         termination_reason=_str_or_default(_field(result, "termination_reason"), default=""),
         failed_gates=_str_list(_field(result, "failed_gates")),
         missing_telemetry_seams=list(MISSING_TELEMETRY_SEAMS),
+        **contention_fields,
     )
 
 
