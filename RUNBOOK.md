@@ -249,6 +249,8 @@ This is the only paid transport path for benchmark cells. The old per-cell
   `127.0.0.1:5440`, DSN from key layer) and scopes by `session_id=<run_id>`.
 - TRUE spend (budget truth): `SUM(actual_spend_usd)` (cache-discounted real money).
 - BENCHMARK spend (scoring-only): `SUM(theoretical_spend_usd)` (synthetic full-price).
+  The theoretical full-price comparator routinely overstates TRUE spend by ~2–3×; use
+  `actual_spend_usd` as the budget basis (see `wevibe_bench/proxy_meter.py:81`).
 - Direct SQL is intentional (not `/v1/spend/sessions`) because that endpoint has
   no session filter and omits `upstream_model`.
 - `budget.json` checkpoint flow is retired and kept only as marked reference.
@@ -272,19 +274,35 @@ the SAME OpenCode session (`opencode run --session <id> --dir /work --format jso
 with a short nudge, bounded to at most 2 resumes, then fails honestly.
 The large prompt is never resent.
 
+### Transport stoppage resume rule (known provider characteristic)
+
+GPT/Anthropic transport stoppages are a known model/provider characteristic, not evidence that the
+`:4480` spend-proxy is broken. Bench resume exists for exactly this case: the orchestrator running
+the bench MUST catch a stoppage during the run and resume from the checkpoint so no completed runs
+and no wall-clock time are discarded. Never restart from zero for a resumable stoppage.
+
+The `:4480` spend-proxy is Walter-managed infrastructure. If its behaviour looks wrong, STOP and
+report; never restart, rebuild, reconfigure, or env-override it.
+
 ### Per-model empirical probe matrix (REQUIRED before new rungs)
 
-Before introducing any scored ladder rung beyond `kimi/kimi-k3`, run and record
-an empirical multi-turn tool-call probe through `:4480` for each candidate.
-Current pending roster:
+Before introducing any scored ladder rung outside the operative R3 roster
+(`kimi/kimi-k2.7-code` mid + `tencent/hy3` weak), run and record an empirical
+multi-turn tool-call probe through `:4480` for that candidate.
 
-- `gemini-3.1-pro`
-- `tencent/hy3`
-- `kimi/kimi-k2.7-code`
-- `anthropic/claude-opus-4.8`
-- `minimax/minimax-m3`
+Retired / resolved roster notes:
 
-Status note: GLM-5.2 was not profiled (deselected on 2026-07-27).
+- Operative scored rungs: `kimi/kimi-k2.7-code` (mid) + `tencent/hy3` (weak).
+- Retired: `kimi/kimi-k3` was cut from R3; one k3 rung at N=6 alone is ~$96.5
+  (68% of available headroom), so it is not a live candidate rung.
+- Historical candidates only: `gemini-3.1-pro`, `anthropic/claude-opus-4.8`,
+  and `minimax/minimax-m3` are not the current pending roster.
+
+Status note: GLM-5.2 WAS the R2 model of record and R2 genuinely ran with it.
+It is deselected from the FORWARD roster as of 2026-07-27 because the ledger has
+ZERO bench-consumer cost events for GLM-5.2: the prior "$0.653/cell (n=4)"
+figure is unreproducible for bench accounting because those 2034 calls were the
+consumer `opencode`, not `bench`.
 
 ### Retired: :8789 openrouter proxy + budget.json
 

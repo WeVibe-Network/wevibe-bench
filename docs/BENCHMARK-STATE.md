@@ -20,6 +20,17 @@
 > established; it remains a hypothesis/release criterion. The §1–§11 build state below predates this correction; read it
 > through this banner.
 
+> **⚠ LIVE R3 / SPEND CEILING CORRECTION (2026-07-30, Walter-authorized).** First-time readers: the live forward
+> plan is NOT the stale "R2 NEXT GLM-5.2 → R3 ($40 cap)" line in §9. R2 genuinely used GLM-5.2, but GLM-5.2 is
+> deselected from the FORWARD roster as of 2026-07-27. Operative R3 is memory-trust / retirement using
+> `kimi/kimi-k2.7-code` (mid) + `tencent/hy3` (weak), per `docs/PREREG-R3-2026-07-30.md` and
+> `docs/BENCH-R3-RESTRUCTURE-PLAN.md` (the operative R3 documents), with `BENCHMARK-DIARY.md` §22.4/§22.5 as
+> amended. The live ceiling is the **$150 session budget**, with measured bench-consumer TRUE spend **$7.9359 / 236
+> calls** on the 2026-07-26-start ledger and about **$142 headroom**. Budget truth is `actual_spend_usd`
+> (cache-discounted; `wevibe_bench/proxy_meter.py:81`); theoretical full-price spend is a scoring comparator that
+> overstates TRUE spend by ~2–3×. Historical `$115` global-cap and stage figures (`$20.04/$40`, `$58.5602/$115`,
+> `$26.4483/$32.00`) remain legitimate pre-ledger history, but are not the live ceiling.
+
 ---
 
 ## 1. WHAT THE BENCHMARK IS
@@ -352,15 +363,23 @@ and isolation coverage (`tests/test_docker_isolation.py` + `scripts/docker_isola
   post-mortem value of worker `opencode.db`, now promoted to a LIVE observable precondition.
 
 ## 9. LIVE DATA / STACK STATE (⚠ re-derive next session)
-- **2026-07-25 (post OrcaRouter migration + step-6 smoke + R0/R1 + zero-progress gate):** qdrant
+- **2026-07-25 (post OrcaRouter migration + step-6 smoke + R0/R1 + zero-progress gate; historical snapshot,
+  SUPERSEDED for live ceiling/R3 roster by the 2026-07-30 banner):** qdrant
   `org_wevibe-org-0_memories` = **17** (8 pre-fix UNSTAMPED, Option A leave-and-disclose + 9 born-stamped
   `tencent/hy3` × 3 legs; R2 will wipe = declared experiment reset, diary §22.2). 9/9 containers healthy; clones
   :4550 (PID 4243) + :4451 (PID 4473) running gate code `1a04bae`; canonical mcp tip `c5304d9` (1 push-held);
   wevibe-server 3 push-held (`6740207`, `a171630`, +1 pre-existing); identity unlocked in :4450; Ollama nomic-768
   + LM Studio qwen+nomic live. Suites: bench **572**, canonical mcp 553, clone 557. Worker image
   `wevibe-bench-worker:v1` = `9d389f8e376b` — REVENDOR required before R2 (injection-cadence impl, §3). Spend
-  24–25-07 ≈ **$5.54/$115** (step-6 $4.08 + R0 $0.73 + probes). Staged program (diary §22): R0 ✅ R1 ✅ → **R2
-  NEXT** (fresh wipe + GLM-5.2 OFF→ON self-lift) → tier-pin → noise calibration → R3 ($40 cap) → R4.
+  24–25-07 ≈ **$5.54/$115** (step-6 $4.08 + R0 $0.73 + probes) is a stale window snapshot under the older global cap,
+  not the live ceiling. Current TRUE lifetime bench-consumer spend is **$7.9359 over 236 calls** with about **$142
+  headroom** against the **$150 session budget**; basis is cache-discounted `actual_spend_usd`
+  (`wevibe_bench/proxy_meter.py:81`), while theoretical full-price spend is scoring-only and overstates TRUE spend
+  by ~2–3×. Staged program (diary §22 as amended): R0 ✅ R1 ✅ → R2 GLM-5.2 self-lift completed as its model of
+  record, but GLM-5.2 is deselected from the forward roster → operative R3 memory-trust/retirement uses
+  `kimi/kimi-k2.7-code` + `tencent/hy3` at **$113.2 TRUE-spend** (2 rungs × 4 arms × N=8 paired × 3 fixtures,
+  ~$28 margin); wall-clock is binding (88 cells, ~40–68 min each, ~20–24h at concurrency 3), not dollars. See
+  `docs/PREREG-R3-2026-07-30.md`, `docs/BENCH-R3-RESTRUCTURE-PLAN.md`, and `BENCHMARK-DIARY.md` §22.4/§22.5 as amended.
 - **22-07-22 (post-stage8 + disclosed D6 rerun):** qdrant `org_wevibe-org-0_memories` = **6 memories** (stage-8
   Cell-1 Opus self-extraction, delivery-proven 6/6; pool frozen). hub :4440 instanceId `94184b05`; 9/9 containers
   healthy; Ollama :11434 (nomic-embed-text:v1.5) up. :4550 clone running pid 55392 (`runs/clone4550.pid`,

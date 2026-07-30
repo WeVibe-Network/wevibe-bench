@@ -4,6 +4,8 @@
 the Stage-7 scored roster as executed: Opus SOURCE (OFF, self-extract) → kimi OFF/ON → big-pickle OFF/ON (no mimo rung).
 Keep this file as pre-GO context; active run/recovery state lives in `docs/BENCHMARK-STATE.md`.
 
+**Current roster pointer (2026-07-30):** operative R3 roster is `kimi/kimi-k2.7-code` (mid) + `tencent/hy3` (weak), per `docs/PREREG-R3-2026-07-30.md`; the GLM/MiMo candidate sections below are historical.
+
 **Snapshot caveat (READ FIRST):** every pricing, availability, provider-slug, uptime, parameter-support,
 quantization, output-cap, and TTFT claim below is a **July-15-2026 snapshot** and **MUST be
 authenticated / live-re-verified before any spend.** Do not treat any slug or pin as a verified current

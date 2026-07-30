@@ -3,6 +3,10 @@
 > **Blessed by Walter 21-07-26 (shape); operational triggers = manager-approved interpretation, vetoable.**
 > Docs-only policy. Does NOT modify the scorecard schema or harness code.
 
+> **R3 override pointer (2026-07-30):** for R3, `docs/PREREG-R3-2026-07-30.md` supersedes this policy wherever
+> they conflict. R3 uses **N=8 paired per cell** with a hard floor of **N=6**. This general policy still governs
+> non-R3 ladder cells.
+
 ## Policy
 
 1. **Baseline: N=1 per scored ladder cell.** Every cell (task × condition × model rung) runs once.
