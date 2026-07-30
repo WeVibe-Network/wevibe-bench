@@ -36,6 +36,10 @@ tells you which tier is down and the exact command to fix it. Do not "work aroun
 Operator checklist before declaring a run started:
 - Confirm the run dir will carry `session-db/opencode.db` (mount is automatic; launch progress
   line `step=session-db` proves the live path).
+- Policy anchor check: before any scored run, verify
+  `docker logs wevibe-hub 2>&1 | grep hub.policy_anchor | tail -1` shows
+  `status=anchor_verified` with `policy_version=edge-policy-v1`; `anchor_absent`,
+  `anchor_mismatch`, or `anchor_unreachable` = STOP and do not run the bench.
 - Spawn the R-31 poller using `docs/POLLER-BRIEF.md`, pointed at the run dir plus proxy
   budget/log paths, BEFORE start declaration.
 - Poller verdict comes ONLY from `scripts/session_db_poll.py`; never improvise hang detection.

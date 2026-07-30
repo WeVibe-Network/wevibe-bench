@@ -92,6 +92,7 @@ class CumulativeSequencer:
         org_id: str,
         config_fingerprint: str,
         on_budget: int,
+        run_context: Mapping[str, Any] | None = None,
     ) -> None:
         if not isinstance(runner, SessionRunner):
             raise ValueError("runner must implement SessionRunner")
@@ -120,6 +121,7 @@ class CumulativeSequencer:
             org_id=org_id,
             config_fingerprint=config_fingerprint,
             schedule=planned_schedule,
+            run_context=run_context,
         )
 
         if manifest.org_id != org_id:

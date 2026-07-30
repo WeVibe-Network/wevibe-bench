@@ -66,11 +66,18 @@ from wevibe_bench.cumulative.decision import (
 )
 from wevibe_bench.cumulative.leader_client import LeaderClient
 from wevibe_bench.cumulative.manifest import roster_hash as cumulative_roster_hash
+from wevibe_bench.cumulative.prerun import (
+    CachedSessionRunner,
+    prerun_off_cells,
+    resolve_off_concurrency,
+)
+from wevibe_bench.cumulative.run_context import collect_run_context, compare_run_context
 from wevibe_bench.cumulative.sequencer import CumulativeSequencer
 from wevibe_bench.cumulative.types import (
     ConsumerGateRecord,
     PhaseGroup,
     RosterEntry,
+    SessionPhase,
     SessionRecord,
 )
 from wevibe_bench.lifecycle.hub_client import HubClient
@@ -139,6 +146,7 @@ class CliContext(NamedTuple):
     leader_client: LeaderClient
     review_card: PrivateReviewCard
     layout: PathLayout
+    runner: object
 
 
 BuildSubstrateEvents = Callable[
@@ -771,6 +779,43 @@ class RealSessionRunner:
         from wevibe_bench.adapters.backgammon import BackgammonRunner
 
         self._runner_cls = BackgammonRunner
+
+    def clone_for_prerun_cell(self) -> RealSessionRunner:
+        clone = object.__new__(type(self))
+        clone._task = self._task
+        clone._org_id = self._org_id
+        clone._runs_dir = self._runs_dir
+        clone._repo_root = self._repo_root
+        clone._proof = self._proof
+        clone._hub_client = self._hub_client
+        clone._leader = self._leader
+        clone._contributor_rest = self._contributor_rest
+        clone._extract_api_key = self._extract_api_key
+        clone._extract_api_key_source = self._extract_api_key_source
+        clone._extract_base_url = self._extract_base_url
+        clone._extract_num_ctx = self._extract_num_ctx
+        clone._extract_timeout_s = self._extract_timeout_s
+        clone._proxy_base_url = self._proxy_base_url
+        clone._proxy_token = self._proxy_token
+        clone._consumer_decision_manifest = self._consumer_decision_manifest
+        clone._served_store_host_path = self._served_store_host_path
+        clone._bridge_state_path = self._bridge_state_path
+        clone._task_dir = self._task_dir
+        clone._strategy_e_prompt_path = self._strategy_e_prompt_path
+        clone._strategy_s_prompt_path = self._strategy_s_prompt_path
+        clone._strategy_s_prompt = self._strategy_s_prompt
+        clone._build_substrate_events = self._build_substrate_events
+        clone._session_id_counts_from_events = self._session_id_counts_from_events
+        clone._session_id_from_events = self._session_id_from_events
+        clone._max_attempts = self._max_attempts
+        clone._max_attempts_source = self._max_attempts_source
+        clone._max_steps_per_attempt = self._max_steps_per_attempt
+        clone._max_steps_per_attempt_source = self._max_steps_per_attempt_source
+        clone._run_timeout_s = self._run_timeout_s
+        clone._run_timeout_s_source = self._run_timeout_s_source
+        clone._session_states = {}
+        clone._runner_cls = self._runner_cls
+        return clone
 
     @staticmethod
     def _normalize_keywords(raw: Any) -> list[str]:
@@ -1465,6 +1510,8 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
         runner = _NoopSessionRunner()
         leader_client = _build_offline_leader_client(layout, review_card=review_card)
 
+    current_run_context = collect_run_context()
+
     sequencer = CumulativeSequencer(
         manifest_path=str(layout.manifest_path),
         runner=runner,
@@ -1476,12 +1523,18 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
         org_id=str(args.org),
         config_fingerprint=config_fingerprint,
         on_budget=int(args.on_budget),
+        run_context=current_run_context,
     )
+    recorded_run_context = getattr(getattr(sequencer, "_manifest"), "run_context", None)
+    drift = compare_run_context(recorded_run_context, current_run_context)
+    if drift:
+        _LOG.warning("op=run_context.drift differing_keys=%s", ",".join(drift))
     return CliContext(
         sequencer=sequencer,
         leader_client=leader_client,
         review_card=review_card,
         layout=layout,
+        runner=runner,
     )
 
 
@@ -1498,6 +1551,73 @@ def _current_session_or_raise(sequencer: CumulativeSequencer) -> SessionRecord:
     if session is None:
         raise RuntimeError("sequencer is done; no current session")
     return session
+
+
+def _pending_off_prerun_sessions(sequencer: CumulativeSequencer) -> list[SessionRecord]:
+    manifest = getattr(sequencer, "_manifest")
+    current_index = int(manifest.current_index)
+    runnable_phases = {
+        SessionPhase.PREPARE_FIXTURE.value,
+        SessionPhase.RUN_SESSION.value,
+    }
+    return [
+        session
+        for session in manifest.session_records
+        if int(session.sequence_index) >= current_index
+        and str(session.phase_group) == PhaseGroup.OFF_BASELINE.value
+        and str(session.phase) in runnable_phases
+    ]
+
+
+def _fresh_prerun_runner_factory(runner: object) -> Callable[[SessionRecord], object]:
+    clone = getattr(runner, "clone_for_prerun_cell", None)
+    if callable(clone):
+        return lambda _session: clone()
+    return lambda _session: runner
+
+
+def _maybe_prerun_off_baseline(args: argparse.Namespace, context: CliContext) -> None:
+    pending = _pending_off_prerun_sessions(context.sequencer)
+    concurrency = resolve_off_concurrency(getattr(args, "off_concurrency", None))
+    checkpoint_dir = context.layout.manifest_path.parent / "prerun"
+    _LOG.info(
+        "prerun.stage_start off_pending=%d concurrency=%d",
+        len(pending),
+        concurrency,
+    )
+    if not pending:
+        _LOG.info("prerun.stage_end off_pending=0 concurrency=%d done=0 failed=0 skipped=0", concurrency)
+        return
+
+    results = prerun_off_cells(
+        pending,
+        _fresh_prerun_runner_factory(context.runner),
+        checkpoint_dir,
+        concurrency=concurrency,
+    )
+    done_count = sum(1 for item in results if item.get("status") == "done")
+    failed_count = sum(1 for item in results if item.get("status") == "failed")
+    skipped_count = sum(1 for item in results if item.get("status") not in {"done", "failed"})
+    outcomes = ",".join(
+        f"{int(item.get('sequence_index', -1))}:{str(item.get('status', 'unknown'))}"
+        for item in results
+    )
+    if failed_count:
+        _LOG.warning(
+            "prerun.stage_failures_nonfatal failed=%d detail=%s action=serial_phase_machine_will_rerun_uncached_cells",
+            failed_count,
+            outcomes,
+        )
+    _LOG.info(
+        "prerun.stage_end off_pending=%d concurrency=%d done=%d failed=%d skipped=%d outcomes=%s",
+        len(pending),
+        concurrency,
+        done_count,
+        failed_count,
+        skipped_count,
+        outcomes or "none",
+    )
+    context.sequencer._runner = CachedSessionRunner(context.runner, checkpoint_dir)
 
 
 def _bridge_now_ms() -> int:
@@ -1613,6 +1733,7 @@ def _handle_run(args: argparse.Namespace) -> int:
         raise RuntimeError("run requires --until-review")
 
     context = _build_context(args, require_runtime=True)
+    _maybe_prerun_off_baseline(args, context)
     result = context.sequencer.step_until_review()
     if result["status"] == "awaiting_coordinator_review":
         _print_json(
@@ -2361,6 +2482,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Optional ConsumerDecisionManifest JSON path for ON-session consumer gate "
             "(for conformance deny/block/report runs)."
         ),
+    )
+    run_parser.add_argument(
+        "--off-concurrency",
+        type=int,
+        default=None,
+        help="OFF-baseline prerun concurrency (flag > WEVIBE_BENCH_OFF_CONCURRENCY > 3).",
     )
     run_parser.add_argument(
         "--proxy-base-url",

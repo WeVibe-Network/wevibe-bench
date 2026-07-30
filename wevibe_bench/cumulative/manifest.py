@@ -56,6 +56,7 @@ class CumulativeManifest:
     current_index: int
     updated_at: str
     schema_version: int = CUMULATIVE_SCHEMA_VERSION
+    run_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class CumulativeManifest:
             "session_records": [record.to_dict() for record in self.session_records],
             "current_index": int(self.current_index),
             "updated_at": self.updated_at,
+            "run_context": self.run_context,
         }
 
     @classmethod
@@ -92,6 +94,7 @@ class CumulativeManifest:
             session_records=[SessionRecord.from_dict(item) for item in records_data],
             current_index=int(d["current_index"]),
             updated_at=str(d["updated_at"]),
+            run_context=dict(d["run_context"]) if isinstance(d.get("run_context"), Mapping) else None,
         )
 
 
@@ -175,6 +178,7 @@ def resume_or_create(
     org_id: str,
     config_fingerprint: str,
     schedule: list[ScheduledSession],
+    run_context: Mapping[str, Any] | None = None,
 ) -> CumulativeManifest:
     manifest_path = os.fspath(path)
     if os.path.exists(manifest_path):
@@ -201,6 +205,7 @@ def resume_or_create(
         current_index=0,
         updated_at=now,
         schema_version=CUMULATIVE_SCHEMA_VERSION,
+        run_context=dict(run_context) if run_context is not None else None,
     )
     atomic_write(manifest_path, created)
     return created
