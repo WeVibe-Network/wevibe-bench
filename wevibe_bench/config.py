@@ -398,6 +398,47 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             "output": 262_144,
         },
     },
+    # Local LM Studio roster (Walter 2026-07-31: bench the three local models,
+    # no paid ones). Model ids are the bench aliases served by the LOCAL
+    # llm proxy (config/models.yaml, "Bench aliases"); the worker reaches it
+    # via WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL=http://host.docker.internal:4545/v1
+    # (or --proxy-base-url). Full native context 262144 per Walter's
+    # full-context order; output 32768 so reasoning can never eat the whole
+    # completion budget (R2 clamp-guillotine pattern, applied to local
+    # thinking models that take no separate reasoning budget).
+    "qwen3.6-35b-a3b-bench": {
+        "name": "Qwen3.6 35B A3B (local)",
+        "reasoning": True,
+        "tool_call": True,
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+        # Pinned so opencode's provider-default temperature (0.55 for Qwen)
+        # can never leak into a scored cell invisibly; matches the local
+        # proxy's bench-profile default.
+        "options": {"temperature": 0.6},
+    },
+    "qwen3.6-40b-deckard-bench": {
+        "name": "Qwen3.6 40B Deckard (local)",
+        "reasoning": True,
+        "tool_call": True,
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+        "options": {"temperature": 0.6},
+    },
+    "qwen3.6-27b-fable-bench": {
+        "name": "Qwen3.6 27B Fable (local)",
+        "reasoning": True,
+        "tool_call": True,
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+        "options": {"temperature": 0.6},
+    },
 }
 
 # Schema version for the frozen ladder run manifest. Bump whenever the manifest
