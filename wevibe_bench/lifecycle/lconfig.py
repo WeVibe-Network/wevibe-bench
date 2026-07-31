@@ -99,6 +99,14 @@ class LifecycleConfig:
         )
     )
     session_token_path: str = "~/.wevibe/mcp-session-token"
+    # Optional explicit org pin for the m1 bring-up (WEVIBE_BENCH_ORG_ID).
+    # Without it, create_org's owned-org resolution picks sorted-first when the
+    # leader belongs to several orgs — wrong target on re-runs. With it set and
+    # present in the leader's memberships, that org is reused; absent from
+    # memberships, a fresh org is created and the chain-assigned id returned.
+    org_id: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_ORG_ID") or ""
+    )
     leader_signer_dir: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_SIGNER_DIR")
         or str(_REPO / "scaffold" / "leader-signer")
@@ -128,6 +136,7 @@ class LifecycleConfig:
             "org_focus_areas": self.org_focus_areas,
             "org_keywords": list(self.org_keywords),
             "session_token_path": self.session_token_path,
+            "org_id": self.org_id,
             "leader_signer_dir": self.leader_signer_dir,
             "runs_dir": self.runs_dir,
             "mc_version": self.mc_version,

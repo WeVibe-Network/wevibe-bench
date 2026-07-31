@@ -203,8 +203,10 @@ class LifecycleOrchestrator:
         resolved: str | None
         if not org_ids:
             resolved = None
-        elif cfg_org_id and cfg_org_id in org_ids:
-            resolved = cfg_org_id
+        elif cfg_org_id:
+            # Explicit pin: reuse when owned; create fresh when not (never fall
+            # through to sorted-first, which would target the wrong org).
+            resolved = cfg_org_id if cfg_org_id in org_ids else None
         elif len(org_ids) == 1:
             resolved = next(iter(org_ids))
         else:

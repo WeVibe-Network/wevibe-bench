@@ -241,3 +241,22 @@ def test_cached_session_runner_returns_cached_telemetry_and_delegates_rest(tmp_p
     assert cached.extract(session) == {"sequence_index": 4}
     assert cached.index_ready(session) is True
     assert cached.consumer_gate_outcome(session) is gate
+
+
+def test_cell_result_to_dict_json_serializable_with_nested_contention() -> None:
+    """Regression (2026-07-31): a nested ContentionCovariates dataclass crashed
+    the prerun checkpoint write (TypeError: not JSON serializable), losing the
+    failed cell's checkpoint and triggering a silent re-run."""
+    from wevibe_bench.contention import ContentionCovariates
+
+    session = FakeSession(7)
+    result = _result(session)
+    object.__setattr__(
+        result,
+        "contention",
+        ContentionCovariates.empty(retry_count=2, wall_seconds=12.5, wall_near_timeout=False),
+    )
+
+    rendered = cell_result_to_dict(result)
+    blob = json.dumps(rendered, sort_keys=True)
+    assert json.loads(blob)["contention"]["retry_count"] == 2

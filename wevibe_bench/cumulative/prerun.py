@@ -122,15 +122,33 @@ def _is_local_cell(session: Any) -> bool:
     return is_local_llm(_cell_string(session, "provider_pin")) or is_local_llm(_cell_string(session, "model"))
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursively convert dataclasses/containers into JSON-serializable shapes.
+
+    Checkpoint writes crash on nested dataclasses (observed 2026-07-31:
+    ContentionCovariates nested in cell telemetry broke the prerun checkpoint
+    write, losing the failed cell's checkpoint). Strict by design: unknown
+    types still raise TypeError from json.dumps, never silent stringification.
+    """
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _json_safe(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Mapping):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def cell_result_to_dict(result: Any) -> dict[str, Any]:
     """Serialize BackgammonCellResult-shaped telemetry without editing adapter code."""
 
     if isinstance(result, Mapping):
-        return dict(result)
+        return {key: _json_safe(item) for key, item in dict(result).items()}
     if is_dataclass(result):
-        return {field.name: getattr(result, field.name) for field in fields(result)}
+        return _json_safe(result)
     return {
-        field.name: getattr(result, field.name)
+        field.name: _json_safe(getattr(result, field.name))
         for field in fields(BackgammonCellResult)
         if hasattr(result, field.name)
     }
