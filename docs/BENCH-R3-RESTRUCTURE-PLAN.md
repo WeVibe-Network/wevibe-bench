@@ -1,6 +1,6 @@
 # BENCH R3 restructure plan
 
-Status: DRAFT awaiting Walter — costing rebuilt on TRUE-spend ledger basis 2026-07-30
+Status: DRAFT awaiting Walter — costing rebuilt on TRUE-spend ledger basis 2026-07-30; amended 2026-07-30 to re-derive targets from the shipped held-credit policy per ordering constraint 10 (sim-first for every policy draft)
 
 ## 1. Status + scope
 
@@ -29,15 +29,21 @@ R3 uses four arms. Primary comparison for lift is **ON vs bmOFF**, but lift is s
 
 The sham corpus MUST be hard-negative by embedding similarity, not random or unrelated. Distraction degradation scales with similarity. A random sham understates the cost and flatters ON.
 
+The primary endpoint also includes an analysis-side paired replay contrast over one bench event log. This does NOT add execution cells and MUST NOT be priced as another arm: the four-arm table above remains the execution design, while the paired contrast replays the same event log twice under frozen policies. The manifest lever is `L15_PAIRED_CONTRAST_ARMS = "shipped:edge-policy-v1|counterfactual:edge-policy-v1-outcomes-ignored"`.
+
 `bmOFF` is constructible because D-INJECTION-CADENCE (`wevibe-docs/DECISIONS.md` §23) requires the memory block to be metered separately. Mechanical caveat: `injected_block_est_tokens` is derived post-hoc from plugin log scans (`wevibe_bench/adapters/backgammon.py:195-210,1281-1285`), so bmOFF must take its step budget from the paired ON cell run first, or from a pre-planned injection budget.
 
 ## 4. Headline order
 
-Primary headline: **T1/T6 outcome-driven retirement**. This is novel and less defended-against.
+Primary headline: **paired within-run policy contrast for outcome-driven retirement**. One bench event log is replayed under two policies: `edge-policy-v1` as shipped versus the same policy with E3 outcome events ignored. The endpoint compares survival of the SAME planted bads under the two policy replays. Unit is archetype (**K=14**); instance-level K=42 is secondary.
+
+Pre-registered test: McNemar exact conditional binomial, one-sided in the pre-registered direction. The decision rule is the conjunction of four conditions: direction (`b>c`), minimum effect (`risk_difference >= 0.50`), reverse cap (`c <= 1`), and significance (`p<0.05`). At K=14, `risk_difference=(b-c)/14`, so the 0.50 floor requires **b-c >= 7**. The minimum-effect rule, not significance, is the binding constraint by design.
+
+Secondary/supporting retirement endpoint: absolute badPersist as an estimate with an exact Clopper-Pearson 90% interval. The 0.20 line is a descriptive reference line, not a gate.
 
 Secondary/supporting: lift. Lift is contested because token-budget-matched vanilla actors can match memory-augmented actors. Score same-task lift and held-out-variant lift separately. NEVER headline the same-task number. Walter's 2026-07-24 reframe stands: the corpus taught durable **solutions**, not capability lift; held-out variants are required before any capability-lift headline.
 
-Targets of record live in `RECALL-PIVOT-SPEC.md` §5, not `BENCHMARK-DIARY.md` §22.2: T1 badPersist<=0.20 CI95-excludes; T2 goodSurv>=0.90; T3 gap>=0.75; T4 rho>=0.80; T5 gfa<=0.05; T6 ttaBad split; T7 zero keyword-gated rejections; T8 funnel seams non-null.
+Targets of record live in `RECALL-PIVOT-SPEC.md` §5, not `BENCHMARK-DIARY.md` §22.2. This plan's shipped-policy re-derivation is recorded in §21: T1 is no longer a rho-threshold validity gate under held credit, T2/T3/T5 are open target conflicts for Walter, T4 remains blocked by the rho denominator/ceiling problem, T6 must be reported split, and T7/T8 remain non-null hygiene targets.
 
 ## 5. Rungs + N
 
@@ -49,6 +55,8 @@ Use two rungs:
 Do not include GLM-5.2. `RUNBOOK.md:287` records it DESELECTED 2026-07-27, and the live ledger has zero `bench`-consumer cost events for it. Its 2034 calls are consumer `opencode`, so the prior draft's "$0.653/cell (n=4)" figure is not reproducible.
 
 Recommended **N=8 paired per cell**. Hard floor **N=6**. Paired means the same fixture, seed/scaffold, and time-adjacent block with arms as pair members.
+
+Bench-only exploration rate: **ASSUMED** `0.10`, frozen through manifest lever `L14_BENCH_EXPLORATION_FRACTION` and env `BENCH_EXPLORATION_FRACTION` validated to `[0,1]`. This is BENCH-ONLY and MUST NOT be read as a production default. It is distinct from `L12_RETRIEVAL_OPEN_LOOP_FRACTION`, the hub's production open-loop fraction. Production exploration is 1-5%, but at bench query volume 1% yields zero exploration serves while 20% would be unacceptable in production; 0.10 is the smallest round fraction yielding usable data at our volume. Two rules both hold: exploration serves are EXCLUDED from lift because they are deliberately degraded, and INCLUDED in feedback-divergence because that is their purpose.
 
 Why N=6 is the floor: a two-sided nonparametric paired sign test can first reach p<0.05 at N=6. The arithmetic floor is `2/2^6 = 0.031`. Below 6, a p-value is misleading regardless of effect size.
 
@@ -114,6 +122,12 @@ Report a bootstrap interval over whole sessions, clustered by session, alongside
 
 **BLOCKER B1:** rho/T4 is currently unmeasurable. The serve-on-chain path is broken: defect D-C; SMOKE-5 measured 0/24 serves. The plugin sends empty `matched_keywords` at session-start set-sync and the hub 400s under D-4.2. Rho is no longer a validity threshold for badPersist after D1 because badPersist is flat across rho (0.107 -> 0.091 within +/-CI95), but harvest coverage is load-bearing for GOOD-memory survival: goodSurv 0.116 at rho=0 vs 0.816 at rho=1.0; gfa 0.884 at rho=0. D-C must be fixed before R3 can validate its headline.
 
+**BLOCKER B9:** rho also has a structural ceiling under held credit. Serve income is held and VOIDED if unpaired within the window, so rho can never exceed the fraction of episodes resolving inside that window. If the window captures only 60% of episodes, T4's `>=0.80` is structurally unreachable regardless of detector quality. Tuning detection breadth against that ceiling would be wasted effort.
+
+**MEASURED:** `wevibe-bench/scripts/measure_episode_duration.py` was built and run against the live hub DB. Result: `episodes_n=0`, verdict `UNDETERMINED-INSUFFICIENT-DATA n=0 reason=no_paired_episode_rows`. No ceiling was fabricated.
+
+Schema gap: `serve_events` carries no `episode_ref` and no `session_id`, so episode duration is only reachable through a weak proxy join: `outcome_events.session_id -> session_served_memories -> serve_events` by memory hash. The rho ceiling must be measured on real episode data before T4 `>=0.80` is treated as a live target. If the measured ceiling is below 0.80, that is a T4 amendment for Walter, not something to engineer around.
+
 ## 11. Mixed-arm concurrency pool
 
 Run ON, bmOFF, sham, and OFF cells in one randomized pool at the same concurrency. Never run one arm parallel and another serial. Contention, rate-limiting, routing variance, and timeouts penalize the parallel arm and would inflate apparent lift.
@@ -137,7 +151,7 @@ Standing turns on a rate, so outcome-independent duplication is first-order neut
 
 Do verify the outcome-independence assumption. Crash-and-retry can plausibly skew duplicates toward didn't-work events and would over-retire GOOD memories.
 
-## 13. Open tension — flag, do not change
+## 13. Production-governor tension — superseded framing
 
 Top-K=3 at relevance floor 0.55 sits between two facts:
 
@@ -146,7 +160,7 @@ Top-K=3 at relevance floor 0.55 sits between two facts:
 
 Neither was chosen with the other in mind. Do not change it here. Let the bench measure it.
 
-Sharper unresolved problem: bench runs set `WEVIBE_RECALL_MODE=test` (floor=0, budget=1000), so the production governor K=3/floor=0.55 is not exercised by the bench as configured. The production governor is pinned only in `wevibe-docs` D-RECALL-GOVERNOR. Measuring it requires leaving test mode, which would filter fresh low-trust memories. Record this as unresolved.
+Superseded wording: this was previously recorded as an unresolved open tension. The current limitation is narrower and sharper: the bench cannot exercise the production governor as configured. That limitation is headlined in §20 rather than duplicated here. "The tension is deferred" and "the bench cannot exercise the production governor" are different facts; only the latter belongs in limitations.
 
 ## 14. Pre-registered possible outcome
 
@@ -209,6 +223,10 @@ Budget truth: consumer `bench` lifetime TRUE spend is **MEASURED $7.9359 over 23
 
 Recommended: **2 rungs x 4 arms x N=8 x 3 fixtures = $113.2**.
 
+The paired within-run policy contrast adds **$0** to execution cost because it is two policy replays over an existing event log, not another cell or arm.
+
+The transfer-check cell in §19 is one additional cell-set at the existing per-cell rate. The exact count depends on how many rungs are transfer-checked; no new per-cell rate is invented here.
+
 Cuts to fit:
 
 - kimi-k3 as a rung; one k3 rung at N=6 alone is $96.5, or 68% of headroom;
@@ -228,6 +246,8 @@ Cuts to fit:
 | B5 | `docs/VARIANCE-POLICY.md` sets baseline N=1 with T1-T4 escalation to N=3. | Prereg must explicitly supersede/amend it for R3 with N=8 paired. |
 | B6 | Targets of record are in `RECALL-PIVOT-SPEC.md` §5, not `BENCHMARK-DIARY.md` §22.2. | Cite correct location. |
 | B7 | Container-name collision breaks concurrent cells. | Unique per-cell container names before mixed pool. |
+| B8 | Transfer-check cell depends on production-governor execution in auto-approve mode. | Depends on the parallel auto-approve-with-production-governor work; owned elsewhere. |
+| B9 | Rho ceiling is unmeasured because real paired episode data is absent and the schema only permits a weak proxy join. | Measure on real episode data before T4 `>=0.80` is a live target; if ceiling is below 0.80, escalate a T4 amendment to Walter. |
 
 ## 17. Harness work required
 
@@ -241,9 +261,56 @@ Cuts to fit:
 | Two new fixtures | Blocking | Avoid one-fixture repeat design. |
 | Archetype-stratified plant path | Required | K=42 bads, headline at archetype unit. |
 | Theta/rho/duplicate interval reporting | Required | Declared secondary/descriptive measurements. |
+| Paired-contrast analysis functions | DONE | `wevibe_bench/stats.py` includes `mcnemar_exact`, `paired_binary_contrast`, and `meets_minimum_effect`. |
+| Manifest levers | DONE | `wevibe_bench/cumulative/run_context.py` includes `L14_BENCH_EXPLORATION_FRACTION` and `L15_PAIRED_CONTRAST_ARMS`. |
+| Episode-duration/rho-ceiling script | DONE, insufficient data | Script exists and returns `UNDETERMINED-INSUFFICIENT-DATA` because live DB has `episodes_n=0`. |
+| Exploration filters | NOT BUILT | Scope: EXCLUDE exploration serves from lift and INCLUDE them in feedback-divergence; build after the arms exist. |
 
 ## 18. Launch position
 
 R3 should not launch until Walter explicitly accepts the R3 scope/cap change, B1/B2/B7 are resolved, and the preregistration manifest is frozen next to the policy hash before numbers exist.
 
 Until then, this document is a decision-useful restructure plan, not launch authority.
+
+## 19. Transfer-check cell (production governor)
+
+The bench runs `WEVIBE_RECALL_MODE=test` with floor `0` and budget `1000`, while production serves 3 at floor `0.55`. That is roughly 300x the serve breadth. A parallel work-stream is building an auto-approve-with-production-governor mode.
+
+The transfer-check cell runs the SAME fixture/rungs under the PRODUCTION governor config: floor `0.55`, budget `3`, limit `3`. Its result is directly comparable to the test-mode cells because the fixture/rung design is unchanged; only the retrieval governor changes.
+
+Purpose: this is a TRANSFER CHECK. It establishes whether test-mode numbers describe the production retrieval configuration at all. If this cell is NOT run, the limitation sentence in §20 stands as the fallback: "These results characterise the standing mechanism under test-mode retrieval and have NOT been shown to transfer to the production governor."
+
+**BLOCKER B8:** the cell depends on the parallel auto-approve-with-production-governor work, owned elsewhere. Costing: one additional cell-set at the existing per-cell rate; the exact count depends on how many rungs are transfer-checked.
+
+## 20. Limitations (headline, not backlog)
+
+**Test-mode retrieval does not exercise the production governor.** These results characterise the standing mechanism under test-mode retrieval and have NOT been shown to transfer to the production governor. Supporting evidence: our own sim says the retrieval regime is the DOMINANT variable. The query-regime sweep moved both models by about 0.19 while the policies separated by only 0.01-0.05, and at top-K=1 both models breached constraints outright. Reason: the bench cannot exercise the production governor. This is explicitly not the claim that "the tension is deferred"; those are two different facts, and only the governor-exercise limitation belongs here.
+
+**The sim can no longer serve as independent evidence for the policy it selected.** The bench is now validating the simulator as much as the policy. Treat sim results as policy-selection provenance and target re-derivation input, not independent confirmation.
+
+**A window creates selection pressure toward fast-resolving knowledge.** The shipped policy holds serve income pending an outcome and VOIDS it if unpaired past 1440 epochs, or 24h. Architectural insight that takes three days to validate never gets credited, and no credit plus idle decay equals retirement. The corpus will systematically prefer quick fixes. This is a DISCLOSED DESIGN CONSEQUENCE. Hedge: window expiry should emit an explicit unresolved-within-window observation so a future policy can distinguish "never seen" from "seen but slow"; implementation is owned elsewhere, not by this plan.
+
+**Already-agreed limits remain.** CCN-vs-IDN is a scope limit on theta. Theta is per rung and NEVER pooled. Archetype stratification is required. Retirement is headlined over lift.
+
+**The 24h window is a DISCLOSED MAPPING ASSUMPTION, not a sim-proved constant.** The sim cannot discriminate window length because it emits its outcome event in the SAME epoch as the serve, so outcome lag is zero by construction. Swept windows `W in {1,5,25,1e9}` moved core metrics only in the third decimal. The sim epoch is also coarse: scenario epochs x 5 gives 200-300 epochs per memory lifetime, so literal 1440 exceeds every run length and never voids.
+
+## 21. Shipped-policy target re-derivation
+
+**MEASURED** source: `wevibe-sim/runs/policy-sim.js`, analyze `runs/policy-sim/2026-07-30T120517Z-c1-analyze.txt`, n=63 cells/row, `tp=0.10`.
+
+| metric | immediate credit `out@rho0.8` | SHIPPED held credit `d1@rho0.8` | target | status |
+| --- | ---: | ---: | --- | --- |
+| badPersist | 0.1214 | 0.0945 | T1 <=0.20 | PASS, improved |
+| goodSurv | 0.9535 | 0.7669 | T2 >=0.90 | BREACH |
+| gap | 0.8321 | 0.6723 | T3 >=0.75 | BREACH |
+| gfa | 0.0465 | 0.2331 | T5 <=0.05 | BREACH |
+| badArchivedFrac | 0.7675 | 0.7944 | T6 split | improved |
+| ttaBadMedianArchived | 34.36 | 33.71 | T6 split | improved |
+
+T1 under held credit is flat across rho: 0.0902-0.0977. Rho is no longer a validity threshold for badPersist under held credit.
+
+T6 MUST be reported SPLIT: `badArchivedFrac` and `ttaBadMedianArchived` separately, never averaged. When zero bads are archived, report NULL rather than the horizon.
+
+Contradicted expectation, recorded as a finding rather than a failure: T6 was expected to worsen because latency was traded for correctness, and it did not. Median time-to-retirement is slightly shorter and archived fraction slightly higher. Reason: a realized pair credits one quantum instead of two, so bads accumulate less weight and cross the threshold marginally sooner.
+
+Open target conflict escalated to Walter: max goodSurv anywhere in the sweep is 0.8162 at rho=1.0, so T2 `>=0.90` is unreachable at any rho under held credit. This plan does not propose replacement target numbers; that is Walter's call.

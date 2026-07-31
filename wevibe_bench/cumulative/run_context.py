@@ -1,4 +1,10 @@
-"""Run-start context capture for cumulative benchmark comparability."""
+"""Run-start context capture for cumulative benchmark comparability.
+
+Exploration serves are excluded from downstream lift computation because they are
+deliberately degraded. Exploration serves are included in downstream
+feedback-divergence measurement because measuring that divergence is their
+purpose.
+"""
 
 from __future__ import annotations
 
@@ -117,12 +123,31 @@ def _env_lever_with_default(env: Mapping[str, str], key: str, default: str) -> d
     return _lever(default, "documented-default")
 
 
+def _validate_fraction_lever(lever_id: str, lever: Mapping[str, Any]) -> None:
+    raw_value = str(lever.get("value", ""))
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{lever_id} must be a float in [0.0, 1.0], got {raw_value!r}") from exc
+    if not 0.0 <= value <= 1.0:
+        raise RuntimeError(f"{lever_id} must be a float in [0.0, 1.0], got {raw_value!r}")
+
+
 def _collect_available() -> dict[str, Any]:
     env_output = _run_command(["docker", "exec", "wevibe-hub", "env"])
     hub_env = _parse_env_output(env_output)
 
     logs_output = _run_command(["docker", "logs", "wevibe-hub"], timeout_s=20)
     edge_policy = parse_policy_anchor_log_line(logs_output)
+
+    # BENCH-ONLY rate, never a production default: production exploration is
+    # 1–5%, but at bench query volume 1% yields about zero exploration serves.
+    # 0.10 is the smallest round fraction that yields a usable count while
+    # staying an order of magnitude below a level unacceptable in production.
+    bench_exploration_fraction = _env_lever_with_default(
+        hub_env, "BENCH_EXPLORATION_FRACTION", "0.10"
+    )
+    _validate_fraction_lever("L14_BENCH_EXPLORATION_FRACTION", bench_exploration_fraction)
 
     levers = {
         "L1_relevance_floor": _lever("0.55", "documented-default"),
@@ -148,6 +173,13 @@ def _collect_available() -> dict[str, Any]:
         ),
         "L13_RETRIEVAL_COUNTERFACTUAL_LOGGING": _env_lever_with_default(
             hub_env, "RETRIEVAL_COUNTERFACTUAL_LOGGING", "false"
+        ),
+        # Distinct from L12: L12 is the hub production open-loop fraction; L14 is the bench's own exploration rate.
+        "L14_BENCH_EXPLORATION_FRACTION": bench_exploration_fraction,
+        # New primary endpoint replay arms: shipped policy versus the same policy with E3 outcome events ignored.
+        "L15_PAIRED_CONTRAST_ARMS": _lever(
+            "shipped:edge-policy-v1|counterfactual:edge-policy-v1-outcomes-ignored",
+            "compiled-const",
         ),
     }
 

@@ -19,6 +19,14 @@ _BETA_EPS = 3.0e-14
 _BETA_FPMIN = 1.0e-300
 _BETA_MAX_ITER = 200
 
+# Pre-registered primary endpoint thresholds: the risk-difference floor is the
+# lower edge of the sim's own observed paired diffs vs the noOut baseline
+# (-0.50...-0.75, RECALL-PIVOT-SPEC.md §2.3/§5), avoiding cherry-picking the
+# favorable end; at K=14 archetypes, b=8/c=1 gives one-sided exact p≈0.0195,
+# making the reverse-discordant cap satisfiable at the affordable sample size.
+PREREG_MIN_RISK_DIFFERENCE = 0.50
+PREREG_MAX_REVERSE_DISCORDANT = 1
+
 
 def _validate_count(successes: int, n: int) -> None:
     if n < 0:
@@ -211,6 +219,128 @@ def exact_paired_sign_test(pairs: Sequence[tuple[float, float]]) -> dict[str, in
         "n_negative": n_negative,
         "n_ties": n_ties,
         "p_value": p_value,
+    }
+
+
+def mcnemar_exact(b: int, c: int, alternative: str = "greater") -> dict[str, int | float]:
+    """Return the exact conditional McNemar binomial test for discordant pairs.
+
+    The statistic conditions on the discordant total ``b + c`` and tests whether
+    predicted-direction discordance ``b`` is unusually large under
+    Binomial(n_discordant, 0.5).  ``alternative='greater'`` is the pre-registered
+    directional test; ``'two-sided'`` returns the exact doubled smaller tail.
+    Assumes independent paired binary units.  The odds-ratio convention is
+    ``math.inf`` when ``c == 0`` and ``b > 0``, and ``1.0`` when no discordant
+    pairs exist; when no discordant pairs exist no Clopper-Pearson interval keys
+    are returned.
+    """
+    if b < 0 or c < 0:
+        raise ValueError("discordant counts must be non-negative")
+    if alternative not in {"greater", "two-sided"}:
+        raise ValueError("alternative must be 'greater' or 'two-sided'")
+
+    n_discordant = b + c
+    if n_discordant == 0:
+        return {
+            "n_discordant": 0,
+            "b": b,
+            "c": c,
+            "p_value": 1.0,
+            "odds_ratio": 1.0,
+            "discordant_prop_b": 0.0,
+        }
+
+    denominator = 2**n_discordant
+    if alternative == "greater":
+        p_value = sum(math.comb(n_discordant, k) for k in range(b, n_discordant + 1)) / denominator
+    else:
+        observed = min(b, c)
+        tail = sum(math.comb(n_discordant, k) for k in range(observed + 1)) / denominator
+        p_value = min(1.0, 2.0 * tail)
+
+    ci_low, ci_high = clopper_pearson_interval(b, n_discordant)
+    return {
+        "n_discordant": n_discordant,
+        "b": b,
+        "c": c,
+        "p_value": p_value,
+        "odds_ratio": math.inf if c == 0 else b / c,
+        "discordant_prop_b": b / n_discordant,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+    }
+
+
+def paired_binary_contrast(pairs: Sequence[tuple[bool, bool]]) -> dict[str, int | float]:
+    """Return a paired binary policy contrast with exact McNemar significance.
+
+    The statistic tabulates paired survival outcomes as ``both_survive``,
+    predicted-direction discordance ``b`` (survives under no-outcome policy, dies
+    under shipped policy), reverse discordance ``c``, and ``both_die``.  It then
+    reports marginal survival rates and the paired risk difference
+    ``no_outcome_rate - shipped_rate``.  Assumes one independent pair per unit of
+    analysis, with both policies replayed over the same event log.
+    """
+    both_survive = 0
+    b = 0
+    c = 0
+    both_die = 0
+    for survived_no_outcome, survived_shipped in pairs:
+        if survived_no_outcome and survived_shipped:
+            both_survive += 1
+        elif survived_no_outcome and not survived_shipped:
+            b += 1
+        elif not survived_no_outcome and survived_shipped:
+            c += 1
+        else:
+            both_die += 1
+
+    n_pairs = len(pairs)
+    no_outcome_rate = (both_survive + b) / n_pairs if n_pairs else 0.0
+    shipped_rate = (both_survive + c) / n_pairs if n_pairs else 0.0
+    result = {
+        "n_pairs": n_pairs,
+        "both_survive": both_survive,
+        "b": b,
+        "c": c,
+        "both_die": both_die,
+        "no_outcome_rate": no_outcome_rate,
+        "shipped_rate": shipped_rate,
+        "risk_difference": no_outcome_rate - shipped_rate,
+    }
+    result.update(mcnemar_exact(b, c))
+    return result
+
+
+def meets_minimum_effect(
+    contrast: dict,
+    min_risk_difference: float = PREREG_MIN_RISK_DIFFERENCE,
+    max_reverse_discordant: int = PREREG_MAX_REVERSE_DISCORDANT,
+    alpha: float = 0.05,
+) -> dict[str, bool | float]:
+    """Return the pre-registered paired binary endpoint decision rule.
+
+    The rule separately requires the pre-registered direction ``b > c``, a risk
+    difference at least ``min_risk_difference``, reverse discordance no larger
+    than ``max_reverse_discordant``, and one-sided McNemar significance
+    ``p_value < alpha``.  The pre-registered direction licenses the one-sided
+    test.  Defaults encode the primary endpoint values documented by
+    ``PREREG_MIN_RISK_DIFFERENCE`` and ``PREREG_MAX_REVERSE_DISCORDANT``.
+    """
+    direction_ok = contrast["b"] > contrast["c"]
+    effect_ok = contrast["risk_difference"] >= min_risk_difference
+    reverse_ok = contrast["c"] <= max_reverse_discordant
+    significant = contrast["p_value"] < alpha
+    passes = direction_ok and effect_ok and reverse_ok and significant
+    return {
+        "direction_ok": direction_ok,
+        "effect_ok": effect_ok,
+        "reverse_ok": reverse_ok,
+        "significant": significant,
+        "passes": passes,
+        "min_risk_difference": min_risk_difference,
+        "max_reverse_discordant": max_reverse_discordant,
+        "alpha": alpha,
     }
 
 

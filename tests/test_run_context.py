@@ -80,6 +80,14 @@ def test_collect_run_context_uses_mocked_docker(monkeypatch) -> None:
         "value": "false",
         "source": "documented-default",
     }
+    assert context["levers"]["L14_BENCH_EXPLORATION_FRACTION"] == {
+        "value": "0.10",
+        "source": "documented-default",
+    }
+    assert context["levers"]["L15_PAIRED_CONTRAST_ARMS"] == {
+        "value": "shipped:edge-policy-v1|counterfactual:edge-policy-v1-outcomes-ignored",
+        "source": "compiled-const",
+    }
     assert context["edge_policy"]["anchor_status"] == "anchor_verified"
 
 
@@ -115,6 +123,107 @@ def test_collect_run_context_records_d3_exposure_levers_from_hub_env(monkeypatch
         "value": "true",
         "source": "hub-env",
     }
+
+
+def test_collect_run_context_records_bench_exploration_from_hub_env(monkeypatch) -> None:
+    def fake_run(args, **_kwargs):
+        if args == ["docker", "exec", "wevibe-hub", "env"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "RETRIEVAL_TEMPERATURE=0.7\n"
+                    "RETRIEVAL_NEW_MEM_BOOST_MULT=0.5\n"
+                    "RETRIEVAL_NEW_MEM_BOOST_WINDOW=30\n"
+                    "WEVIBE_RECALL_MODE=prod\n"
+                    "BENCH_EXPLORATION_FRACTION=0.25\n"
+                ),
+                stderr="",
+            )
+        if args == ["docker", "logs", "wevibe-hub"]:
+            return subprocess.CompletedProcess(args, 0, stdout=POLICY_LINE, stderr="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    context = collect_run_context()
+
+    assert context["levers"]["L12_RETRIEVAL_OPEN_LOOP_FRACTION"] == {
+        "value": "0.0",
+        "source": "documented-default",
+    }
+    assert context["levers"]["L13_RETRIEVAL_COUNTERFACTUAL_LOGGING"] == {
+        "value": "false",
+        "source": "documented-default",
+    }
+    assert context["levers"]["L14_BENCH_EXPLORATION_FRACTION"] == {
+        "value": "0.25",
+        "source": "hub-env",
+    }
+    assert context["levers"]["L15_PAIRED_CONTRAST_ARMS"] == {
+        "value": "shipped:edge-policy-v1|counterfactual:edge-policy-v1-outcomes-ignored",
+        "source": "compiled-const",
+    }
+
+
+def test_collect_run_context_rejects_non_numeric_bench_exploration(monkeypatch) -> None:
+    def fake_run(args, **_kwargs):
+        if args == ["docker", "exec", "wevibe-hub", "env"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "RETRIEVAL_TEMPERATURE=0.7\n"
+                    "RETRIEVAL_NEW_MEM_BOOST_MULT=0.5\n"
+                    "RETRIEVAL_NEW_MEM_BOOST_WINDOW=30\n"
+                    "WEVIBE_RECALL_MODE=prod\n"
+                    "BENCH_EXPLORATION_FRACTION=not-a-number\n"
+                ),
+                stderr="",
+            )
+        if args == ["docker", "logs", "wevibe-hub"]:
+            return subprocess.CompletedProcess(args, 0, stdout=POLICY_LINE, stderr="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        collect_run_context()
+    except RuntimeError as exc:
+        assert "L14_BENCH_EXPLORATION_FRACTION" in str(exc)
+        assert "not-a-number" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_collect_run_context_rejects_out_of_range_bench_exploration(monkeypatch) -> None:
+    def fake_run(args, **_kwargs):
+        if args == ["docker", "exec", "wevibe-hub", "env"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "RETRIEVAL_TEMPERATURE=0.7\n"
+                    "RETRIEVAL_NEW_MEM_BOOST_MULT=0.5\n"
+                    "RETRIEVAL_NEW_MEM_BOOST_WINDOW=30\n"
+                    "WEVIBE_RECALL_MODE=prod\n"
+                    "BENCH_EXPLORATION_FRACTION=1.5\n"
+                ),
+                stderr="",
+            )
+        if args == ["docker", "logs", "wevibe-hub"]:
+            return subprocess.CompletedProcess(args, 0, stdout=POLICY_LINE, stderr="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        collect_run_context()
+    except RuntimeError as exc:
+        assert "L14_BENCH_EXPLORATION_FRACTION" in str(exc)
+        assert "1.5" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
 
 
 def test_manifest_round_trip_with_and_without_run_context() -> None:
