@@ -15,7 +15,7 @@ from .hub_client import HubClient
 from .identity import Identity
 from .lconfig import LifecycleConfig
 from .logging_util import fp, new_trace_id
-from .mcp_process import McpInstance, McpProcessManager
+from .mcp_process import McpInstance, McpProcessManager, _require_bench_identity_store
 from .mcp_rest import McpRest
 
 
@@ -47,8 +47,6 @@ class LifecycleOrchestrator:
         self._wevibe_root = wevibe_root
         self._leader = leader
         self._contributor = contributor
-        self._leader_keystore = leader_keystore
-        self._contributor_keystore = contributor_keystore
         self._leader_wallet = leader_wallet
         self._logger = logger
         self._procman = procman
@@ -141,12 +139,13 @@ class LifecycleOrchestrator:
         return self._contributor_instance
 
     def _leader_admin_env(self) -> dict[str, str]:
+        identity_home, keystore_path = _require_bench_identity_store()
         env = dict(os.environ)
         env.update(
             {
-                "WEVIBE_SEED_BACKEND": "env",
-                "WEVIBE_IDENTITY_SEED_HEX": self._leader.seed_hex,
-                "WEVIBE_KEYSTORE_PATH": self._leader_keystore,
+                "WEVIBE_SEED_BACKEND": "file",
+                "WEVIBE_HOME": identity_home,
+                "WEVIBE_KEYSTORE_PATH": keystore_path,
                 "WEVIBE_HUB_URL": self._cfg.hub_url,
                 "WEVIBE_LEADER_WALLET": self._leader_wallet,
                 "WEVIBE_BENCH_ENDPOINTS": "1",
@@ -278,15 +277,11 @@ class LifecycleOrchestrator:
             leader_instance = self._procman.spawn(
                 name="leader",
                 port=leader_port,
-                seed_hex=self._leader.seed_hex,
-                keystore_path=self._leader_keystore,
                 leader_wallet=self._leader_wallet,
             )
             contributor_instance = self._procman.spawn(
                 name="contributor",
                 port=contributor_port,
-                seed_hex=self._contributor.seed_hex,
-                keystore_path=self._contributor_keystore,
             )
 
         if not self._procman.wait_healthy(leader_instance):

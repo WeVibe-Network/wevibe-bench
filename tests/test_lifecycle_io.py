@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 import subprocess
 
@@ -27,31 +28,54 @@ def _capture_logger(name: str) -> tuple[logging.Logger, io.StringIO]:
     return logger, stream
 
 
-def test_mcp_process_build_env_sets_required_keys_and_never_logs_raw_seed() -> None:
+def test_mcp_process_build_env_sets_required_keys_and_never_logs_raw_seed(tmp_path, monkeypatch) -> None:
     logger, stream = _capture_logger("test.lifecycle.mcp_env")
     cfg = LifecycleConfig()
     manager = McpProcessManager("/workspace", cfg, logger)
 
     seed_hex = "ab" * 32
+    identity_home = tmp_path / "identity-home"
+    keys_dir = identity_home / "keys"
+    keys_dir.mkdir(parents=True)
+    keys_json = keys_dir / "keys.json"
+    keys_json.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WEVIBE_BENCH_IDENTITY_HOME", str(identity_home))
+
     env = manager._build_env(
         name="leader",
         port=4450,
-        seed_hex=seed_hex,
-        keystore_path="/tmp/leader-keystore.json",
     )
 
     assert env["WEVIBE_MCP_HTTP_ONLY"] == "1"
     assert env["WEVIBE_MCP_HTTP_PORT"] == "4450"
-    assert env["WEVIBE_SEED_BACKEND"] == "env"
-    assert env["WEVIBE_IDENTITY_SEED_HEX"] == seed_hex
-    assert env["WEVIBE_KEYSTORE_PATH"] == "/tmp/leader-keystore.json"
+    assert env["WEVIBE_SEED_BACKEND"] == "file"
+    assert "WEVIBE_IDENTITY_SEED_HEX" not in env
+    assert env["WEVIBE_HOME"] == os.path.abspath(str(identity_home))
+    assert env["WEVIBE_KEYSTORE_PATH"] == os.path.join(os.path.abspath(str(identity_home)), "keys")
     assert env["WEVIBE_UMBRAL_SIDECAR_BIN"] == "/workspace/wevibe-umbral/target/release/wevibe-umbral"
     assert env["WEVIBE_GUARD_BIN"] == "/workspace/wevibe-guard/target/release/wevibe-guard"
     assert env["WEVIBE_HUB_URL"] == cfg.hub_url
 
     logs = stream.getvalue()
     assert seed_hex not in logs
-    assert "seed_fp=" in logs
+    assert "seed_fp=" not in logs
+    assert "keystore_path=" in logs
+
+
+def test_mcp_process_build_env_fails_closed_when_bench_identity_store_missing(tmp_path, monkeypatch) -> None:
+    logger, _ = _capture_logger("test.lifecycle.mcp_env.fail_closed")
+    manager = McpProcessManager("/workspace", LifecycleConfig(), logger)
+    identity_home = tmp_path / "identity-home"
+
+    monkeypatch.setenv("WEVIBE_BENCH_IDENTITY_HOME", str(identity_home))
+    with pytest.raises(RuntimeError, match=f"benchmark identity home missing: {re.escape(str(identity_home))}"):
+        manager._build_env(name="leader", port=4450)
+
+    keys_dir = identity_home / "keys"
+    keys_dir.mkdir(parents=True)
+    keys_json = keys_dir / "keys.json"
+    with pytest.raises(RuntimeError, match=f"benchmark identity keystore missing: {re.escape(str(keys_json))}"):
+        manager._build_env(name="leader", port=4450)
 
 
 def test_mcp_process_uses_wevibe_bench_mcp_root_env(monkeypatch) -> None:
@@ -95,7 +119,6 @@ def test_mcp_process_wait_healthy_returns_true_when_health_endpoint_is_ready(tmp
     inst = McpInstance(
         name="leader",
         port=4450,
-        seed_hex="aa" * 32,
         keystore_path="/tmp/leader.ks",
         log_path="/tmp/leader.log",
         pid=123,
@@ -121,7 +144,6 @@ def test_mcp_process_export_pairing_returns_response_body(tmp_path) -> None:
     inst = McpInstance(
         name="contributor",
         port=4451,
-        seed_hex="bb" * 32,
         keystore_path="/tmp/contrib.ks",
         log_path="/tmp/contrib.log",
         pid=124,

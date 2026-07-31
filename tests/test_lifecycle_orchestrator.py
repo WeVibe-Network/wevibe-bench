@@ -124,7 +124,7 @@ def test_mcp_rest_identity_pubkeys_and_submit_use_expected_url_body_and_bearer(t
     }
 
 
-def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() -> None:
+def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes(tmp_path, monkeypatch) -> None:
     logger, _ = _capture_logger("test.lifecycle.orchestrator.m1")
     cfg = LifecycleConfig(
         leader_mcp_url="http://127.0.0.1:4550",
@@ -134,6 +134,11 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
     )
     leader = Identity.from_hex("11" * 32)
     contributor = Identity.from_hex("22" * 32)
+    identity_home = tmp_path / "identity-home"
+    keys_dir = identity_home / "keys"
+    keys_dir.mkdir(parents=True)
+    (keys_dir / "keys.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WEVIBE_BENCH_IDENTITY_HOME", str(identity_home))
 
     calls: list[str] = []
     signer_calls: list[dict[str, Any]] = []
@@ -152,6 +157,10 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
             can_moderate: bool = False,
         ) -> str:
             calls.append("invite")
+            assert self._env["WEVIBE_SEED_BACKEND"] == "file"
+            assert "WEVIBE_IDENTITY_SEED_HEX" not in self._env
+            assert self._env["WEVIBE_HOME"] == os.path.abspath(str(identity_home))
+            assert self._env["WEVIBE_KEYSTORE_PATH"] == os.path.join(os.path.abspath(str(identity_home)), "keys")
             assert org_id == "org-123"
             assert invitee_pubkey == "ed-contrib"
             assert invitee_x25519 == "x-contrib"
@@ -162,6 +171,10 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
 
         def provision_recall(self, org_id: str) -> str:
             calls.append("provision_recall")
+            assert self._env["WEVIBE_SEED_BACKEND"] == "file"
+            assert "WEVIBE_IDENTITY_SEED_HEX" not in self._env
+            assert self._env["WEVIBE_HOME"] == os.path.abspath(str(identity_home))
+            assert self._env["WEVIBE_KEYSTORE_PATH"] == os.path.join(os.path.abspath(str(identity_home)), "keys")
             assert org_id == "org-123"
             return "provisioned"
 
@@ -321,7 +334,7 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes() ->
     assert add_member_env["WEVIBE_CHAIN_RPC"] == "http://localhost:26657"
 
 
-def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
+def test_orchestrator_run_m1_reuses_existing_org_membership(tmp_path, monkeypatch) -> None:
     logger, _ = _capture_logger("test.lifecycle.orchestrator.m1.reuse")
     cfg = LifecycleConfig(
         leader_mcp_url="http://127.0.0.1:4550",
@@ -331,6 +344,11 @@ def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
     )
     leader = Identity.from_hex("11" * 32)
     contributor = Identity.from_hex("22" * 32)
+    identity_home = tmp_path / "identity-home"
+    keys_dir = identity_home / "keys"
+    keys_dir.mkdir(parents=True)
+    (keys_dir / "keys.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WEVIBE_BENCH_IDENTITY_HOME", str(identity_home))
 
     calls: list[str] = []
     signer_calls: list[dict[str, Any]] = []
@@ -352,6 +370,10 @@ def test_orchestrator_run_m1_reuses_existing_org_membership() -> None:
 
         def provision_recall(self, org_id: str) -> str:
             calls.append("provision_recall")
+            assert self._env["WEVIBE_SEED_BACKEND"] == "file"
+            assert "WEVIBE_IDENTITY_SEED_HEX" not in self._env
+            assert self._env["WEVIBE_HOME"] == os.path.abspath(str(identity_home))
+            assert self._env["WEVIBE_KEYSTORE_PATH"] == os.path.join(os.path.abspath(str(identity_home)), "keys")
             assert org_id == "org-123"
             return "provisioned"
 

@@ -386,7 +386,6 @@ def _bring_up_for_resume(
         candidate = McpInstance(
             name="leader",
             port=leader_port,
-            seed_hex=leader.seed_hex,
             keystore_path=leader_keystore,
             log_path=f"<reused-port-{leader_port}>",
             pid=existing_leader_pid,
@@ -415,16 +414,12 @@ def _bring_up_for_resume(
                 spawned_leader_instance = procman.spawn(
                     name="leader",
                     port=leader_port,
-                    seed_hex=leader.seed_hex,
-                    keystore_path=leader_keystore,
                     leader_wallet=leader_wallet,
                 )
                 leader_instance = spawned_leader_instance
             contributor_instance = procman.spawn(
                 name="contributor",
                 port=contributor_port,
-                seed_hex=contributor.seed_hex,
-                keystore_path=contributor_keystore,
             )
 
         if not procman.wait_healthy(leader_instance):

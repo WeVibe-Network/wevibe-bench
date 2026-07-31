@@ -1,4 +1,4 @@
-"""Lifecycle MCP process management for env-seed identity instances."""
+"""Lifecycle MCP process management for file-backed benchmark identity instances."""
 
 from __future__ import annotations
 
@@ -17,13 +17,29 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .lconfig import LifecycleConfig
-from .logging_util import fp, new_trace_id
+from .logging_util import new_trace_id
 from .mcp_root import resolve_mcp_root
 
 
 Transport = Callable[[str, dict[str, str], dict[str, Any] | None], tuple[int, Any, bool]]
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_SEED_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _bench_identity_home() -> str:
+    return os.path.abspath(
+        os.path.expanduser(os.environ.get("WEVIBE_BENCH_IDENTITY_HOME", "~/.wevibe/bench"))
+    )
+
+
+def _require_bench_identity_store() -> tuple[str, str]:
+    home = _bench_identity_home()
+    keys_dir = os.path.join(home, "keys")
+    keys_json = os.path.join(keys_dir, "keys.json")
+    if not os.path.isdir(home):
+        raise RuntimeError(f"benchmark identity home missing: {home}")
+    if not os.path.isfile(keys_json):
+        raise RuntimeError(f"benchmark identity keystore missing: {keys_json}")
+    return home, keys_dir
 
 
 def _json_value(payload: bytes) -> Any:
@@ -39,7 +55,6 @@ def _json_value(payload: bytes) -> Any:
 class McpInstance:
     name: str
     port: int
-    seed_hex: str
     keystore_path: str
     log_path: str
     pid: int
@@ -150,21 +165,17 @@ class McpProcessManager:
         self,
         name: str,
         port: int,
-        seed_hex: str,
-        keystore_path: str,
         leader_wallet: str | None = None,
     ) -> dict[str, str]:
-        if not _SEED_RE.fullmatch(seed_hex):
-            raise ValueError("seed_hex must match ^[0-9a-fA-F]{64}$")
-
+        identity_home, keystore_path = _require_bench_identity_store()
         env = dict(os.environ)
         env.update(
             {
                 "WEVIBE_MCP_HTTP_ONLY": "1",
                 "WEVIBE_MCP_HTTP_PORT": str(port),
                 "WEVIBE_HTTP_HOST": "127.0.0.1",
-                "WEVIBE_SEED_BACKEND": "env",
-                "WEVIBE_IDENTITY_SEED_HEX": seed_hex,
+                "WEVIBE_SEED_BACKEND": "file",
+                "WEVIBE_HOME": identity_home,
                 "WEVIBE_KEYSTORE_PATH": keystore_path,
                 "WEVIBE_UMBRAL_SIDECAR_BIN": os.path.join(
                     self._wevibe_root,
@@ -195,7 +206,7 @@ class McpProcessManager:
             0,
             name=name,
             port=port,
-            seed_fp=fp(bytes.fromhex(seed_hex)),
+            identity_home=identity_home,
             keystore_path=keystore_path,
         )
         return env
@@ -254,8 +265,6 @@ class McpProcessManager:
         self,
         name: str,
         port: int,
-        seed_hex: str,
-        keystore_path: str,
         leader_wallet: str | None = None,
     ) -> McpInstance:
         trace = new_trace_id()
@@ -263,7 +272,7 @@ class McpProcessManager:
         run_root = os.path.expanduser(self._cfg.runs_dir)
         os.makedirs(run_root, exist_ok=True)
         log_path = os.path.join(run_root, f"{self._now_ts()}-{name}-mcp.log")
-        env = self._build_env(name, port, seed_hex, keystore_path, leader_wallet=leader_wallet)
+        env = self._build_env(name, port, leader_wallet=leader_wallet)
         cmd = ["node", os.path.join(self._mcp_root, "dist", "server.js")]
 
         with open(log_path, "a", encoding="utf-8") as log_file:
@@ -279,8 +288,7 @@ class McpProcessManager:
         inst = McpInstance(
             name=name,
             port=port,
-            seed_hex=seed_hex,
-            keystore_path=keystore_path,
+            keystore_path=env["WEVIBE_KEYSTORE_PATH"],
             log_path=log_path,
             pid=process.pid,
             url=f"http://127.0.0.1:{port}",
@@ -295,7 +303,7 @@ class McpProcessManager:
             name=name,
             port=port,
             pid=process.pid,
-            seed_fp=fp(bytes.fromhex(seed_hex)),
+            identity_home=env["WEVIBE_HOME"],
             log_path=log_path,
         )
         return inst
