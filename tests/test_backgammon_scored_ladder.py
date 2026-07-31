@@ -41,7 +41,7 @@ def _default_pricing_gate_ok(monkeypatch: Any) -> None:
 
 def _rung_params_payload() -> dict[str, Any]:
     return {
-        "orcarouter/kimi/kimi-k3": {
+        "orcarouter/qwen3.6-35b-a3b-bench": {
             "profile": "kimik3",
             "pricing_input": 3.0,
             "pricing_output": 15.0,
@@ -49,7 +49,7 @@ def _rung_params_payload() -> dict[str, Any]:
             "cost_limit": 12.0,
             "cost_target": 10.8,
         },
-        "orcarouter/kimi/kimi-k2.7-code": {
+        "orcarouter/qwen3.6-40b-deckard-bench": {
             "profile": "kimicode",
             "pricing_input": 0.95,
             "pricing_output": 4.0,
@@ -57,7 +57,7 @@ def _rung_params_payload() -> dict[str, Any]:
             "cost_limit": 2.7,
             "cost_target": 2.4,
         },
-        "orcarouter/tencent/hy3": {
+        "orcarouter/qwen3.6-27b-fable-bench": {
             "profile": "hy3",
             "pricing_input": 0.18,
             "pricing_output": 0.59,
@@ -303,21 +303,22 @@ def test_no_embedded_roster_derives_from_config() -> None:
 
 def test_exact_roster_a_cell_allocation() -> None:
     plan = bl._build_plan()
-    assert len(plan) == 5
+    assert len(plan) == 6
 
     expected = [
-        (1, "orcarouter/kimi/kimi-k3", "source", "off", "all"),
-        (2, "orcarouter/kimi/kimi-k2.7-code", "measure", "off", "session"),
-        (3, "orcarouter/kimi/kimi-k2.7-code", "measure", "on", "session"),
-        (4, "orcarouter/tencent/hy3", "measure", "off", "session"),
-        (5, "orcarouter/tencent/hy3", "measure", "on", "session"),
+        (1, "orcarouter/qwen3.6-35b-a3b-bench", "measure", "off", "session"),
+        (2, "orcarouter/qwen3.6-35b-a3b-bench", "measure", "on", "session"),
+        (3, "orcarouter/qwen3.6-40b-deckard-bench", "measure", "off", "session"),
+        (4, "orcarouter/qwen3.6-40b-deckard-bench", "measure", "on", "session"),
+        (5, "orcarouter/qwen3.6-27b-fable-bench", "measure", "off", "session"),
+        (6, "orcarouter/qwen3.6-27b-fable-bench", "measure", "on", "session"),
     ]
     actual = [
         (int(c["run_number"]), str(c["model"]), str(c["role"]), str(c["memory_mode"]), str(c["phase"]))
         for c in plan
     ]
     assert actual == expected
-    assert [int(c["run_number"]) for c in plan] == list(range(1, 6))
+    assert [int(c["run_number"]) for c in plan] == list(range(1, 7))
 
 
 def test_roster_validation_rejects_source_after_measure() -> None:
@@ -344,8 +345,8 @@ def test_manifest_freeze_deterministic_and_fingerprint() -> None:
     assert bl._manifest_comparable(m1) == bl._manifest_comparable(m2)
     assert m1["config_fingerprint"] == backgammon_ladder_roster_fingerprint()
     assert m1["schema_version"] == BACKGAMMON_LADDER_SCHEMA_VERSION
-    assert m1["total_cells"] == 5
-    assert len(m1["cell_allocation"]) == 5
+    assert m1["total_cells"] == 6
+    assert len(m1["cell_allocation"]) == 6
 
     comparable_for_guard = dict(bl._manifest_comparable(m1))
     comparable_for_guard.pop("preregistration", None)
@@ -566,7 +567,7 @@ def test_t3_instrument_anomaly_and_t4_class_flip() -> None:
 
 def test_off_stats_for_rung_ignores_non_numeric_attempts() -> None:
     plan = bl._build_plan()
-    off_cell = next(cell for cell in plan if int(cell["run_number"]) == 2)
+    off_cell = next(cell for cell in plan if int(cell["run_number"]) == 1)
 
     checkpoint = {
         "cells": [
@@ -699,7 +700,7 @@ def test_build_inner_env_sets_proxy_checkpoint_path(monkeypatch: Any) -> None:
 
 
 def test_summarize_cell_uses_true_median_and_proxy_accrued_cost() -> None:
-    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 1)
     entries = [
         _synthetic_entry(cell, 1, wall_seconds=1628.5, total_tokens=120000.0),
         _synthetic_entry(cell, 2, wall_seconds=1830.19, total_tokens=130000.0),
@@ -733,7 +734,9 @@ def test_import_success_writes_checkpoint_and_summary_with_provenance(
     import_path, payload, _ = _write_import_fixture(tmp_path)
 
     recorder: list[tuple[int, int]] = []
-    _patch_execution(monkeypatch, recorder)
+    # Run 2 is an ON cell vs the imported OFF baseline (tokens 106570): give it
+    # T2-proof stats (token delta >= 15%) so no variance rep is triggered.
+    _patch_execution(monkeypatch, recorder, stats_for={(2, 1): _stats(attempts=2, total_tokens=200000.0)})
     monkeypatch.setattr(
         bl,
         "_probe_pool_memory",
@@ -759,7 +762,7 @@ def test_import_success_writes_checkpoint_and_summary_with_provenance(
         ],
     )
     assert exit_code == 0
-    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1)]
+    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
 
     checkpoint = bl._load_json(tmp_path / bl.CHECKPOINT_NAME)
     assert checkpoint is not None
@@ -1029,7 +1032,7 @@ def test_import_dry_run_validates_and_skips_probe_without_writing_checkpoint(
     out = capsys.readouterr().out
     json_lines = [line for line in out.splitlines() if line.startswith("{")]
     run_numbers = [int(json.loads(line)["run_number"]) for line in json_lines]
-    assert run_numbers == [2, 3, 4, 5]
+    assert run_numbers == [2, 3, 4, 5, 6]
     assert "pool_probe=skipped" in out
 
 
@@ -1072,7 +1075,9 @@ def test_import_checkpoint_round_trip_resume_skips_imported_cell(
     import_path, _, _ = _write_import_fixture(tmp_path)
 
     recorder: list[tuple[int, int]] = []
-    _patch_execution(monkeypatch, recorder)
+    # Run 2 is an ON cell vs the imported OFF baseline (tokens 106570): give it
+    # T2-proof stats (token delta >= 15%) so no variance rep is triggered.
+    _patch_execution(monkeypatch, recorder, stats_for={(2, 1): _stats(attempts=2, total_tokens=200000.0)})
     monkeypatch.setattr(
         bl,
         "_probe_pool_memory",
@@ -1096,7 +1101,7 @@ def test_import_checkpoint_round_trip_resume_skips_imported_cell(
         ],
     )
     assert first_exit == 0
-    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1)]
+    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
 
     checkpoint = bl._load_json(tmp_path / bl.CHECKPOINT_NAME)
     assert checkpoint is not None
@@ -1147,7 +1152,7 @@ def test_dry_run_prints_plan_without_execution(tmp_path: pathlib.Path, monkeypat
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--dry-run"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "kimi-k3" in out and "kimi-k2.7-code" in out and "hy3" in out
+    assert "35b-a3b-bench" in out and "40b-deckard-bench" in out and "27b-fable-bench" in out
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
@@ -1169,7 +1174,7 @@ def test_dry_run_with_rung_params_discloses_binding_budget(tmp_path: pathlib.Pat
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
-    assert [float(row["binding_budget_usd"]) for row in rows] == pytest.approx([12.0, 2.7, 2.7, 2.0, 2.0])
+    assert [float(row["binding_budget_usd"]) for row in rows] == pytest.approx([12.0, 12.0, 2.7, 2.7, 2.0, 2.0])
 
 
 @pytest.mark.parametrize(
@@ -1386,26 +1391,26 @@ def test_fresh_run_writes_manifest_and_runs_all_cells(tmp_path: pathlib.Path, mo
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)],
     )
     assert exit_code == 0
-    assert recorder == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+    assert recorder == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
 
     manifest = bl._load_json(tmp_path / bl.MANIFEST_NAME)
     assert manifest is not None
     assert manifest["config_fingerprint"] == backgammon_ladder_roster_fingerprint()
-    assert len(manifest["cell_allocation"]) == 5
+    assert len(manifest["cell_allocation"]) == 6
 
     summary = bl._load_json(tmp_path / bl.SUMMARY_NAME)
     assert summary is not None
-    assert [c["n"] for c in summary["cells"]] == [1, 1, 1, 1, 1]
+    assert [c["n"] for c in summary["cells"]] == [1, 1, 1, 1, 1, 1]
     assert all(c["triggers_fired"] == [] for c in summary["cells"])
 
 
 def test_borderline_cell_repeats_to_n3_and_discloses_n(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
     recorder: list[tuple[int, int]] = []
-    # kimi OFF (run 2): FAIL one gate short -> T1 fires -> N=3.
+    # 35B OFF (run 1): FAIL one gate short -> T1 fires -> N=3.
     stats_for = {
-        (2, 1): _stats(verdict="FAIL", failed_gates=["G07"], attempts=None, total_tokens=200000.0),
-        (2, 2): _stats(verdict="PASS", attempts=2, total_tokens=200000.0),
-        (2, 3): _stats(verdict="FAIL", failed_gates=["G07"], attempts=None, total_tokens=200000.0),
+        (1, 1): _stats(verdict="FAIL", failed_gates=["G07"], attempts=None, total_tokens=200000.0),
+        (1, 2): _stats(verdict="PASS", attempts=2, total_tokens=200000.0),
+        (1, 3): _stats(verdict="FAIL", failed_gates=["G07"], attempts=None, total_tokens=200000.0),
     }
     _patch_execution(monkeypatch, recorder, stats_for=stats_for)
     params_path = _write_rung_params(tmp_path)
@@ -1415,23 +1420,36 @@ def test_borderline_cell_repeats_to_n3_and_discloses_n(tmp_path: pathlib.Path, m
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)],
     )
     assert exit_code == 0
-    assert recorder == [(1, 1), (2, 1), (2, 2), (2, 3), (3, 1), (4, 1), (5, 1)]
+    assert recorder == [(1, 1), (1, 2), (1, 3), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
 
     summary = bl._load_json(tmp_path / bl.SUMMARY_NAME)
     assert summary is not None
     by_run = {int(c["run_number"]): c for c in summary["cells"]}
-    assert by_run[2]["n"] == 3
-    assert by_run[2]["triggers_fired"] == ["T1"]
-    assert by_run[2]["majority_verdict"] == "FAIL"
-    assert by_run[3]["n"] == 1
+    assert by_run[1]["n"] == 3
+    assert by_run[1]["triggers_fired"] == ["T1"]
+    assert by_run[1]["majority_verdict"] == "FAIL"
+    assert by_run[2]["n"] == 1
 
 
 def test_source_cell_never_triggers_variance(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    from wevibe_bench.config import LadderRung
+
+    # The live roster (2026-07-31 local pivot) is all-measure; the source-skip
+    # rule is exercised here against a synthetic source+measure roster.
+    synthetic_roster = (
+        LadderRung(model="orcarouter/qwen3.6-35b-a3b-bench", role="source", memory_modes=("off",)),
+        LadderRung(model="orcarouter/qwen3.6-40b-deckard-bench", role="measure", memory_modes=("off", "on")),
+    )
+    monkeypatch.setattr(bl, "backgammon_scored_ladder_roster", lambda: synthetic_roster)
+
     recorder: list[tuple[int, int]] = []
     # Source cell (run 1) FAILs one gate short — role=source must NOT repeat.
     stats_for = {(1, 1): _stats(verdict="FAIL", failed_gates=["G07"], attempts=None)}
     _patch_execution(monkeypatch, recorder, stats_for=stats_for)
-    params_path = _write_rung_params(tmp_path)
+    params = _rung_params_payload()
+    params = {key: params[key] for key in ("orcarouter/qwen3.6-35b-a3b-bench", "orcarouter/qwen3.6-40b-deckard-bench")}
+    params_path = tmp_path / "rung-params.json"
+    params_path.write_text(json.dumps(params), encoding="utf-8")
 
     exit_code = _invoke_main(
         monkeypatch,
@@ -1448,7 +1466,7 @@ def test_fail_sentinel_round_trips_checkpoint_and_summary(tmp_path: pathlib.Path
             verdict="FAIL",
             attempts="FAIL",
             conformed=True,
-            failed_gates=["G07"],
+            failed_gates=["G07", "G08"],
         )
     }
     _patch_execution(monkeypatch, recorder, stats_for=stats_for)
@@ -1493,7 +1511,7 @@ def test_valid_resume_skips_completed_and_proceeds(tmp_path: pathlib.Path, monke
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path), "--resume"],
     )
     assert exit_code == 0
-    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1)]
+    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
 
 
 def test_checkpoint_round_trip_accepts_new_and_historical_entry_shapes(
@@ -1531,7 +1549,7 @@ def test_checkpoint_round_trip_accepts_new_and_historical_entry_shapes(
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path), "--resume"],
     )
     assert exit_code == 0
-    assert recorder == [(3, 1), (4, 1), (5, 1)]
+    assert recorder == [(3, 1), (4, 1), (5, 1), (6, 1)]
 
 
 def test_resume_rejects_roster_fingerprint_drift(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
@@ -1645,7 +1663,7 @@ def test_unexpected_post_run_exception_persists_error_entry_with_artifacts(
     run2 = next(
         entry
         for entry in checkpoint["cells"]
-        if int(entry.get("run_number", -1)) == 2 and int(entry.get("rep", -1)) == 1
+        if int(entry.get("run_number", -1)) == 1 and int(entry.get("rep", -1)) == 1
     )
     assert run2["status"] == "error"
     assert run2["scorecard"] == "sc.json"
@@ -1683,9 +1701,9 @@ def test_plan_budget_refusal_stops_before_any_cell(tmp_path: pathlib.Path, monke
             "missing_models": [],
         },
         {
-            "reason": "missing models: tencent/hy3",
+            "reason": "missing models: qwen3.6-27b-fable-bench",
             "version": bl.PRICING_EXPECTED_VERSION,
-            "missing_models": ["tencent/hy3"],
+            "missing_models": ["qwen3.6-27b-fable-bench"],
         },
     ],
 )
@@ -1718,7 +1736,7 @@ def test_pricing_drift_aborts_before_any_paid_cell(
     params_path = _write_rung_params(tmp_path)
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)])
     assert exit_code == 3
-    assert captured_roster_models == ["kimi/kimi-k3", "kimi/kimi-k2.7-code", "tencent/hy3"]
+    assert captured_roster_models == ["qwen3.6-35b-a3b-bench", "qwen3.6-40b-deckard-bench", "qwen3.6-27b-fable-bench"]
 
     escalation = bl._load_json(tmp_path / bl.ESCALATE_NAME)
     assert escalation is not None
@@ -1757,7 +1775,7 @@ def test_run_budget_cap_poll_reports_and_continues_when_db_sum_reaches_cap(
     tmp_path: pathlib.Path,
     monkeypatch: Any,
 ) -> None:
-    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 1)
     params = _rung_params_payload()[str(cell["model"])]
     runs_dir = tmp_path / "runs"
     ladder_runs_dir = tmp_path / "ladder"
@@ -1878,7 +1896,7 @@ def test_run_budget_cap_poll_reports_and_continues_when_db_sum_reaches_cap(
 
 
 def test_budget_threshold_reports_fire_once_across_many_polls(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
-    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 1)
     params = _rung_params_payload()[str(cell["model"])]
     runs_dir = tmp_path / "runs"
     ladder_runs_dir = tmp_path / "ladder"
@@ -1940,7 +1958,7 @@ def test_budget_threshold_reports_fire_once_across_many_polls(tmp_path: pathlib.
 
 
 def test_inner_failed_still_raises_ladder_abort(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
-    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 1)
     params = _rung_params_payload()[str(cell["model"])]
     clone_log = tmp_path / "clone.log"
     clone_log.write_text("", encoding="utf-8")
@@ -1974,7 +1992,7 @@ def test_model_identity_mismatch_watch_aborts_cell(
     tmp_path: pathlib.Path,
     monkeypatch: Any,
 ) -> None:
-    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 1)
     params = _rung_params_payload()[str(cell["model"])]
     runs_dir = tmp_path / "runs"
     ladder_runs_dir = tmp_path / "ladder"
@@ -2037,8 +2055,8 @@ def test_model_identity_mismatch_watch_aborts_cell(
             del session_id
             return [
                 SimpleNamespace(
-                    model="kimi/kimi-k2.7-code",
-                    upstream_model="tencent/hy3",
+                    model="qwen3.6-35b-a3b-bench",
+                    upstream_model="qwen3.6-27b-fable-bench",
                     calls=1,
                 )
             ]
@@ -2089,5 +2107,5 @@ def test_model_identity_mismatch_watch_aborts_cell(
 
     assert excinfo.value.reason == "served_model_mismatch"
     mismatch = excinfo.value.detail["mismatches"][0]
-    assert mismatch["requested_model"] == "kimi/kimi-k2.7-code"
-    assert mismatch["upstream_model"] == "tencent/hy3"
+    assert mismatch["requested_model"] == "qwen3.6-35b-a3b-bench"
+    assert mismatch["upstream_model"] == "qwen3.6-27b-fable-bench"

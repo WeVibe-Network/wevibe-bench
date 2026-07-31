@@ -97,11 +97,11 @@ def test_run_config_env_hooks_default_and_override(monkeypatch: pytest.MonkeyPat
     assert overridden_cfg.mcp_recall_url == "http://127.0.0.1:4550"
 
 
-def test_build_roster_filter_hy3_yields_single_rung() -> None:
+def test_build_roster_filter_local_alias_yields_single_rung() -> None:
     module = _load_run_cumulative_module()
-    roster, _ = module._build_roster(roster_model="hy3")
+    roster, _ = module._build_roster(roster_model="27b-fable")
     assert len(roster) == 1
-    assert "tencent/hy3" in roster[0].model
+    assert "qwen3.6-27b-fable-bench" in roster[0].model
 
 
 def test_build_roster_filter_none_keeps_full_roster() -> None:

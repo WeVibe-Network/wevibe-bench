@@ -336,32 +336,38 @@ class LadderRung:
     recorded_class: str | None = None
 
 
-# Canonical Stage-7 scored-ladder roster (Walter-pinned OrcaRouter migration,
-# 2026-07-24) — the single source of truth for the ordered rungs. Knowledge
-# SOURCE = kimi-k3; MEASURE rungs top→bottom: kimi-k2.7-code (BRACKET) → hy3.
-# GLM-5.2 deselected 2026-07-27 (SMOKE-2 ON-arm essay-mode collapse); glm
-# proxy profile + pricing retained for history.
-# Slugs are OrcaRouter-catalog-verified bare ids. The `orcarouter/` prefix is
-# only the worker→proxy opencode provider selector; host-side proxy profile
-# `upstream="orcarouter"` selects the real upstream.
-# `xiaomi/mimo-v2.5-pro` is dropped (absent from OrcaRouter catalog; no
-# xiaomi/mimo model exists there). OpenRouter-era scored rungs (opus/big-pickle)
-# are removed. OrcaRouter exposes no upstream provider pins; prior FriendliAI /
-# DeepInfra / novita / siliconflow pins are void on this substrate.
+# Scored-ladder roster — the single source of truth for the ordered rungs.
+# CURRENT (2026-07-31, Walter): LOCAL-MODEL PIVOT — three local LM Studio bench
+# aliases (see the amendment comment on the tuple below). SUPERSEDED paid era
+# (retained for history): OrcaRouter migration 2026-07-24, kimi-k3 source /
+# kimi-k2.7-code (BRACKET) / tencent-hy3 measure; GLM-5.2 deselected 2026-07-27;
+# xiaomi/mimo-v2.5-pro dropped (absent from catalog); OpenRouter-era rungs
+# (opus/big-pickle) removed. OrcaRouter exposes no upstream provider pins.
+# Roster amendment (Walter 2026-07-31 — LOCAL-MODEL PIVOT): the scored roster is
+# now the three LOCAL LM Studio bench aliases, all role=measure with (off, on)
+# self-lift arms; capability ordering is EMPIRICAL (established by the OFF
+# baselines), never assumed from size. The paid OrcaRouter roster above is
+# SUPERSEDED history (kimi-k3 source off-only; k2.7-code BRACKET; hy3 measure).
+# Slugs keep the `orcarouter/` prefix purely as the worker→proxy opencode
+# provider selector; the base URL now points at the LOCAL llm proxy :4545 via
+# WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL (env-only pluggability, no mechanism
+# change). LM Studio is strictly serial: one model loaded at a time, swapped
+# via the proxy's /control/load; cells run one at a time.
 BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
     LadderRung(
-        model="orcarouter/kimi/kimi-k3",
-        role="source",
-        memory_modes=("off",),
-    ),
-    LadderRung(
-        model="orcarouter/kimi/kimi-k2.7-code",
+        model="orcarouter/qwen3.6-35b-a3b-bench",
         role="measure",
         memory_modes=("off", "on"),
-        recorded_class="BRACKET",
+        recorded_class=None,
     ),
     LadderRung(
-        model="orcarouter/tencent/hy3",
+        model="orcarouter/qwen3.6-40b-deckard-bench",
+        role="measure",
+        memory_modes=("off", "on"),
+        recorded_class=None,
+    ),
+    LadderRung(
+        model="orcarouter/qwen3.6-27b-fable-bench",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class=None,
