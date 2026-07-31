@@ -194,7 +194,76 @@ and `27-07-26-0941-bench-glm-to-kimi-k3-swap.md`.
   processes.
 - OFF/ON recall reaches the host clone at `host.docker.internal:4550`; NO host keys/corpus enter the container.
 
-## Spend-proxy (:4480) — the ONE paid transport path
+## Local LM Studio pivot (2026-07-31, Walter) — the CURRENT bench transport
+
+The bench runs the three LOCAL models via the local llm proxy `:4545` (source
+`/Users/jerrysmith/Desktop/Local LLM Proxy`, local git). Roster =
+`BACKGAMMON_SCORED_LADDER_ROSTER` (config.py) = the three `*-bench` aliases.
+Paid calls are forbidden; the `:4480` spend-proxy section below is retained as
+history for the paid era only. Binding operating rules live in this repo's
+`AGENTS.md` ("Local-model pivot operating rules") — read them before any run.
+
+**Env block (one scored cell; serial; fresh runs-dir per run):**
+
+```
+export WEVIBE_BENCH_WEVIBE_ROOT=<workspace root>
+set -a; source config/bench.env; set +a
+env WEVIBE_BENCH_LEADER_SEED_HEX=<arm leader seed hex>   # identity == bench file identity, see below
+    WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL=http://host.docker.internal:4545/v1
+    WEVIBE_BENCH_SPEND_PROXY_BASE_URL=http://127.0.0.1:4545/v1
+    WEVIBE_BENCH_EXTRACT_NUM_CTX=120000
+    WEVIBE_BENCH_OFF_CONCURRENCY=1
+    WEVIBE_BENCH_RUN_TIMEOUT_S=14400
+    WEVIBE_BENCH_LEADER_MCP_URL=http://127.0.0.1:4550
+    WEVIBE_BENCH_CONTRIB_MCP_URL=http://127.0.0.1:4451
+  uv run python scripts/run_cumulative.py \
+    --manifest runs/<run-id>/manifest.json --org wevibe-org-N \
+    --roster-model <alias-substring> run --until-review
+```
+
+Boundary flow per session: `run --until-review` → extraction-integrity gate
+(ops log `extraction.integrity-<day>.log`, correlate by job_id/session_fp) →
+smart-leader review (`reconcile-inventory` / `review-material` / decision
+manifest) → `resume --decision <path>` (real leader commit APIs only).
+
+**Model swap (serial bench — host CLI, never a TTL'd load):**
+
+```
+lms unload --all
+lms load <modelKey> --identifier <bench-alias> --context-length 262144 --parallel 1 --gpu max -y
+# then preflight: /api/v0/models loaded_context_length==262144;
+# lms ps --json -> parallel:1 + ttlMs:null; one real completion via :4545.
+```
+
+`/control/load/<alias>` on `:4545` still works for unload-all + full-context
+load, but this SDK version silently drops `maxParallelPredictions` (observed
+n_slots=4, n_ctx_slot=262144, kv_unified — full ctx per slot but a SHARED KV
+budget) and previously applied a 1h TTL that auto-unloaded mid-campaign (void
+cell, "No models loaded" exit-1). Host `lms load` is the scored-run mechanism.
+
+**Local-pivot org bring-up (per arm; chain enforces one-org-per-leader):**
+
+1. Fresh throwaway 32-byte seed (record only its sha256 fp).
+2. Write it into the bench file identity backend:
+   `cd scaffold/wevibe-mcp-clone && WEVIBE_HOME=~/.wevibe/bench WEVIBE_SEED_BACKEND=file WEVIBE_KEYSTORE_PATH=~/.wevibe/bench/keys node --input-type=module -e "const ks=await import('./dist/key-store.js'); await ks.storeIdentitySeed(Buffer.from(process.env.S,'hex'));"` with `S=<seed hex>`.
+   (Read/extract the current seed the same way via `loadIdentitySeed()`.)
+3. Export `WEVIBE_BENCH_LEADER_SEED_HEX=<seed hex>` (python and TS derivations
+   proven identical 2026-07-31 — both yield the same ed25519 pubkey).
+4. Restart the `:4550` clone between cells so it serves the new identity
+   (six-pack env per the clone-start command below).
+5. `scripts/fund_leader.sh` (wallet env already funded; wallet = gas payer).
+6. `WEVIBE_BENCH_ORG_ID=wevibe-org-N WEVIBE_BENCH_ORG_NAME=... WEVIBE_BENCH_ORG_DOMAIN=... uv run python scripts/bootstrap_org_m1.py` → expect BOOTSTRAP_M1_OK (8 steps).
+7. Verify: hub `members` shows the new leader + contributor `ed3234b2…` both
+   `membership_active=t`; `verify_org_checklist` passes.
+
+Org map: org-1=27B (created 2026-07-31, leader db309475), org-2=35B, org-3=40B.
+Org-0: never used for arms (1 standing-dead memory — exclusion+disclosure).
+
+## Spend-proxy (:4480) — RETIRED for bench use (paid era, kept for history)
+
+> **2026-07-31: Walter retired paid models from the bench.** This section
+> describes the paid transport path exactly as it ran; it is no longer the
+> bench path. Do not launch paid cells.
 
 This is the only paid transport path for benchmark cells. The old per-cell
 `:8789` openrouter proxy launch path is retired.
