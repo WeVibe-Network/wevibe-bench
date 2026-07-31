@@ -75,6 +75,12 @@ def _str_or_default(value: Any, *, default: str) -> str:
     return str(value)
 
 
+def _optional_str(value: Any) -> str | None:
+    if value is _MISSING or value is None:
+        return None
+    return str(value)
+
+
 def _str_list(value: Any) -> list[str]:
     if value is _MISSING or not isinstance(value, list):
         return []
@@ -110,6 +116,16 @@ def _problems_after_from_result(result: Any) -> int | None:
     if isinstance(problems_final, list):
         return len(problems_final)
     return _optional_int(problems_final)
+
+
+def _worker_image_fields(result: Any) -> dict[str, Any]:
+    fingerprint = _field(result, "worker_image_fingerprint")
+    if fingerprint is _MISSING or fingerprint is None:
+        return {"worker_image_id": None, "worker_image_created": None}
+    return {
+        "worker_image_id": _optional_str(_field(fingerprint, "image_id")),
+        "worker_image_created": _optional_str(_field(fingerprint, "created")),
+    }
 
 
 def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> ProgressVector:
@@ -177,6 +193,7 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
     )
 
     contention_fields = _contention_fields(result)
+    worker_image_fields = _worker_image_fields(result)
 
     return ProgressVector(
         problems_before=problems_before,
@@ -207,6 +224,7 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         inject_yield=inject_yield,
         serve_success_rate=serve_success_rate,
         consumer_injected_count=None,
+        memory_mode=_str_or_default(_field(result, "memory_mode"), default=""),
         tool_calls=_optional_int(_field(result, "tool_calls")),
         test_invocations=_optional_int(_field(result, "test_invocations")),
         agentic_cycles=_optional_int(_field(result, "agentic_cycles")),
@@ -214,6 +232,7 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         failed_gates=_str_list(_field(result, "failed_gates")),
         missing_telemetry_seams=list(MISSING_TELEMETRY_SEAMS),
         **contention_fields,
+        **worker_image_fields,
     )
 
 

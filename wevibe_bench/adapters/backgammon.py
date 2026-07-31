@@ -39,9 +39,10 @@ from wevibe_bench.contention import ContentionCovariates
 from .docker_worker import (
     DockerCell,
     DockerCellConfig,
+    ImageFingerprint,
     WORKER_IMAGE,
     docker_available,
-    image_exists,
+    worker_image_fingerprint,
 )
 from wevibe_bench.backends.base import NeedCard, RecalledMemory
 from wevibe_bench.runner import AgentRunner, TaskOutcome
@@ -449,6 +450,7 @@ class BackgammonCellResult:
     zero_tool_resumes: int = 0
     zero_tool_turn_honest_fails: int = 0
     contention: ContentionCovariates | None = None
+    worker_image_fingerprint: ImageFingerprint | None = None
 
 
 def _default_progress(message: str) -> None:
@@ -745,6 +747,7 @@ class BackgammonRunner(AgentRunner):
         attempt_costs_usd: dict[int, float] = {}
         active_cell: DockerCell | None = None
         cell_context: Any = nullcontext()
+        worker_image_identity: ImageFingerprint | None = None
 
         if self.mock in {"golden", "scaffold"}:
             mock_src = self.task_dir / str(self.mock)
@@ -759,7 +762,8 @@ class BackgammonRunner(AgentRunner):
                     "Docker required for isolated worker; "
                     f"docker preflight failed: {docker_detail}"
                 )
-            if not image_exists():
+            worker_image_identity = worker_image_fingerprint()
+            if worker_image_identity is None:
                 raise RuntimeError(
                     "Docker worker image missing. "
                     "Build it with: docker build -t wevibe-bench-worker:v1 docker/worker"
@@ -791,7 +795,9 @@ class BackgammonRunner(AgentRunner):
 
             self._progress(
                 f"PROGRESS run_label={run_label} step=worker-isolation isolation=docker "
-                f"image={WORKER_IMAGE} memory_mode={self.memory_mode} container={container_name}"
+                f"image={WORKER_IMAGE} image_id={worker_image_identity.image_id} "
+                f"image_created={worker_image_identity.created} memory_mode={self.memory_mode} "
+                f"container={container_name}"
             )
             self._init_worktree_git(worktree=worktree)
             cell_config = self._build_cell_config(
@@ -1362,6 +1368,7 @@ class BackgammonRunner(AgentRunner):
             zero_tool_turns=zero_tool_turns_total,
             zero_tool_resumes=zero_tool_resumes_total,
             zero_tool_turn_honest_fails=zero_tool_turn_honest_fails_total,
+            worker_image_fingerprint=worker_image_identity,
         )
 
     def _run_opencode_with_zero_tool_resumes(

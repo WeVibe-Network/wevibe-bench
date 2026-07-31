@@ -18,6 +18,40 @@ CUMULATIVE_SCHEMA_VERSION = 1
 # Any ProgressVector field left None is still reported honestly via value-driven seam detection.
 MISSING_TELEMETRY_SEAMS: tuple[str, ...] = ()
 
+CONSTRUCTION_DEFERRED_TELEMETRY_SEAMS: frozenset[str] = frozenset(
+    {
+        "consumer_injected_count",
+        "extraction_candidate_count",
+        "accepted_count",
+        "rejected_count",
+        "http_429_count",
+        "http_402_count",
+        "retry_count",
+        "upstream_error_count",
+        "wall_near_timeout",
+    }
+)
+ON_ONLY_TELEMETRY_SEAMS: frozenset[str] = frozenset(
+    {
+        "injected_count",
+        "injected_block_chars",
+        "injected_block_est_tokens",
+        "recall_fired_total",
+        "recall_fired_user_message",
+        "recall_fired_tool_failure",
+        "recall_returned_total",
+        "recall_returned_count_sum",
+        "no_keywords_count",
+        "served_attempted",
+        "served_failed",
+        "served_confirmed",
+        "consumer_injected_count",
+        "extraction_candidate_count",
+        "accepted_count",
+        "rejected_count",
+    }
+)
+
 
 def _enum_value(value: Any) -> str:
     if isinstance(value, enum.Enum):
@@ -81,22 +115,31 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _dict_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(value)
+
+
 def _normalize_missing_telemetry_seams(
     provided: list[str] | None,
     *,
     seam_values: Mapping[str, Any],
+    excluded_seams: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     normalized: list[str] = []
     for seam in provided or []:
         seam_name = str(seam).strip()
-        if seam_name and seam_name not in normalized:
+        if seam_name and seam_name not in excluded_seams and seam_name not in normalized:
             normalized.append(seam_name)
 
     for seam in MISSING_TELEMETRY_SEAMS:
-        if seam not in normalized:
+        if seam not in excluded_seams and seam not in normalized:
             normalized.append(seam)
 
     for seam_name, seam_value in seam_values.items():
+        if seam_name in excluded_seams:
+            continue
         if seam_value is None and seam_name not in normalized:
             normalized.append(seam_name)
 
@@ -108,6 +151,7 @@ class SessionPhase(str, enum.Enum):
     RUN_SESSION = "RUN_SESSION"
     EXTRACT_NORMAL_PIPELINE = "EXTRACT_NORMAL_PIPELINE"
     AWAIT_COORDINATOR_REVIEW = "AWAIT_COORDINATOR_REVIEW"
+    HALTED_ON_GATE = "HALTED_ON_GATE"
     LEADER_DECISION_APPLY = "LEADER_DECISION_APPLY"
     COMMIT_INDEX_READY = "COMMIT_INDEX_READY"
     NEXT_SESSION = "NEXT_SESSION"
@@ -117,6 +161,18 @@ class SessionPhase(str, enum.Enum):
 class PhaseGroup(str, enum.Enum):
     OFF_BASELINE = "off_baseline"
     ON = "on"
+
+
+class WalkGateName(str, enum.Enum):
+    INJECTION = "injection"
+    WORK = "work"
+    LIFT = "lift"
+
+
+class WalkGateVerdict(str, enum.Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    NOT_EVALUATED = "not-evaluated"
 
 
 PHASE_ORDER: tuple[SessionPhase, ...] = (
@@ -249,6 +305,7 @@ class ProgressVector:
     accepted_count: int | None = None
     rejected_count: int | None = None
     rejected_reasons: list[str] = field(default_factory=list)
+    memory_mode: str = ""
     termination_reason: str = ""
     failed_gates: list[str] = field(default_factory=list)
     tool_calls: int | None = None
@@ -261,9 +318,14 @@ class ProgressVector:
     max_request_ms: int | None = None
     median_request_ms: int | None = None
     wall_near_timeout: bool | None = None
+    worker_image_id: str | None = None
+    worker_image_created: str | None = None
     missing_telemetry_seams: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        excluded_seams = set(CONSTRUCTION_DEFERRED_TELEMETRY_SEAMS)
+        if self.memory_mode.strip().lower() == "off":
+            excluded_seams.update(ON_ONLY_TELEMETRY_SEAMS)
         self.missing_telemetry_seams = _normalize_missing_telemetry_seams(
             self.missing_telemetry_seams,
             seam_values={
@@ -297,9 +359,15 @@ class ProgressVector:
                 "upstream_error_count": self.upstream_error_count,
                 "wall_near_timeout": self.wall_near_timeout,
             },
+            excluded_seams=excluded_seams,
         )
 
     def to_dict(self) -> dict[str, Any]:
+        excluded_seams = (
+            ON_ONLY_TELEMETRY_SEAMS
+            if self.memory_mode.strip().lower() == "off"
+            else frozenset()
+        )
         missing_telemetry_seams = _normalize_missing_telemetry_seams(
             self.missing_telemetry_seams,
             seam_values={
@@ -333,6 +401,7 @@ class ProgressVector:
                 "upstream_error_count": self.upstream_error_count,
                 "wall_near_timeout": self.wall_near_timeout,
             },
+            excluded_seams=excluded_seams,
         )
         return {
             "problems_before": self.problems_before,
@@ -368,6 +437,7 @@ class ProgressVector:
             "accepted_count": self.accepted_count,
             "rejected_count": self.rejected_count,
             "rejected_reasons": list(self.rejected_reasons),
+            "memory_mode": self.memory_mode,
             "termination_reason": self.termination_reason,
             "failed_gates": list(self.failed_gates),
             "tool_calls": self.tool_calls,
@@ -380,6 +450,8 @@ class ProgressVector:
             "max_request_ms": self.max_request_ms,
             "median_request_ms": self.median_request_ms,
             "wall_near_timeout": self.wall_near_timeout,
+            "worker_image_id": self.worker_image_id,
+            "worker_image_created": self.worker_image_created,
             "missing_telemetry_seams": missing_telemetry_seams,
         }
 
@@ -418,6 +490,7 @@ class ProgressVector:
             accepted_count=_optional_int(d.get("accepted_count")),
             rejected_count=_optional_int(d.get("rejected_count")),
             rejected_reasons=_string_list(d.get("rejected_reasons")),
+            memory_mode=str(d.get("memory_mode", "")),
             termination_reason=str(d.get("termination_reason", "")),
             failed_gates=_string_list(d.get("failed_gates")),
             tool_calls=_optional_int(d.get("tool_calls")),
@@ -430,6 +503,8 @@ class ProgressVector:
             max_request_ms=_optional_int(d.get("max_request_ms")),
             median_request_ms=_optional_int(d.get("median_request_ms")),
             wall_near_timeout=_optional_bool(d.get("wall_near_timeout")),
+            worker_image_id=_optional_string(d.get("worker_image_id")),
+            worker_image_created=_optional_string(d.get("worker_image_created")),
             missing_telemetry_seams=_string_list(d.get("missing_telemetry_seams")),
         )
 
@@ -567,6 +642,135 @@ class ConsumerGateRecord:
         )
 
 
+@dataclass(frozen=True)
+class WalkGateVerdictRecord:
+    """Auditable verdict for one ordered cumulative-walk gate.
+
+    Verdict ``not-evaluated`` is a first-class state: it means prerequisite gate
+    order stopped evaluation before this gate ran, not that this gate failed.
+    """
+
+    ordinal: int
+    gate: str
+    verdict: str
+    evidence: dict[str, Any] = field(default_factory=dict)
+    stops_walk: bool = False
+    expected_producer_model_ids: tuple[str, ...] = ()
+    observed_producer_model_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        normalized_verdict = _enum_value(self.verdict)
+        if normalized_verdict == WalkGateVerdict.FAIL.value and not self.stops_walk:
+            object.__setattr__(self, "stops_walk", True)
+        if normalized_verdict == WalkGateVerdict.NOT_EVALUATED.value and self.stops_walk:
+            object.__setattr__(self, "stops_walk", False)
+        object.__setattr__(self, "gate", _enum_value(self.gate))
+        object.__setattr__(self, "verdict", normalized_verdict)
+        object.__setattr__(self, "evidence", dict(self.evidence))
+        object.__setattr__(
+            self,
+            "expected_producer_model_ids",
+            _string_tuple(self.expected_producer_model_ids),
+        )
+        object.__setattr__(
+            self,
+            "observed_producer_model_ids",
+            _string_tuple(self.observed_producer_model_ids),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ordinal": self.ordinal,
+            "gate": self.gate,
+            "verdict": self.verdict,
+            "evidence": dict(self.evidence),
+            "stops_walk": self.stops_walk,
+            "expected_producer_model_ids": list(self.expected_producer_model_ids),
+            "observed_producer_model_ids": list(self.observed_producer_model_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> WalkGateVerdictRecord:
+        return cls(
+            ordinal=int(d["ordinal"]),
+            gate=_enum_value(d["gate"]),
+            verdict=_enum_value(d["verdict"]),
+            evidence=_dict_mapping(d.get("evidence")),
+            stops_walk=bool(d.get("stops_walk", False)),
+            expected_producer_model_ids=_string_tuple(
+                d.get("expected_producer_model_ids")
+            ),
+            observed_producer_model_ids=_string_tuple(
+                d.get("observed_producer_model_ids")
+            ),
+        )
+
+    @classmethod
+    def records_for_ordered_gates(
+        cls,
+        *,
+        injection: WalkGateVerdictRecord,
+        work: WalkGateVerdictRecord | None = None,
+        lift: WalkGateVerdictRecord | None = None,
+    ) -> tuple[WalkGateVerdictRecord, WalkGateVerdictRecord, WalkGateVerdictRecord]:
+        """Apply injection→work→lift evaluation order as explicit records."""
+
+        normalized_injection = cls.from_dict(
+            {**injection.to_dict(), "ordinal": 1, "gate": WalkGateName.INJECTION.value}
+        )
+        if normalized_injection.verdict != WalkGateVerdict.PASS.value:
+            return (
+                normalized_injection,
+                cls.not_evaluated(ordinal=2, gate=WalkGateName.WORK),
+                cls.not_evaluated(ordinal=3, gate=WalkGateName.LIFT),
+            )
+
+        normalized_work = cls.from_dict(
+            {
+                **(work.to_dict() if work is not None else {}),
+                "ordinal": 2,
+                "gate": WalkGateName.WORK.value,
+                "verdict": (
+                    work.verdict if work is not None else WalkGateVerdict.NOT_EVALUATED.value
+                ),
+            }
+        )
+        if normalized_work.verdict != WalkGateVerdict.PASS.value:
+            return (
+                normalized_injection,
+                normalized_work,
+                cls.not_evaluated(ordinal=3, gate=WalkGateName.LIFT),
+            )
+
+        normalized_lift = cls.from_dict(
+            {
+                **(lift.to_dict() if lift is not None else {}),
+                "ordinal": 3,
+                "gate": WalkGateName.LIFT.value,
+                "verdict": (
+                    lift.verdict if lift is not None else WalkGateVerdict.NOT_EVALUATED.value
+                ),
+            }
+        )
+        return (normalized_injection, normalized_work, normalized_lift)
+
+    @classmethod
+    def not_evaluated(
+        cls,
+        *,
+        ordinal: int,
+        gate: WalkGateName | str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> WalkGateVerdictRecord:
+        return cls(
+            ordinal=ordinal,
+            gate=_enum_value(gate),
+            verdict=WalkGateVerdict.NOT_EVALUATED.value,
+            evidence=dict(evidence) if isinstance(evidence, Mapping) else {},
+            stops_walk=False,
+        )
+
+
 @dataclass
 class SessionRecord:
     sequence_index: int
@@ -585,6 +789,7 @@ class SessionRecord:
     extraction_candidate_count: int | None = None
     progress: dict[str, Any] | None = None
     consumer_gate: ConsumerGateRecord | None = None
+    walk_gates: list[WalkGateVerdictRecord] = field(default_factory=list)
     decision_applied: bool = False
     committed_ids: list[str] = field(default_factory=list)
     corpus_delta: int | None = None
@@ -612,6 +817,7 @@ class SessionRecord:
             "extraction_candidate_count": self.extraction_candidate_count,
             "progress": dict(self.progress) if isinstance(self.progress, Mapping) else self.progress,
             "consumer_gate": self.consumer_gate.to_dict() if self.consumer_gate else None,
+            "walk_gates": [gate.to_dict() for gate in self.walk_gates],
             "decision_applied": self.decision_applied,
             "committed_ids": list(self.committed_ids),
             "corpus_delta": self.corpus_delta,
@@ -632,6 +838,11 @@ class SessionRecord:
             if isinstance(consumer_gate_value, Mapping)
             else None
         )
+        walk_gates = [
+            WalkGateVerdictRecord.from_dict(gate)
+            for gate in d.get("walk_gates", [])
+            if isinstance(gate, Mapping)
+        ]
         return cls(
             sequence_index=int(d["sequence_index"]),
             model=str(d["model"]),
@@ -649,6 +860,7 @@ class SessionRecord:
             extraction_candidate_count=_optional_int(d.get("extraction_candidate_count")),
             progress=progress_dict,
             consumer_gate=consumer_gate,
+            walk_gates=walk_gates,
             decision_applied=bool(d.get("decision_applied", False)),
             committed_ids=_string_list(d.get("committed_ids")),
             corpus_delta=_optional_int(d.get("corpus_delta")),
@@ -673,11 +885,14 @@ __all__ = [
     "MISSING_TELEMETRY_SEAMS",
     "SessionPhase",
     "PhaseGroup",
+    "WalkGateName",
+    "WalkGateVerdict",
     "PHASE_ORDER",
     "next_phase",
     "RosterEntry",
     "ScheduledSession",
     "ProgressVector",
     "ConsumerGateRecord",
+    "WalkGateVerdictRecord",
     "SessionRecord",
 ]

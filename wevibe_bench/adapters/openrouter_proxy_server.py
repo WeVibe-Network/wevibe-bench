@@ -1060,7 +1060,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profile",
         required=True,
-        choices=("glm", "mimo", "mimo25", "hy3", "kimicode", "kimik3", "ring", "opus", "bigpickle"),
+        choices=("glm", "mimo", "mimo25", "hy3", "kimicode", "kimik3", "minimax", "ring", "opus", "bigpickle"),
     )
     parser.add_argument("--provider-order", default=None)
     parser.add_argument("--provider-quant", default=None)

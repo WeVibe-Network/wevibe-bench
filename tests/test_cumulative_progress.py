@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from wevibe_bench.adapters.backgammon import BackgammonCellResult, BackgammonRunner
+from wevibe_bench.adapters.docker_worker import ImageFingerprint
 from wevibe_bench.cumulative.convergence import (
     CONVERGENCE_SCHEMA_VERSION,
     build_convergence_trend,
@@ -292,6 +293,85 @@ def test_progress_from_cell_result_preserves_none_for_nullable_fields() -> None:
     assert "resolved_count" in progress.missing_telemetry_seams
 
 
+def test_progress_vector_construction_does_not_report_late_populated_seams() -> None:
+    progress = ProgressVector(
+        problems_before=3,
+        problems_after=1,
+        resolved_count=2,
+        remaining_count=1,
+        attempts_to_green=1,
+        injected_count=2,
+        injected_block_chars=120,
+        injected_block_est_tokens=30,
+        recall_fired_total=2,
+        recall_fired_user_message=1,
+        recall_fired_tool_failure=1,
+        recall_returned_total=2,
+        recall_returned_count_sum=2,
+        no_keywords_count=0,
+        served_attempted=2,
+        served_failed=0,
+        served_confirmed=2,
+        tool_calls=4,
+        test_invocations=1,
+        agentic_cycles=1,
+        memory_mode="on",
+    )
+
+    assert "consumer_injected_count" not in progress.missing_telemetry_seams
+    assert "extraction_candidate_count" not in progress.missing_telemetry_seams
+    assert "accepted_count" not in progress.missing_telemetry_seams
+    assert "http_429_count" not in progress.missing_telemetry_seams
+
+
+def test_progress_vector_to_dict_reports_unresolved_late_on_seams() -> None:
+    progress = ProgressVector(
+        problems_before=1,
+        problems_after=0,
+        resolved_count=1,
+        remaining_count=0,
+        attempts_to_green=1,
+        injected_count=1,
+        injected_block_chars=80,
+        injected_block_est_tokens=20,
+        recall_fired_total=1,
+        recall_fired_user_message=1,
+        recall_fired_tool_failure=0,
+        recall_returned_total=1,
+        recall_returned_count_sum=1,
+        no_keywords_count=0,
+        served_attempted=1,
+        served_failed=0,
+        served_confirmed=1,
+        tool_calls=2,
+        test_invocations=1,
+        agentic_cycles=1,
+        memory_mode="on",
+    )
+
+    seams = progress.to_dict()["missing_telemetry_seams"]
+
+    assert "consumer_injected_count" in seams
+    assert "accepted_count" in seams
+    assert "extraction_candidate_count" in seams
+
+
+def test_progress_vector_still_reports_genuinely_absent_immediate_seam() -> None:
+    progress = ProgressVector(problems_before=None, tool_calls=1, agentic_cycles=1, memory_mode="on")
+
+    assert "problems_before" in progress.missing_telemetry_seams
+    assert "tool_calls" not in progress.missing_telemetry_seams
+
+
+def test_progress_vector_off_phase_does_not_report_on_only_seams() -> None:
+    progress = ProgressVector(memory_mode="off")
+    seams = progress.to_dict()["missing_telemetry_seams"]
+
+    assert "injected_count" not in seams
+    assert "consumer_injected_count" not in seams
+    assert "accepted_count" not in seams
+
+
 def test_progress_from_cell_result_maps_injected_block_fields_when_present() -> None:
     result = BackgammonCellResult(
         verdict="PASS",
@@ -322,6 +402,36 @@ def test_progress_from_cell_result_maps_injected_block_fields_when_present() -> 
     assert "injected_block_est_tokens" not in progress.missing_telemetry_seams
 
 
+def test_progress_from_cell_result_persists_worker_image_fingerprint() -> None:
+    result = BackgammonCellResult(
+        verdict="PASS",
+        attempts_to_green=0,
+        termination_reason="gates_green",
+        conformed=True,
+        input_tokens=10,
+        output_tokens=20,
+        turns=1,
+        wall_seconds=1.0,
+        delivery="N/A",
+        failed_gates=[],
+        problems_final=[],
+        attempt_reports=[],
+        worktree="/tmp/worktree",
+        session_id="sess-image-fp",
+        memory_mode="off",
+        model="openrouter/anthropic/claude-opus-4.8",
+        worker_image_fingerprint=ImageFingerprint(
+            image_id="sha256:unit-test-image",
+            created="2026-07-31T01:25:11Z",
+        ),
+    )
+
+    payload = progress_from_cell_result(result).to_dict()
+
+    assert payload["worker_image_id"] == "sha256:unit-test-image"
+    assert payload["worker_image_created"] == "2026-07-31T01:25:11Z"
+
+
 def test_progress_from_cell_result_preserves_none_for_injected_block_fields() -> None:
     result = BackgammonCellResult(
         verdict="PASS",
@@ -348,8 +458,8 @@ def test_progress_from_cell_result_preserves_none_for_injected_block_fields() ->
 
     assert progress.injected_block_chars is None
     assert progress.injected_block_est_tokens is None
-    assert "injected_block_chars" in progress.missing_telemetry_seams
-    assert "injected_block_est_tokens" in progress.missing_telemetry_seams
+    assert "injected_block_chars" not in progress.missing_telemetry_seams
+    assert "injected_block_est_tokens" not in progress.missing_telemetry_seams
 
 
 def test_progress_vector_serde_round_trip_with_new_fields() -> None:

@@ -12,6 +12,7 @@ import pytest
 
 import wevibe_bench.adapters.backgammon as backgammon_mod
 from wevibe_bench.adapters.backgammon import BackgammonRunner, _OpencodeRunStats
+from wevibe_bench.adapters.docker_worker import ImageFingerprint
 
 
 TASK_DIR = (Path(__file__).resolve().parents[1] / "tasks" / "backgammon").resolve()
@@ -130,7 +131,14 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     monkeypatch.setattr(backgammon_mod, "DockerCellConfig", _FakeDockerCellConfig)
     monkeypatch.setattr(backgammon_mod, "DockerCell", _FakeDockerCell)
     monkeypatch.setattr(backgammon_mod, "docker_available", lambda: (True, "ok"))
-    monkeypatch.setattr(backgammon_mod, "image_exists", lambda: True)
+    monkeypatch.setattr(
+        backgammon_mod,
+        "worker_image_fingerprint",
+        lambda: ImageFingerprint(
+            image_id="sha256:fake-test-worker",
+            created="2026-07-31T01:25:11Z",
+        ),
+    )
 
     real_run = backgammon_mod.subprocess.run
 

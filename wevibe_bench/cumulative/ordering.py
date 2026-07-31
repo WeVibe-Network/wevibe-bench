@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+from collections.abc import Sequence
 
 from .types import PhaseGroup, RosterEntry, ScheduledSession
 
@@ -49,10 +50,36 @@ def build_on_order(
     roster_hash: str,
     budget: int,
     start_index: int,
+    explicit_order: Sequence[str] | None = None,
 ) -> list[ScheduledSession]:
-    """Build a deterministic seeded ON schedule with possible model repetition."""
+    """Build a deterministic ON schedule with possible model repetition."""
     _require_non_empty_roster(roster)
     _require_non_negative_budget(budget=budget, field_name="budget")
+
+    if explicit_order is not None:
+        roster_indices_by_model = {entry.model: index for index, entry in enumerate(roster)}
+        valid_models = [entry.model for entry in roster]
+        sessions: list[ScheduledSession] = []
+        for slot, model in enumerate(explicit_order):
+            model_name = str(model)
+            if model_name not in roster_indices_by_model:
+                raise ValueError(
+                    f"explicit_order model {model_name!r} is not in roster; "
+                    f"valid roster models: {valid_models}"
+                )
+            roster_index = roster_indices_by_model[model_name]
+            entry = roster[roster_index]
+            sessions.append(
+                ScheduledSession(
+                    sequence_index=start_index + slot,
+                    model=entry.model,
+                    provider_pin=entry.provider_pin,
+                    memory_mode="on",
+                    phase_group=PhaseGroup.ON.value,
+                    roster_index=roster_index,
+                )
+            )
+        return sessions
 
     rng = _seeded_rng(seed=seed, roster_hash=roster_hash)
     sessions: list[ScheduledSession] = []

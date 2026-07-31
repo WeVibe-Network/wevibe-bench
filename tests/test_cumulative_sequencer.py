@@ -10,7 +10,14 @@ from wevibe_bench.cumulative.catalog import PrivateCatalog, PrivateReviewCard
 from wevibe_bench.cumulative.decision import DENY_FINAL, VERIFY
 from wevibe_bench.cumulative.leader_client import LeaderClient
 from wevibe_bench.cumulative.sequencer import CumulativeSequencer
-from wevibe_bench.cumulative.types import RosterEntry, SessionRecord
+from wevibe_bench.cumulative.types import (
+    RosterEntry,
+    SessionPhase,
+    SessionRecord,
+    WalkGateName,
+    WalkGateVerdict,
+    WalkGateVerdictRecord,
+)
 
 
 class FakeRunner:
@@ -19,9 +26,11 @@ class FakeRunner:
         *,
         manifest_path: Path,
         index_ready_plan: list[bool] | None = None,
+        walk_gates_by_sequence: dict[int, list[WalkGateVerdictRecord]] | None = None,
     ) -> None:
         self.manifest_path = manifest_path
         self._index_ready_plan = list(index_ready_plan or [True])
+        self.walk_gates_by_sequence = walk_gates_by_sequence or {}
 
         self.phase_trace: list[str] = []
         self.prepare_calls = 0
@@ -41,6 +50,7 @@ class FakeRunner:
     def run_session(self, session: SessionRecord) -> dict[str, Any]:
         self.phase_trace.append(session.phase)
         self.run_calls += 1
+        session.walk_gates = list(self.walk_gates_by_sequence.get(session.sequence_index, []))
         return {
             "problems_before": 3,
             "problems_final": ["problem-2", "problem-3"],
@@ -169,6 +179,7 @@ def _make_harness(
     *,
     index_ready_plan: list[bool] | None = None,
     on_budget: int = 1,
+    walk_gates_by_sequence: dict[int, list[WalkGateVerdictRecord]] | None = None,
 ) -> Harness:
     manifest_path = tmp_path / "manifest.json"
     catalog = PrivateCatalog(str(tmp_path / "private.catalog.jsonl"))
@@ -189,6 +200,7 @@ def _make_harness(
     runner = FakeRunner(
         manifest_path=manifest_path,
         index_ready_plan=index_ready_plan,
+        walk_gates_by_sequence=walk_gates_by_sequence,
     )
 
     sequencer = CumulativeSequencer(
@@ -272,6 +284,39 @@ def _await_review(harness: Harness) -> dict[str, Any]:
 
 def _session_candidate_refs(session: SessionRecord) -> list[str]:
     return [str(candidate["submission_hash"]) for candidate in session.candidate_refs]
+
+
+def _verify_first_candidate_and_advance(harness: Harness, tmp_path: Path) -> dict[str, Any]:
+    session = harness.sequencer.current_session()
+    assert session is not None
+    first_ref = _session_candidate_refs(session)[0]
+    decision_path = _write_decision(
+        tmp_path / f"decision-session-{session.sequence_index}.json",
+        _decision_payload(
+            session,
+            candidate_verdicts=[(first_ref, VERIFY, "valuable memory")],
+        ),
+    )
+    return harness.sequencer.resume_with_decision(decision_path)
+
+
+def _failing_walk_gate(*, ordinal: int = 2) -> WalkGateVerdictRecord:
+    return WalkGateVerdictRecord(
+        ordinal=ordinal,
+        gate=WalkGateName.WORK.value,
+        verdict=WalkGateVerdict.FAIL.value,
+        evidence={"full_green": False},
+        expected_producer_model_ids=("openrouter/model-a", "openrouter/model-b"),
+        observed_producer_model_ids=("openrouter/model-a",),
+    )
+
+
+def _not_evaluated_walk_gate(*, ordinal: int = 3) -> WalkGateVerdictRecord:
+    return WalkGateVerdictRecord.not_evaluated(
+        ordinal=ordinal,
+        gate=WalkGateName.LIFT,
+        evidence={"reason": "earlier gate failed"},
+    )
 
 
 def test_step_until_review_phase_walk_stops_before_leader_calls(tmp_path: Path) -> None:
@@ -465,3 +510,160 @@ def test_manifest_contract_gate_requires_correlatable_integrity_attestation(
 
     assert harness.m2proof.verify_calls == []
     assert harness.hub_client.deny_calls == []
+
+
+def test_mid_walk_gate_failure_returns_halted_descriptor_and_stops_later_ordinals(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(
+        tmp_path,
+        on_budget=4,
+        walk_gates_by_sequence={2: [_failing_walk_gate(), _not_evaluated_walk_gate()]},
+    )
+
+    assert _await_review(harness)["sequence_index"] == 0
+    _verify_first_candidate_and_advance(harness, tmp_path)
+    assert _await_review(harness)["sequence_index"] == 1
+    _verify_first_candidate_and_advance(harness, tmp_path)
+
+    halted = harness.sequencer.step_until_review()
+
+    assert halted["status"] == "halted_on_gate"
+    assert halted["phase"] == SessionPhase.HALTED_ON_GATE.value
+    assert halted["sequence_index"] == 2
+    manifest = json.loads(harness.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["current_index"] == 2
+    assert manifest["session_records"][2]["phase"] == SessionPhase.HALTED_ON_GATE.value
+    assert manifest["session_records"][3]["phase"] == SessionPhase.PREPARE_FIXTURE.value
+    assert manifest["session_records"][4]["phase"] == SessionPhase.PREPARE_FIXTURE.value
+    assert harness.runner.extract_sequence_indexes == [0, 1]
+
+
+def test_resume_after_gate_halt_restarts_halted_ordinal_not_zero(tmp_path: Path) -> None:
+    gates_by_sequence = {2: [_failing_walk_gate()]}
+    harness = _make_harness(
+        tmp_path,
+        on_budget=4,
+        walk_gates_by_sequence=gates_by_sequence,
+    )
+    assert _await_review(harness)["sequence_index"] == 0
+    _verify_first_candidate_and_advance(harness, tmp_path)
+    assert _await_review(harness)["sequence_index"] == 1
+    _verify_first_candidate_and_advance(harness, tmp_path)
+    assert harness.sequencer.step_until_review()["status"] == "halted_on_gate"
+
+    gates_by_sequence[2] = []
+    resumed = harness.sequencer.resume_after_gate_halt()
+
+    assert resumed["status"] == "awaiting_coordinator_review"
+    assert resumed["sequence_index"] == 2
+    assert harness.runner.extract_sequence_indexes == [0, 1, 2]
+    assert harness.runner.run_calls == 4
+    manifest = json.loads(harness.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["current_index"] == 2
+    assert manifest["session_records"][0]["phase"] == SessionPhase.NEXT_SESSION.value
+    assert manifest["session_records"][1]["phase"] == SessionPhase.NEXT_SESSION.value
+
+
+def test_gate_halt_checkpoint_round_trips_and_preserves_completed_sessions(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(
+        tmp_path,
+        on_budget=3,
+        walk_gates_by_sequence={2: [_failing_walk_gate()]},
+    )
+    assert _await_review(harness)["sequence_index"] == 0
+    _verify_first_candidate_and_advance(harness, tmp_path)
+    assert _await_review(harness)["sequence_index"] == 1
+    _verify_first_candidate_and_advance(harness, tmp_path)
+
+    halted = harness.sequencer.step_until_review()
+    assert halted["status"] == "halted_on_gate"
+
+    resumed_harness = _make_harness(
+        tmp_path,
+        on_budget=3,
+        walk_gates_by_sequence={2: [_failing_walk_gate()]},
+    )
+    resumed_state = resumed_harness.sequencer.state()
+    assert resumed_state["current_index"] == 2
+    assert resumed_state["phase"] == SessionPhase.HALTED_ON_GATE.value
+    manifest = json.loads(harness.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["session_records"][0]["committed_ids"]
+    assert manifest["session_records"][1]["committed_ids"]
+
+
+def test_not_evaluated_walk_gates_do_not_trigger_halt(tmp_path: Path) -> None:
+    harness = _make_harness(
+        tmp_path,
+        on_budget=2,
+        walk_gates_by_sequence={
+            1: [
+                WalkGateVerdictRecord(
+                    ordinal=1,
+                    gate=WalkGateName.INJECTION.value,
+                    verdict=WalkGateVerdict.PASS.value,
+                ),
+                _not_evaluated_walk_gate(ordinal=2),
+            ]
+        },
+    )
+
+    assert _await_review(harness)["sequence_index"] == 0
+    _verify_first_candidate_and_advance(harness, tmp_path)
+    paused = harness.sequencer.step_until_review()
+
+    assert paused["status"] == "awaiting_coordinator_review"
+    assert paused["sequence_index"] == 1
+
+
+def test_halted_terminal_state_is_distinct_from_done_and_capability_fail(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(
+        tmp_path,
+        on_budget=2,
+        walk_gates_by_sequence={1: [_failing_walk_gate()]},
+    )
+    assert _await_review(harness)["sequence_index"] == 0
+    _verify_first_candidate_and_advance(harness, tmp_path)
+
+    halted = harness.sequencer.step_until_review()
+    state = harness.sequencer.state()
+    manifest = json.loads(harness.manifest_path.read_text(encoding="utf-8"))
+    progress = manifest["session_records"][1]["progress"]
+
+    assert halted["status"] == "halted_on_gate"
+    assert state["phase"] == SessionPhase.HALTED_ON_GATE.value
+    assert state["phase"] != SessionPhase.DONE.value
+    assert manifest["session_records"][1]["error"] is None
+    assert progress["termination_reason"] == "attempt_ceiling_reached"
+
+
+def test_halt_descriptor_and_record_include_gate_model_and_producer_ids(
+    tmp_path: Path,
+) -> None:
+    gate = _failing_walk_gate(ordinal=1)
+    harness = _make_harness(
+        tmp_path,
+        on_budget=1,
+        walk_gates_by_sequence={1: [gate]},
+    )
+    assert _await_review(harness)["sequence_index"] == 0
+    _verify_first_candidate_and_advance(harness, tmp_path)
+
+    halted = harness.sequencer.step_until_review()
+    manifest = json.loads(harness.manifest_path.read_text(encoding="utf-8"))
+    record_gate = manifest["session_records"][1]["walk_gates"][0]
+
+    assert halted["gate"] == WalkGateName.WORK.value
+    assert halted["ordinal"] == 1
+    assert halted["model"] == manifest["session_records"][1]["model"]
+    assert halted["expected_producer_model_ids"] == [
+        "openrouter/model-a",
+        "openrouter/model-b",
+    ]
+    assert halted["observed_producer_model_ids"] == ["openrouter/model-a"]
+    assert record_gate["stops_walk"] is True
+    assert record_gate["expected_producer_model_ids"] == halted["expected_producer_model_ids"]

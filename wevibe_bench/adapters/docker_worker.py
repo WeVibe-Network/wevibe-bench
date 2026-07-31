@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -15,6 +16,19 @@ from wevibe_bench.config import RunConfig
 
 WORKER_IMAGE = "wevibe-bench-worker:v1"
 WORKER_NETWORK = "wevibe-bench-net"
+
+_LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ImageFingerprint:
+    """Auditable identity of the Docker worker image used by a run."""
+
+    image_id: str
+    created: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"image_id": self.image_id, "created": self.created}
 
 
 def _default_primary_recall_mode() -> str:
@@ -62,18 +76,53 @@ def docker_available() -> tuple[bool, str]:
     return True, version
 
 
-def image_exists(tag: str = WORKER_IMAGE) -> bool:
-    """Return true when the requested worker image tag exists locally."""
+def worker_image_fingerprint(tag: str = WORKER_IMAGE) -> ImageFingerprint | None:
+    """Return the local worker image identity, or None with an explicit log reason."""
+
+    cmd = ["docker", "image", "inspect", tag, "--format", "{{.Id}}\n{{.Created}}"]
     try:
         completed = subprocess.run(
-            ["docker", "image", "inspect", tag],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            cmd,
+            capture_output=True,
+            text=True,
             check=False,
         )
-    except Exception:  # noqa: BLE001 - boolean probe API must not raise.
-        return False
-    return completed.returncode == 0
+    except FileNotFoundError:
+        _LOG.error("docker_worker.image_fingerprint_failed tag=%s err=docker CLI not found in PATH", tag)
+        return None
+    except Exception as exc:  # noqa: BLE001 - provenance probe must not raise.
+        _LOG.error("docker_worker.image_fingerprint_failed tag=%s err=%s", tag, exc)
+        return None
+
+    if completed.returncode != 0:
+        detail = _result_detail(completed) or f"exit={completed.returncode}"
+        _LOG.warning("docker_worker.image_fingerprint_absent tag=%s detail=%s", tag, detail)
+        return None
+
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        _LOG.error(
+            "docker_worker.image_fingerprint_invalid tag=%s stdout_lines=%s stderr=%s",
+            tag,
+            len(lines),
+            (completed.stderr or "").strip(),
+        )
+        return None
+
+    fingerprint = ImageFingerprint(image_id=lines[0], created=lines[1])
+    _LOG.info(
+        "docker_worker.image_fingerprint tag=%s image_id=%s created=%s",
+        tag,
+        fingerprint.image_id,
+        fingerprint.created,
+    )
+    return fingerprint
+
+
+def image_exists(tag: str = WORKER_IMAGE) -> bool:
+    """Return true when the requested worker image tag exists locally."""
+
+    return worker_image_fingerprint(tag) is not None
 
 
 def ensure_network(name: str = WORKER_NETWORK) -> None:

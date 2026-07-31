@@ -91,6 +91,7 @@ BINDING_BUDGET_METER = "proxy_budget_ledger.hard_cap_usd"
 PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
 PRICING_EXPECTED_VERSION = "c58e194db3f6a20e7d41b8c9e2f05a17"
 BUDGET_POLL_INTERVAL_S = 2.0
+BUDGET_REPORT_THRESHOLDS_USD = (10.0, 20.0, 40.0)
 
 REQUIRED_RUNG_PARAM_FIELDS = (
     "profile",
@@ -1679,22 +1680,6 @@ def _run_inner_tee(
                 poll = budget_watch()
                 if poll is not None:
                     budget_abort = dict(poll)
-                    try:
-                        proc.terminate()
-                    except ProcessLookupError:
-                        pass
-                    except OSError:
-                        pass
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            proc.kill()
-                        except ProcessLookupError:
-                            pass
-                        except OSError:
-                            pass
-                    return
                 if stop_budget_watch.wait(interval_s):
                     return
 
@@ -1831,6 +1816,31 @@ def _run_cell_rep(
         cell_log = runs_dir / f"{stamp}-{run_label}-cell.log"
         progress("cell-start", f"cell_log={cell_log}")
         started = time.perf_counter()
+        budget_reports: dict[str, Any] = {"cap_reached": None, "thresholds": []}
+        reported_budget_thresholds: set[float] = set()
+
+        def _record_budget_threshold(poll: dict[str, Any]) -> None:
+            true_usd = float(poll["true_usd"])
+            for threshold_usd in BUDGET_REPORT_THRESHOLDS_USD:
+                if true_usd < threshold_usd or threshold_usd in reported_budget_thresholds:
+                    continue
+                reported_budget_thresholds.add(threshold_usd)
+                report = {
+                    "threshold_usd": threshold_usd,
+                    "run_id": str(poll["run_id"]),
+                    "true_usd": true_usd,
+                    "cap_usd": float(poll["cap_usd"]),
+                    "remaining_usd": float(poll["remaining_usd"]),
+                    "reported_at": _utc_iso(),
+                }
+                budget_reports["thresholds"].append(report)
+                progress(
+                    "budget-threshold-report",
+                    f"run_id={report['run_id']} threshold_usd={threshold_usd:.2f} "
+                    f"true_usd={true_usd:.6f} cap_usd={report['cap_usd']:.6f} "
+                    f"remaining_usd={report['remaining_usd']:.6f} decision=continue",
+                )
+
         def _poll_budget_cap() -> dict[str, Any] | None:
             run_spend = spend_meter.run_spend(run_id)
             true_usd = float(run_spend.true_usd)
@@ -1841,12 +1851,29 @@ def _run_cell_rep(
                 f"run_id={run_id} true_usd={true_usd:.6f} cap_usd={cap_usd:.6f} remaining_usd={remaining_usd:.6f}",
             )
             if true_usd >= cap_usd:
-                return {
+                poll = {
                     "run_id": run_id,
                     "true_usd": true_usd,
                     "cap_usd": cap_usd,
                     "remaining_usd": remaining_usd,
                 }
+                if budget_reports["cap_reached"] is None:
+                    budget_reports["cap_reached"] = {**poll, "reported_at": _utc_iso()}
+                    progress(
+                        "budget-cap-report",
+                        f"run_id={run_id} true_usd={true_usd:.6f} cap_usd={cap_usd:.6f} "
+                        f"remaining_usd={remaining_usd:.6f} decision=continue",
+                    )
+                _record_budget_threshold(poll)
+                return poll
+            _record_budget_threshold(
+                {
+                    "run_id": run_id,
+                    "true_usd": true_usd,
+                    "cap_usd": cap_usd,
+                    "remaining_usd": remaining_usd,
+                }
+            )
             return None
 
         inner_rc, budget_abort = _run_inner_tee(
@@ -1859,13 +1886,19 @@ def _run_cell_rep(
         dur_s = time.perf_counter() - started
 
         if budget_abort is not None:
-            raise LadderAbort(
-                "run_budget_cap_reached",
-                {
-                    "run_id": run_id,
-                    "cell_log": str(cell_log),
-                    **budget_abort,
-                },
+            budget_reports["cap_reached"] = {
+                "run_id": run_id,
+                "cell_log": str(cell_log),
+                **budget_abort,
+                "reported_at": budget_reports["cap_reached"].get("reported_at")
+                if isinstance(budget_reports.get("cap_reached"), dict)
+                else _utc_iso(),
+            }
+            progress(
+                "budget-cap-final-report",
+                f"run_id={run_id} true_usd={float(budget_abort['true_usd']):.6f} "
+                f"cap_usd={float(budget_abort['cap_usd']):.6f} "
+                f"remaining_usd={float(budget_abort['remaining_usd']):.6f} decision=continue",
             )
 
         if inner_rc != 0:
@@ -1949,6 +1982,8 @@ def _run_cell_rep(
             "last_call_at": spend.last_call_at,
             "committed_unproven_usd": float(binding_cap_usd),
         }
+        if budget_abort is not None or budget_reports["thresholds"]:
+            spend_payload["budget_threshold_report"] = budget_reports
 
         mismatches = spend_meter.model_identity_mismatches(run_id)
         mismatch_rows = [
@@ -2019,6 +2054,7 @@ def _run_cell_rep(
             "stats": stats,
             "anomalies": anomalies,
             "assertions": assertions,
+            "budget_threshold_report": budget_reports if budget_abort is not None or budget_reports["thresholds"] else None,
             "completed_at": _utc_iso(),
             "trace": trace,
         }

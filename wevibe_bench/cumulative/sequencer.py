@@ -21,7 +21,15 @@ from .leader_client import ApplyResult, LeaderClient
 from .manifest import atomic_write, resume_or_create, roster_hash
 from .ordering import build_schedule
 from .progress import progress_from_cell_result
-from .types import ConsumerGateRecord, PhaseGroup, RosterEntry, SessionPhase, SessionRecord
+from .types import (
+    ConsumerGateRecord,
+    PhaseGroup,
+    RosterEntry,
+    SessionPhase,
+    SessionRecord,
+    WalkGateVerdict,
+    WalkGateVerdictRecord,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -49,7 +57,20 @@ class DoneState(TypedDict):
     convergence: dict[str, Any]
 
 
-StepUntilReviewResult = AwaitingCoordinatorReview | DoneState
+class HaltedOnGate(TypedDict):
+    status: Literal["halted_on_gate"]
+    phase: Literal["HALTED_ON_GATE"]
+    sequence_index: int
+    ordinal: int
+    model: str
+    gate: str
+    verdict: str
+    evidence: dict[str, Any]
+    expected_producer_model_ids: list[str]
+    observed_producer_model_ids: list[str]
+
+
+StepUntilReviewResult = AwaitingCoordinatorReview | HaltedOnGate | DoneState
 ResumeWithDecisionResult = SessionCommitted | DoneState
 
 
@@ -211,6 +232,9 @@ class CumulativeSequencer:
             if phase == SessionPhase.AWAIT_COORDINATOR_REVIEW:
                 return self._paused_descriptor(session)
 
+            if phase == SessionPhase.HALTED_ON_GATE:
+                return self._halted_descriptor(session)
+
             if phase == SessionPhase.PREPARE_FIXTURE:
                 _LOG.info(
                     "cumulative.sequencer.prepare_fixture sequence_index=%d memory_mode=%s",
@@ -235,6 +259,21 @@ class CumulativeSequencer:
                 telemetry = self._runner.run_session(session)
                 session.progress = progress_from_cell_result(telemetry).to_dict()
                 self._record_consumer_gate_outcome(session)
+                halt_gate = self._first_stopping_walk_gate(session)
+                if halt_gate is not None:
+                    session.set_phase(SessionPhase.HALTED_ON_GATE)
+                    self._checkpoint()
+                    halted = self._halted_descriptor(session)
+                    _LOG.info(
+                        "cumulative.sequencer.halted_on_gate sequence_index=%d ordinal=%d model=%s gate=%s expected_producers=%s observed_producers=%s",
+                        session.sequence_index,
+                        halted["ordinal"],
+                        halted["model"],
+                        halted["gate"],
+                        ",".join(halted["expected_producer_model_ids"]),
+                        ",".join(halted["observed_producer_model_ids"]),
+                    )
+                    return halted
                 session.set_phase(SessionPhase.EXTRACT_NORMAL_PIPELINE)
                 self._checkpoint()
                 continue
@@ -418,6 +457,24 @@ class CumulativeSequencer:
 
         raise ValueError(f"unsupported session phase for resume_with_decision: {phase.value!r}")
 
+    def resume_after_gate_halt(self) -> HaltedOnGate | AwaitingCoordinatorReview | DoneState:
+        session = self.current_session()
+        if session is None:
+            return self._done_state()
+
+        phase = self._phase_of(session)
+        if phase != SessionPhase.HALTED_ON_GATE:
+            raise ValueError(
+                "resume_after_gate_halt requires current session phase "
+                f"{SessionPhase.HALTED_ON_GATE.value!r}; got {phase.value!r}"
+            )
+
+        session.walk_gates = []
+        session.resume_marker = f"gate-halt-resume:{self._utc_now_iso()}"
+        session.set_phase(SessionPhase.RUN_SESSION)
+        self._checkpoint()
+        return self.step_until_review()
+
     def _checkpoint(self) -> None:
         self._manifest.updated_at = self._utc_now_iso()
         atomic_write(self._manifest_path, self._manifest)
@@ -448,6 +505,15 @@ class CumulativeSequencer:
             )
             session.progress = progress
 
+    @staticmethod
+    def _first_stopping_walk_gate(
+        session: SessionRecord,
+    ) -> WalkGateVerdictRecord | None:
+        for gate in session.walk_gates:
+            if gate.verdict == WalkGateVerdict.FAIL.value and gate.stops_walk:
+                return gate
+        return None
+
     def _phase_of(self, session: SessionRecord) -> SessionPhase:
         try:
             return SessionPhase(session.phase)
@@ -455,6 +521,26 @@ class CumulativeSequencer:
             raise ValueError(
                 f"session[{session.sequence_index}] has unknown phase {session.phase!r}"
             ) from exc
+
+    def _halted_descriptor(self, session: SessionRecord) -> HaltedOnGate:
+        halt_gate = self._first_stopping_walk_gate(session)
+        if halt_gate is None:
+            raise ValueError(
+                "cannot describe gate halt: no failing walk gate with stops_walk=True"
+            )
+
+        return {
+            "status": "halted_on_gate",
+            "phase": SessionPhase.HALTED_ON_GATE.value,
+            "sequence_index": session.sequence_index,
+            "ordinal": int(halt_gate.ordinal),
+            "model": session.model,
+            "gate": halt_gate.gate,
+            "verdict": halt_gate.verdict,
+            "evidence": dict(halt_gate.evidence),
+            "expected_producer_model_ids": list(halt_gate.expected_producer_model_ids),
+            "observed_producer_model_ids": list(halt_gate.observed_producer_model_ids),
+        }
 
     def _paused_descriptor(self, session: SessionRecord) -> AwaitingCoordinatorReview:
         extraction_job_id = str(session.extraction_job_id or "").strip()

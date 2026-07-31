@@ -134,6 +134,95 @@ def test_build_on_order_and_schedule_reproducibility_and_shape() -> None:
     assert _to_bytes(on_sessions) != _to_bytes(schedule_changed_seed[off_count:])
 
 
+def test_build_on_order_explicit_order_preserves_requested_repetition() -> None:
+    roster = _sample_roster()
+    computed_roster_hash = roster_hash(roster)
+    explicit_order = [
+        "model-alpha",
+        "model-beta",
+        "model-gamma",
+        "model-alpha",
+        "model-beta",
+        "model-gamma",
+    ]
+
+    sessions = build_on_order(
+        roster,
+        seed=424242,
+        roster_hash=computed_roster_hash,
+        budget=999,
+        start_index=7,
+        explicit_order=explicit_order,
+    )
+
+    assert [session.model for session in sessions] == explicit_order
+    assert [session.roster_index for session in sessions] == [0, 1, 2, 0, 1, 2]
+    assert [session.sequence_index for session in sessions] == [7, 8, 9, 10, 11, 12]
+    assert all(session.memory_mode == "on" for session in sessions)
+    assert all(session.phase_group == PhaseGroup.ON.value for session in sessions)
+
+
+def test_build_on_order_without_explicit_order_keeps_seeded_expectation() -> None:
+    roster = _sample_roster()
+
+    sessions = build_on_order(
+        roster,
+        seed=424242,
+        roster_hash=roster_hash(roster),
+        budget=12,
+        start_index=5,
+    )
+
+    assert [session.roster_index for session in sessions] == [
+        2,
+        1,
+        0,
+        0,
+        1,
+        1,
+        2,
+        1,
+        0,
+        0,
+        2,
+        0,
+    ]
+    assert [session.model for session in sessions] == [
+        "model-gamma",
+        "model-beta",
+        "model-alpha",
+        "model-alpha",
+        "model-beta",
+        "model-beta",
+        "model-gamma",
+        "model-beta",
+        "model-alpha",
+        "model-alpha",
+        "model-gamma",
+        "model-alpha",
+    ]
+
+
+def test_build_on_order_explicit_order_rejects_unknown_model() -> None:
+    roster = _sample_roster()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "explicit_order model 'model-missing' is not in roster; valid roster models: "
+            "\\['model-alpha', 'model-beta', 'model-gamma'\\]"
+        ),
+    ):
+        build_on_order(
+            roster,
+            seed=424242,
+            roster_hash=roster_hash(roster),
+            budget=1,
+            start_index=0,
+            explicit_order=["model-alpha", "model-missing"],
+        )
+
+
 def test_ordering_bad_input_raises_value_error() -> None:
     roster = _sample_roster()
     computed_roster_hash = roster_hash(roster)

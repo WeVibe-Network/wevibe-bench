@@ -1726,7 +1726,34 @@ def test_pricing_drift_aborts_before_any_paid_cell(
     assert escalation["detail"]["reason"] == reason_payload["reason"]
 
 
-def test_run_budget_cap_poll_aborts_cell_when_db_sum_reaches_cap(
+def test_budget_watch_loop_reports_without_terminating_child(tmp_path: pathlib.Path) -> None:
+    cell_log = tmp_path / "cell.log"
+    polls = 0
+
+    def _budget_watch() -> dict[str, Any]:
+        nonlocal polls
+        polls += 1
+        return {"run_id": "run-budget", "true_usd": 12.0, "cap_usd": 2.7, "remaining_usd": -9.3}
+
+    rc, budget_report = bl._run_inner_tee(
+        [
+            sys.executable,
+            "-c",
+            "import time; print('PROGRESS start', flush=True); time.sleep(0.25); print('RESULT_JSON done', flush=True)",
+        ],
+        cell_log,
+        budget_watch=_budget_watch,
+        budget_poll_interval_s=0.05,
+    )
+
+    assert rc == 0
+    assert budget_report is not None
+    assert budget_report["run_id"] == "run-budget"
+    assert polls >= 1
+    assert "RESULT_JSON done" in cell_log.read_text(encoding="utf-8")
+
+
+def test_run_budget_cap_poll_reports_and_continues_when_db_sum_reaches_cap(
     tmp_path: pathlib.Path,
     monkeypatch: Any,
 ) -> None:
@@ -1747,17 +1774,67 @@ def test_run_budget_cap_poll_aborts_cell_when_db_sum_reaches_cap(
         org_id="wevibe-org-0",
     )
 
+    scorecard_path = tmp_path / "scorecard.json"
+    detail_path = tmp_path / "detail.json"
+    scorecard_path.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "resolved": True,
+                        "scored": True,
+                        "total_tokens": 10,
+                        "turns": 2,
+                        "wall_seconds": 1,
+                        "wall_cost_usd": 0.1,
+                    }
+                ],
+                "manifest": {"config": {"max_attempts": 3}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    detail_path.write_text(
+        json.dumps({"cells": [{"conformed": True, "attempts_to_green": 1, "failed_gates": []}]}),
+        encoding="utf-8",
+    )
+
     class _FakeSpendMeter:
         def __init__(self, _dsn: str) -> None:
             self._dsn = _dsn
+            self._spends = [2.7, 11.0, 12.0, 21.0, 41.0, 45.0]
 
         def run_spend(self, session_id: str) -> Any:
             del session_id
-            return SimpleNamespace(true_usd=2.7, benchmark_usd=0.0)
+            true_usd = self._spends.pop(0) if self._spends else 45.0
+            return SimpleNamespace(
+                calls=1,
+                true_usd=true_usd,
+                benchmark_usd=true_usd,
+                uncached_input_tokens=10,
+                cached_input_tokens=0,
+                output_tokens=5,
+                reasoning_tokens=0,
+                unmetered_calls=0,
+                last_call_at=None,
+            )
 
         def model_identity_mismatches(self, session_id: str) -> list[Any]:
             del session_id
             return []
+
+    def _fake_newest_artifact(
+        ladder_runs_dir_in: pathlib.Path,
+        run_label: str,
+        suffix: str,
+        not_before: float,
+    ) -> pathlib.Path:
+        del ladder_runs_dir_in, run_label, not_before
+        if suffix == "scorecard.json":
+            return scorecard_path
+        if suffix == "backgammon-detail.json":
+            return detail_path
+        raise AssertionError(f"unexpected suffix {suffix}")
 
     def _fake_run_inner_tee(
         cmd: list[str],
@@ -1770,9 +1847,117 @@ def test_run_budget_cap_poll_aborts_cell_when_db_sum_reaches_cap(
         del cmd, env, budget_poll_interval_s
         assert budget_watch is not None
         cell_log.write_text("PROGRESS inner\n", encoding="utf-8")
-        budget_abort = budget_watch()
-        assert budget_abort is not None
-        return 143, budget_abort
+        budget_reports = [budget_watch() for _ in range(5)]
+        budget_reports = [report for report in budget_reports if report is not None]
+        assert budget_reports
+        return 0, budget_reports[-1]
+
+    monkeypatch.setattr(bl, "SpendMeter", _FakeSpendMeter)
+    monkeypatch.setattr(bl, "_ledger_check", lambda estimated_usd: True)
+    monkeypatch.setattr(bl, "_ledger_record", lambda budget_json: True)
+    monkeypatch.setattr(bl, "_build_inner_cmd", lambda **_kwargs: ["python", "-V"])
+    monkeypatch.setattr(bl, "_run_inner_tee", _fake_run_inner_tee)
+    monkeypatch.setattr(bl, "_newest_artifact", _fake_newest_artifact)
+
+    entry = bl._run_cell_rep(
+        cell=cell,
+        rep=1,
+        params=params,
+        args=args,
+        trace="trace-budget",
+        logfile_path=logfile_path,
+    )
+
+    assert entry["status"] == "ok"
+    budget_report = entry["budget_threshold_report"]
+    assert budget_report["cap_reached"]["cell_log"] == str(pathlib.Path(entry["cell_log"]))
+    assert float(budget_report["cap_reached"]["true_usd"]) >= float(params["cap_usd"])
+    log_text = logfile_path.read_text(encoding="utf-8")
+    assert "phase=budget-cap-report" in log_text
+    assert "phase=budget-cap-final-report" in log_text
+
+
+def test_budget_threshold_reports_fire_once_across_many_polls(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    params = _rung_params_payload()[str(cell["model"])]
+    runs_dir = tmp_path / "runs"
+    ladder_runs_dir = tmp_path / "ladder"
+    clone_log = tmp_path / "clone.log"
+    clone_log.write_text("", encoding="utf-8")
+    logfile_path = tmp_path / "driver.log"
+    scorecard_path = tmp_path / "scorecard.json"
+    detail_path = tmp_path / "detail.json"
+    scorecard_path.write_text(
+        json.dumps({"cells": [{"resolved": True, "scored": True, "total_tokens": 10, "turns": 2, "wall_seconds": 1, "wall_cost_usd": 0.1}], "manifest": {"config": {"max_attempts": 3}}}),
+        encoding="utf-8",
+    )
+    detail_path.write_text(json.dumps({"cells": [{"conformed": True, "attempts_to_green": 1, "failed_gates": []}]}), encoding="utf-8")
+    args = SimpleNamespace(
+        runs_dir=str(runs_dir),
+        ladder_runs_dir=str(ladder_runs_dir),
+        clone_log=str(clone_log),
+        proxy_token="token-redacted",
+        spend_db_dsn="postgresql://spend-proxy",
+        org_id="wevibe-org-0",
+    )
+
+    class _FakeSpendMeter:
+        def __init__(self, _dsn: str) -> None:
+            self._spends = [9.0, 10.0, 12.0, 20.0, 25.0, 40.0, 45.0]
+
+        def run_spend(self, session_id: str) -> Any:
+            del session_id
+            true_usd = self._spends.pop(0) if self._spends else 45.0
+            return SimpleNamespace(calls=1, true_usd=true_usd, benchmark_usd=true_usd, uncached_input_tokens=10, cached_input_tokens=0, output_tokens=5, reasoning_tokens=0, unmetered_calls=0, last_call_at=None)
+
+        def model_identity_mismatches(self, session_id: str) -> list[Any]:
+            del session_id
+            return []
+
+    def _fake_run_inner_tee(cmd: list[str], cell_log: pathlib.Path, *, env: dict[str, str] | None = None, budget_watch: Any | None = None, budget_poll_interval_s: float = bl.BUDGET_POLL_INTERVAL_S) -> tuple[int, dict[str, Any] | None]:
+        del cmd, env, budget_poll_interval_s
+        assert budget_watch is not None
+        cell_log.write_text("PROGRESS inner\n", encoding="utf-8")
+        reports = [budget_watch() for _ in range(7)]
+        reports = [report for report in reports if report is not None]
+        return 0, reports[-1]
+
+    monkeypatch.setattr(bl, "SpendMeter", _FakeSpendMeter)
+    monkeypatch.setattr(bl, "_ledger_check", lambda estimated_usd: True)
+    monkeypatch.setattr(bl, "_ledger_record", lambda budget_json: True)
+    monkeypatch.setattr(bl, "_build_inner_cmd", lambda **_kwargs: ["python", "-V"])
+    monkeypatch.setattr(bl, "_run_inner_tee", _fake_run_inner_tee)
+    monkeypatch.setattr(bl, "_newest_artifact", lambda _dir, _label, suffix, _before: scorecard_path if suffix == "scorecard.json" else detail_path)
+
+    entry = bl._run_cell_rep(cell=cell, rep=1, params=params, args=args, trace="trace-budget-thresholds", logfile_path=logfile_path)
+    thresholds = entry["budget_threshold_report"]["thresholds"]
+    assert [report["threshold_usd"] for report in thresholds] == [10.0, 20.0, 40.0]
+    log_text = logfile_path.read_text(encoding="utf-8")
+    assert log_text.count("phase=budget-threshold-report") == 3
+    assert log_text.count("threshold_usd=10.00") == 1
+    assert log_text.count("threshold_usd=20.00") == 1
+    assert log_text.count("threshold_usd=40.00") == 1
+
+
+def test_inner_failed_still_raises_ladder_abort(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    cell = next(item for item in bl._build_plan() if int(item["run_number"]) == 2)
+    params = _rung_params_payload()[str(cell["model"])]
+    clone_log = tmp_path / "clone.log"
+    clone_log.write_text("", encoding="utf-8")
+    args = SimpleNamespace(runs_dir=str(tmp_path / "runs"), ladder_runs_dir=str(tmp_path / "ladder"), clone_log=str(clone_log), proxy_token="token-redacted", spend_db_dsn="postgresql://spend-proxy", org_id="wevibe-org-0")
+
+    class _FakeSpendMeter:
+        def __init__(self, _dsn: str) -> None:
+            pass
+
+        def run_spend(self, session_id: str) -> Any:
+            del session_id
+            return SimpleNamespace(true_usd=0.0, benchmark_usd=0.0)
+
+    def _fake_run_inner_tee(cmd: list[str], cell_log: pathlib.Path, *, env: dict[str, str] | None = None, budget_watch: Any | None = None, budget_poll_interval_s: float = bl.BUDGET_POLL_INTERVAL_S) -> tuple[int, dict[str, Any] | None]:
+        del cmd, env, budget_watch, budget_poll_interval_s
+        cell_log.write_text("PROGRESS inner failed\n", encoding="utf-8")
+        return 2, None
 
     monkeypatch.setattr(bl, "SpendMeter", _FakeSpendMeter)
     monkeypatch.setattr(bl, "_ledger_check", lambda estimated_usd: True)
@@ -1780,18 +1965,9 @@ def test_run_budget_cap_poll_aborts_cell_when_db_sum_reaches_cap(
     monkeypatch.setattr(bl, "_build_inner_cmd", lambda **_kwargs: ["python", "-V"])
     monkeypatch.setattr(bl, "_run_inner_tee", _fake_run_inner_tee)
 
-    with pytest.raises(bl.LadderAbort, match="run_budget_cap_reached") as excinfo:
-        bl._run_cell_rep(
-            cell=cell,
-            rep=1,
-            params=params,
-            args=args,
-            trace="trace-budget",
-            logfile_path=logfile_path,
-        )
-
-    assert excinfo.value.reason == "run_budget_cap_reached"
-    assert float(excinfo.value.detail["true_usd"]) >= float(params["cap_usd"])
+    with pytest.raises(bl.LadderAbort, match="inner_failed") as excinfo:
+        bl._run_cell_rep(cell=cell, rep=1, params=params, args=args, trace="trace-inner-failed", logfile_path=tmp_path / "driver.log")
+    assert excinfo.value.reason == "inner_failed"
 
 
 def test_model_identity_mismatch_watch_aborts_cell(

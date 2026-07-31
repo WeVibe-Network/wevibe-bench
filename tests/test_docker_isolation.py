@@ -20,6 +20,7 @@ from wevibe_bench.adapters.docker_worker import (
     _build_run_argv,
     docker_available,
     image_exists,
+    worker_image_fingerprint,
 )
 from wevibe_bench.config import RunConfig
 
@@ -66,6 +67,64 @@ def _require_worker_image() -> None:
         "docker worker image missing. Build with: "
         "docker build -t wevibe-bench-worker:v1 docker/worker"
     )
+
+
+def test_worker_image_fingerprint_returns_id_and_created_from_mocked_inspect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="sha256:unit-test-image\n2026-07-31T01:25:11Z\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    fingerprint = worker_image_fingerprint("wevibe-bench-worker:test")
+
+    assert fingerprint is not None
+    assert fingerprint.image_id == "sha256:unit-test-image"
+    assert fingerprint.created == "2026-07-31T01:25:11Z"
+    assert calls == [
+        [
+            "docker",
+            "image",
+            "inspect",
+            "wevibe-bench-worker:test",
+            "--format",
+            "{{.Id}}\n{{.Created}}",
+        ]
+    ]
+
+
+def test_worker_image_fingerprint_absent_returns_none_and_logs_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def _fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr="Error: No such image: wevibe-bench-worker:missing",
+        )
+
+    monkeypatch.setattr("wevibe_bench.adapters.docker_worker.subprocess.run", _fake_run)
+
+    with caplog.at_level("WARNING", logger="wevibe_bench.adapters.docker_worker"):
+        fingerprint = worker_image_fingerprint("wevibe-bench-worker:missing")
+
+    assert fingerprint is None
+    assert "docker_worker.image_fingerprint_absent" in caplog.text
+    assert "No such image" in caplog.text
 
 
 def _unique_container_name(prefix: str = "wevibe-bench-cell") -> str:
