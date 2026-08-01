@@ -748,6 +748,7 @@ class BackgammonRunner(AgentRunner):
         attempts_to_green: int | str = "FAIL"
         termination_reason = "pending"
         _worker_exit_annot: str | None = None
+        first_run: _OpencodeRunStats | None = None
 
         worker_killed_reason: str | None = None
         observed_attempt_costs: list[float] = []
@@ -979,16 +980,17 @@ class BackgammonRunner(AgentRunner):
                 failed_gates_raw = report.get("failed_gates")
                 failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
 
-                attempt_reports.append(
-                    {
-                        "attempt": attempt,
-                        "verdict": attempt_verdict,
-                        "conformed": conformed,
-                        "n_problems": len(problems),
-                        "failed_gates": failed_gates,
-                        "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
-                    }
-                )
+                if _worker_exit_annot != "harness_error":
+                    attempt_reports.append(
+                        {
+                            "attempt": attempt,
+                            "verdict": attempt_verdict,
+                            "conformed": conformed,
+                            "n_problems": len(problems),
+                            "failed_gates": failed_gates,
+                            "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
+                        }
+                    )
                 self._progress(
                     f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
                     f"conformed={conformed} problems={len(problems)}"
@@ -1003,7 +1005,9 @@ class BackgammonRunner(AgentRunner):
                 if attempt >= self.max_attempts:
                     verdict = "FAIL"
                     attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                    if _worker_exit_annot is not None:
+                    if _worker_exit_annot == "harness_error":
+                        termination_reason = "harness_error"
+                    elif _worker_exit_annot is not None:
                         termination_reason = "transport_incomplete"
                     else:
                         termination_reason = "attempt_ceiling_reached"
@@ -1029,7 +1033,9 @@ class BackgammonRunner(AgentRunner):
                         f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} "
                         f"reason={_worker_exit_annot} no_working_session"
                     )
-                    if _worker_exit_annot is not None:
+                    if _worker_exit_annot == "harness_error":
+                        termination_reason = "harness_error"
+                    elif _worker_exit_annot is not None:
                         termination_reason = "transport_incomplete"
                     else:
                         termination_reason = "gates_failed"
