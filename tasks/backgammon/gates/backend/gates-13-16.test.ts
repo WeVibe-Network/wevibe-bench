@@ -11,6 +11,7 @@ import {
   getState,
   loadEngine,
   makeState,
+  resolveEntrypoint,
   startServer,
   stopServer,
 } from "../lib/harness.ts";
@@ -430,7 +431,7 @@ describe("Backgammon backend gates 13-16", () => {
       let stderr = "";
 
       try {
-        p2 = spawn("node", ["src/server.ts"], {
+        p2 = spawn("node", [resolveEntrypoint(TARGET_DIR)], {
           cwd: TARGET_DIR,
           env: { ...process.env, BENCH_DEBUG: "1" },
           stdio: ["ignore", "pipe", "pipe"],
