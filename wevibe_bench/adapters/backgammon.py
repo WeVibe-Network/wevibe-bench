@@ -741,6 +741,7 @@ class BackgammonRunner(AgentRunner):
         verdict = "FAIL"
         attempts_to_green: int | str = "FAIL"
         termination_reason = "pending"
+        _worker_exit_annot: str | None = None
 
         worker_killed_reason: str | None = None
         observed_attempt_costs: list[float] = []
@@ -913,96 +914,106 @@ class BackgammonRunner(AgentRunner):
                         verdict = "FAIL"
                         attempts_to_green = "FAIL"
                         termination_reason = "harness_error"
+                        _worker_exit_annot = "harness_error"
             else:
                 attempt_costs_usd[1] = 0.0
 
-            if termination_reason == "pending":
-                for attempt in range(1, self.max_attempts + 1):
-                    report_json = run_dir / f"attempt-{attempt}-report.json"
-                    gate_log = run_dir / f"attempt-{attempt}-gate.log"
+            # D-GATE-COUPLE: gates run regardless of termination_reason.
+            # harness_error is an ANNOTATION on the cell, not a skip.
+            _can_feedback = _worker_exit_annot is None
+            for attempt in range(1, self.max_attempts + 1):
+                report_json = run_dir / f"attempt-{attempt}-report.json"
+                gate_log = run_dir / f"attempt-{attempt}-gate.log"
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
+                )
+                report = self._run_gate_report(
+                    worktree=worktree,
+                    report_path=report_json,
+                    log_path=gate_log,
+                )
+                final_report = report
+
+                attempt_verdict = str(report.get("verdict", "FAIL"))
+                conformed = bool(report.get("conformed", False))
+                problems = report.get("problems") if isinstance(report.get("problems"), list) else []
+                failed_gates_raw = report.get("failed_gates")
+                failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
+
+                attempt_reports.append(
+                    {
+                        "attempt": attempt,
+                        "verdict": attempt_verdict,
+                        "conformed": conformed,
+                        "n_problems": len(problems),
+                        "failed_gates": failed_gates,
+                        "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
+                    }
+                )
+                self._progress(
+                    f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
+                    f"conformed={conformed} problems={len(problems)}"
+                )
+
+                if attempt_verdict == "PASS":
+                    verdict = "PASS"
+                    attempts_to_green = attempt - 1
+                    termination_reason = "gates_green"
+                    break
+
+                if attempt >= self.max_attempts:
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "attempt_ceiling_reached"
+                    break
+
+                if worker_killed_reason in _HARNESS_LIMIT_REASONS:
                     self._progress(
-                        f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
+                        f"PROGRESS run_label={run_label} step=attempt-harness-limit attempt={attempt} "
+                        f"reason={worker_killed_reason} decision=continue_if_budget"
                     )
-                    report = self._run_gate_report(
-                        worktree=worktree,
-                        report_path=report_json,
-                        log_path=gate_log,
-                    )
-                    final_report = report
-
-                    attempt_verdict = str(report.get("verdict", "FAIL"))
-                    conformed = bool(report.get("conformed", False))
-                    problems = report.get("problems") if isinstance(report.get("problems"), list) else []
-                    failed_gates_raw = report.get("failed_gates")
-                    failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
-
-                    attempt_reports.append(
-                        {
-                            "attempt": attempt,
-                            "verdict": attempt_verdict,
-                            "conformed": conformed,
-                            "n_problems": len(problems),
-                            "failed_gates": failed_gates,
-                            "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
-                        }
-                    )
+                elif worker_killed_reason is not None:
                     self._progress(
-                        f"PROGRESS gate attempt={attempt} verdict={attempt_verdict} "
-                        f"conformed={conformed} problems={len(problems)}"
+                        f"PROGRESS run_label={run_label} step=attempt-harness-limit attempt={attempt} "
+                        f"reason={worker_killed_reason} decision=stop"
                     )
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "harness_error"
+                    break
 
-                    if attempt_verdict == "PASS":
-                        verdict = "PASS"
-                        attempts_to_green = attempt - 1
-                        termination_reason = "gates_green"
-                        break
+                if _can_feedback is False:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} "
+                        f"reason={_worker_exit_annot} no_working_session"
+                    )
+                    break
 
-                    if attempt >= self.max_attempts:
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "attempt_ceiling_reached"
-                        break
+                if self.mock is not None:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
+                    )
+                    continue
 
-                    if worker_killed_reason in _HARNESS_LIMIT_REASONS:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=attempt-harness-limit attempt={attempt} "
-                            f"reason={worker_killed_reason} decision=continue_if_budget"
-                        )
-                    elif worker_killed_reason is not None:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=attempt-harness-limit attempt={attempt} "
-                            f"reason={worker_killed_reason} decision=stop"
-                        )
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "harness_error"
-                        break
+                if active_cell is None:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
+                        "reason=active_cell_missing"
+                    )
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "harness_error"
+                    break
 
-                    if self.mock is not None:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} reason=mock_mode"
-                        )
-                        continue
-
-                    if active_cell is None:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
-                            "reason=active_cell_missing"
-                        )
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "harness_error"
-                        break
-
-                    if not session_id:
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
-                            "reason=session_id_missing"
-                        )
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "harness_error"
-                        break
+                if not session_id:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=feedback-stop attempt={attempt} "
+                        "reason=session_id_missing"
+                    )
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "harness_error"
+                    break
 
                     next_attempt = attempt + 1
                     budget_decision = self._budget_decision_for_attempt(
