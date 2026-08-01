@@ -281,6 +281,7 @@ class _OpencodeRunStats:
     terminal_zero_tool_turn: bool = False
     zero_tool_resumes: int = 0
     zero_tool_turn_honest_fail: bool = False
+    resume_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -449,6 +450,7 @@ class BackgammonCellResult:
     zero_tool_turns: int = 0
     zero_tool_resumes: int = 0
     zero_tool_turn_honest_fails: int = 0
+    transport_resume_count: int = 0
     contention: ContentionCovariates | None = None
     worker_image_fingerprint: ImageFingerprint | None = None
 
@@ -541,6 +543,7 @@ class BackgammonRunner(AgentRunner):
         memory_mode: str = "off",
         mock: str | None = None,
         max_attempts: int = DEFAULT_ATTEMPT_HARD_CEILING,
+        resume_budget: int = 2,
         token_cap: int = 200000,
         run_timeout_s: int = DEFAULT_RUN_TIMEOUT_S,
         completion_grace_s: int = 30,
@@ -568,6 +571,9 @@ class BackgammonRunner(AgentRunner):
         if requested_max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         self.max_attempts = min(requested_max_attempts, DEFAULT_ATTEMPT_HARD_CEILING)
+        self.resume_budget = int(resume_budget)
+        if self.resume_budget < 0:
+            raise ValueError("resume_budget must be >= 0")
         self.token_cap = int(token_cap)
         self.run_timeout_s = int(run_timeout_s)
         self.completion_grace_s = int(completion_grace_s)
@@ -911,10 +917,43 @@ class BackgammonRunner(AgentRunner):
                         first_run.exit_code not in (0, None)
                         and first_run.killed_reason not in _HARNESS_LIMIT_REASONS
                     ):
-                        verdict = "FAIL"
-                        attempts_to_green = "FAIL"
-                        termination_reason = "harness_error"
-                        _worker_exit_annot = "harness_error"
+                        # D-EXIT1-TERMINAL: stream-incomplete is transport, not terminal.
+                        # Resume from checkpoint; keep _can_feedback=True.
+                        if first_run.exit_code == 1 and self._detect_stream_incomplete(events_path):
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=transport-stoppage "
+                                f"phase=initial exit_code=1 finish_reason=stream-incomplete "
+                                f"resume_budget={self.resume_budget} session_id={first_run.session_id or 'none'}"
+                            )
+                            first_run = _OpencodeRunStats(
+                                input_tokens=first_run.input_tokens,
+                                output_tokens=first_run.output_tokens,
+                                reasoning_tokens=first_run.reasoning_tokens,
+                                turns=first_run.turns,
+                                session_id=first_run.session_id,
+                                killed_reason=None,
+                                exit_code=None,
+                                cost_usd=first_run.cost_usd,
+                                budget_stop_detected=first_run.budget_stop_detected,
+                                budget_stop_signature=first_run.budget_stop_signature,
+                                truncations=first_run.truncations,
+                                zero_tool_turns=first_run.zero_tool_turns,
+                                terminal_zero_tool_turn=first_run.terminal_zero_tool_turn,
+                                zero_tool_resumes=first_run.zero_tool_resumes,
+                                zero_tool_turn_honest_fail=first_run.zero_tool_turn_honest_fail,
+                                resume_count=1,
+                            )
+                            if self.resume_budget > 0:
+                                self._progress(
+                                    f"PROGRESS run_label={run_label} step=transport-resume-allowed "
+                                    f"phase=initial resume_count=1 budget={self.resume_budget}"
+                                )
+                            # _can_feedback stays True (_worker_exit_annot is still None)
+                        else:
+                            verdict = "FAIL"
+                            attempts_to_green = "FAIL"
+                            termination_reason = "harness_error"
+                            _worker_exit_annot = "harness_error"
             else:
                 attempt_costs_usd[1] = 0.0
 
@@ -1037,6 +1076,17 @@ class BackgammonRunner(AgentRunner):
                         verdict = "BUDGET_STOP"
                         attempts_to_green = "BUDGET_STOP"
                         termination_reason = "attempts_exhausted_by_budget"
+                        break
+
+                    # D-EXIT1-TERMINAL: check transport resume budget
+                    if self.resume_budget <= 0:
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=transport-resume-exhausted "
+                            f"attempt={attempt} resume_budget=0"
+                        )
+                        verdict = "FAIL"
+                        attempts_to_green = "FAIL"
+                        termination_reason = "transport_incomplete"
                         break
 
                     feedback_inner = [
@@ -1386,6 +1436,7 @@ class BackgammonRunner(AgentRunner):
             zero_tool_turns=zero_tool_turns_total,
             zero_tool_resumes=zero_tool_resumes_total,
             zero_tool_turn_honest_fails=zero_tool_turn_honest_fails_total,
+            transport_resume_count=first_run.resume_count if first_run else 0,
             worker_image_fingerprint=worker_image_identity,
         )
 
@@ -1478,6 +1529,7 @@ class BackgammonRunner(AgentRunner):
                 terminal_zero_tool_turn=resumed.terminal_zero_tool_turn,
                 zero_tool_resumes=resume_count,
                 zero_tool_turn_honest_fail=False,
+                resume_count=aggregate.resume_count + resumed.resume_count,
             )
             current = resumed
 
@@ -1504,6 +1556,7 @@ class BackgammonRunner(AgentRunner):
             terminal_zero_tool_turn=aggregate.terminal_zero_tool_turn,
             zero_tool_resumes=resume_count,
             zero_tool_turn_honest_fail=honest_fail,
+            resume_count=aggregate.resume_count,
         )
 
     def _write_worker_permission_config(self, *, worktree: Path) -> None:
@@ -2464,6 +2517,27 @@ class BackgammonRunner(AgentRunner):
             return signal.Signals(signal_number).name
         except ValueError:
             return f"SIGNAL_{signal_number}"
+
+    def _detect_stream_incomplete(self, events_path: Path) -> bool:
+        """Return True if events file contains a step_finish with reason=stream-incomplete."""
+        try:
+            with events_path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") != "step_finish":
+                        continue
+                    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+                    if part.get("reason") == "stream-incomplete":
+                        return True
+        except OSError:
+            pass
+        return False
 
     def _budget_stop_signature_from_event(self, event: dict[str, Any]) -> str | None:
         if str(event.get("type", "")).strip().lower() != "error":
