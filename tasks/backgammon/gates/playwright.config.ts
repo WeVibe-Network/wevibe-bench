@@ -1,5 +1,7 @@
 import { defineConfig } from "@playwright/test";
-import { BASE_URL, TARGET_DIR } from "./lib/harness.ts";
+import { BASE_URL, TARGET_DIR, resolveEntrypoint } from "./lib/harness.ts";
+
+const ENTRYPOINT = resolveEntrypoint(TARGET_DIR);
 
 export default defineConfig({
   testDir: "./frontend",
@@ -14,7 +16,7 @@ export default defineConfig({
     screenshot: "on",
   },
   webServer: {
-    command: "node src/server.ts",
+    command: `node ${ENTRYPOINT}`,
     cwd: TARGET_DIR,
     env: {
       BENCH_DEBUG: "1",

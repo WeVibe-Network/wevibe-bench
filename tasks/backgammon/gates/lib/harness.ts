@@ -4,6 +4,7 @@ import {
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -18,6 +19,61 @@ const DEFAULT_TARGET_DIR =
 export const TARGET_DIR = process.env.BENCH_TARGET
   ? path.resolve(process.env.BENCH_TARGET)
   : DEFAULT_TARGET_DIR;
+
+/** Resolve the server entrypoint artifact-driven (no hardcoded filename).
+ *  Priority: 1) package.json scripts.start  2) glob src/server.{ts,js,mjs,cjs}  3) throw.
+ */
+export function resolveEntrypoint(targetDir: string): string {
+  // 1) package.json scripts.start
+  const pkgPath = path.join(targetDir, "package.json");
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      const startCmd = pkg?.scripts?.start;
+      if (typeof startCmd === "string" && startCmd.trim().length > 0) {
+        // Extract the node/tsx/deno/bun executable + file from the start script.
+        // Common patterns: "node src/server.js", "tsx src/server.ts", etc.
+        const parts = startCmd.trim().split(/\s+/);
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
+          if (
+            p === "node" ||
+            p === "tsx" ||
+            p === "deno" ||
+            p === "bun" ||
+            p === "next" ||
+            p === "ts-node" ||
+            p === "esrun"
+          ) {
+            const file = parts[i + 1];
+            if (file && /\.(ts|js|mjs|cjs|tsx|jsx)$/i.test(file)) {
+              return path.resolve(targetDir, file);
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore parse errors, fall through to glob
+    }
+  }
+
+  // 2) glob src/server.{ts,js,mjs,cjs}
+  const srcDir = path.join(targetDir, "src");
+  if (fs.existsSync(srcDir)) {
+    const candidates = ["server.ts", "server.js", "server.mjs", "server.cjs"];
+    for (const c of candidates) {
+      const fp = path.join(srcDir, c);
+      if (fs.existsSync(fp)) {
+        return fp;
+      }
+    }
+  }
+
+  // 3) fail loudly — distinct failure class, never a gate failure
+  throw new Error(
+    `oracle: no entrypoint resolved — searched package.json scripts.start and src/server.{ts,js,mjs,cjs} in ${targetDir}`,
+  );
+}
 
 export async function loadEngine(): Promise<{ game: any; ai: any }> {
   const gameUrl = pathToFileURL(path.join(TARGET_DIR, "src/game.ts")).href;
@@ -112,7 +168,8 @@ export async function startServer(opts?: {
 }): Promise<ServerHandle> {
   await freePort();
 
-  const proc = spawn("node", ["src/server.ts"], {
+  const entrypoint = resolveEntrypoint(TARGET_DIR);
+  const proc = spawn("node", [entrypoint], {
     cwd: TARGET_DIR,
     env: {
       ...process.env,
