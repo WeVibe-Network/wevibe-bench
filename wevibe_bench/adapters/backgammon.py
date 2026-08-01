@@ -964,7 +964,10 @@ class BackgammonRunner(AgentRunner):
                 if attempt >= self.max_attempts:
                     verdict = "FAIL"
                     attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                    termination_reason = "attempt_ceiling_reached"
+                    if _worker_exit_annot is not None:
+                        termination_reason = "transport_incomplete"
+                    else:
+                        termination_reason = "attempt_ceiling_reached"
                     break
 
                 if worker_killed_reason in _HARNESS_LIMIT_REASONS:
@@ -987,6 +990,10 @@ class BackgammonRunner(AgentRunner):
                         f"PROGRESS run_label={run_label} step=feedback-skip attempt={attempt} "
                         f"reason={_worker_exit_annot} no_working_session"
                     )
+                    if _worker_exit_annot is not None:
+                        termination_reason = "transport_incomplete"
+                    else:
+                        termination_reason = "gates_failed"
                     break
 
                 if self.mock is not None:
