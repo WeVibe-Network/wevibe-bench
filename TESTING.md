@@ -46,6 +46,8 @@ The agent shell kills any process running longer than 120 seconds. If the pytest
 
 **Rule: NEVER raise the timeout back up.** If a test consistently needs more than 60s, it should be marked `@pytest.mark.slow` so it runs only with `make test-all`.
 
+**xdist compatibility:** `timeout_method = "thread"` is set in `pyproject.toml` because the default `signal` method does not reach xdist worker processes. The thread method kills the timeout target within the worker process itself, ensuring timeouts fire correctly under parallel test execution (`-n auto`).
+
 To resolve a timeout:
 
 1. **Check** `runs/pytest-*.log` for the hung test name (search for `Timeout`).
