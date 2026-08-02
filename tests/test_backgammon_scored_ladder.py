@@ -41,7 +41,7 @@ def _default_pricing_gate_ok(monkeypatch: Any) -> None:
 
 def _rung_params_payload() -> dict[str, Any]:
     return {
-        "orcarouter/qwen3.6-35b-a3b-bench": {
+        "orcarouter/wevibe-bench-worker": {
             "profile": "kimik3",
             "pricing_input": 3.0,
             "pricing_output": 15.0,
@@ -306,8 +306,8 @@ def test_exact_roster_a_cell_allocation() -> None:
     assert len(plan) == 6
 
     expected = [
-        (1, "orcarouter/qwen3.6-35b-a3b-bench", "measure", "off", "session"),
-        (2, "orcarouter/qwen3.6-35b-a3b-bench", "measure", "on", "session"),
+        (1, "orcarouter/wevibe-bench-worker", "measure", "off", "session"),
+        (2, "orcarouter/wevibe-bench-worker", "measure", "on", "session"),
         (3, "orcarouter/qwen3.6-40b-deckard-bench", "measure", "off", "session"),
         (4, "orcarouter/qwen3.6-40b-deckard-bench", "measure", "on", "session"),
         (5, "orcarouter/qwen3.6-27b-fable-bench", "measure", "off", "session"),
@@ -1152,7 +1152,7 @@ def test_dry_run_prints_plan_without_execution(tmp_path: pathlib.Path, monkeypat
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--dry-run"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "35b-a3b-bench" in out and "40b-deckard-bench" in out and "27b-fable-bench" in out
+    assert "wevibe-bench-worker" in out and "40b-deckard-bench" in out and "27b-fable-bench" in out
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
@@ -1437,7 +1437,7 @@ def test_source_cell_never_triggers_variance(tmp_path: pathlib.Path, monkeypatch
     # The live roster (2026-07-31 local pivot) is all-measure; the source-skip
     # rule is exercised here against a synthetic source+measure roster.
     synthetic_roster = (
-        LadderRung(model="orcarouter/qwen3.6-35b-a3b-bench", role="source", memory_modes=("off",)),
+        LadderRung(model="orcarouter/wevibe-bench-worker", role="source", memory_modes=("off",)),
         LadderRung(model="orcarouter/qwen3.6-40b-deckard-bench", role="measure", memory_modes=("off", "on")),
     )
     monkeypatch.setattr(bl, "backgammon_scored_ladder_roster", lambda: synthetic_roster)
@@ -1447,7 +1447,7 @@ def test_source_cell_never_triggers_variance(tmp_path: pathlib.Path, monkeypatch
     stats_for = {(1, 1): _stats(verdict="FAIL", failed_gates=["G07"], attempts=None)}
     _patch_execution(monkeypatch, recorder, stats_for=stats_for)
     params = _rung_params_payload()
-    params = {key: params[key] for key in ("orcarouter/qwen3.6-35b-a3b-bench", "orcarouter/qwen3.6-40b-deckard-bench")}
+    params = {key: params[key] for key in ("orcarouter/wevibe-bench-worker", "orcarouter/qwen3.6-40b-deckard-bench")}
     params_path = tmp_path / "rung-params.json"
     params_path.write_text(json.dumps(params), encoding="utf-8")
 
@@ -1736,7 +1736,7 @@ def test_pricing_drift_aborts_before_any_paid_cell(
     params_path = _write_rung_params(tmp_path)
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)])
     assert exit_code == 3
-    assert captured_roster_models == ["qwen3.6-35b-a3b-bench", "qwen3.6-40b-deckard-bench", "qwen3.6-27b-fable-bench"]
+    assert captured_roster_models == ["wevibe-bench-worker", "qwen3.6-40b-deckard-bench", "qwen3.6-27b-fable-bench"]
 
     escalation = bl._load_json(tmp_path / bl.ESCALATE_NAME)
     assert escalation is not None
@@ -2055,7 +2055,7 @@ def test_model_identity_mismatch_watch_aborts_cell(
             del session_id
             return [
                 SimpleNamespace(
-                    model="qwen3.6-35b-a3b-bench",
+                    model="wevibe-bench-worker",
                     upstream_model="qwen3.6-27b-fable-bench",
                     calls=1,
                 )
@@ -2107,5 +2107,5 @@ def test_model_identity_mismatch_watch_aborts_cell(
 
     assert excinfo.value.reason == "served_model_mismatch"
     mismatch = excinfo.value.detail["mismatches"][0]
-    assert mismatch["requested_model"] == "qwen3.6-35b-a3b-bench"
+    assert mismatch["requested_model"] == "wevibe-bench-worker"
     assert mismatch["upstream_model"] == "qwen3.6-27b-fable-bench"
