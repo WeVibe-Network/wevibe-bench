@@ -1067,230 +1067,230 @@ class BackgammonRunner(AgentRunner):
                     termination_reason = "harness_error"
                     break
 
-                    next_attempt = attempt + 1
-                    budget_decision = self._budget_decision_for_attempt(
-                        run_label=run_label,
-                        attempt=next_attempt,
-                        observed_attempt_costs=observed_attempt_costs,
-                    )
-                    if budget_decision == "harness_error":
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "harness_error"
-                        break
-                    if budget_decision == "budget_stop":
-                        verdict = "BUDGET_STOP"
-                        attempts_to_green = "BUDGET_STOP"
-                        termination_reason = "attempts_exhausted_by_budget"
-                        break
+                next_attempt = attempt + 1
+                budget_decision = self._budget_decision_for_attempt(
+                    run_label=run_label,
+                    attempt=next_attempt,
+                    observed_attempt_costs=observed_attempt_costs,
+                )
+                if budget_decision == "harness_error":
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "harness_error"
+                    break
+                if budget_decision == "budget_stop":
+                    verdict = "BUDGET_STOP"
+                    attempts_to_green = "BUDGET_STOP"
+                    termination_reason = "attempts_exhausted_by_budget"
+                    break
 
-                    # D-EXIT1-TERMINAL: check transport resume budget
-                    if self.resume_budget <= 0:
+                # D-EXIT1-TERMINAL: check transport resume budget
+                if self.resume_budget <= 0:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=transport-resume-exhausted "
+                        f"attempt={attempt} resume_budget=0"
+                    )
+                    verdict = "FAIL"
+                    attempts_to_green = "FAIL"
+                    termination_reason = "transport_incomplete"
+                    break
+
+                feedback_inner = [
+                    "opencode",
+                    "run",
+                    "--session",
+                    session_id,
+                    "--dir",
+                    "/work",
+                    "--format",
+                    "json",
+                ]
+                if pure:
+                    feedback_inner.append("--pure")
+
+                # Never pass tool_choice="required" via worker config/CLI for these
+                # runs; provider path rejects it and the harness guard test enforces this.
+
+                newly_passing = (
+                    sorted(
+                        set(attempt_reports[-2]["failed_gates"])
+                        - set(attempt_reports[-1]["failed_gates"])
+                    )
+                    if len(attempt_reports) >= 2
+                    else []
+                )
+                still_failing = sorted(set(attempt_reports[-1]["failed_gates"]))
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=feedback-verdict-composed attempt={attempt} "
+                    f"newly_passing_count={len(newly_passing)} still_failing_count={len(still_failing)}"
+                )
+
+                next_attempt_cost_usd = 0.0
+                if newly_passing:
+                    pass_verdict = self._build_pass_verdict(newly_passing=newly_passing)
+                    if pass_verdict:
                         self._progress(
-                            f"PROGRESS run_label={run_label} step=transport-resume-exhausted "
-                            f"attempt={attempt} resume_budget=0"
+                            f"PROGRESS run_label={run_label} step=feedback-pass-injection attempt={attempt} "
+                            f"newly_passing_count={len(newly_passing)} session_id={session_id}"
                         )
-                        verdict = "FAIL"
-                        attempts_to_green = "FAIL"
-                        termination_reason = "transport_incomplete"
-                        break
-
-                    feedback_inner = [
-                        "opencode",
-                        "run",
-                        "--session",
-                        session_id,
-                        "--dir",
-                        "/work",
-                        "--format",
-                        "json",
-                    ]
-                    if pure:
-                        feedback_inner.append("--pure")
-
-                    # Never pass tool_choice="required" via worker config/CLI for these
-                    # runs; provider path rejects it and the harness guard test enforces this.
-
-                    newly_passing = (
-                        sorted(
-                            set(attempt_reports[-2]["failed_gates"])
-                            - set(attempt_reports[-1]["failed_gates"])
+                        self._emit_cost_target_warning_if_reached(
+                            run_label=run_label,
+                            phase=f"verdict-pass-{attempt}",
+                            cumulative_cost_usd=cell_cost_usd,
                         )
-                        if len(attempt_reports) >= 2
-                        else []
-                    )
-                    still_failing = sorted(set(attempt_reports[-1]["failed_gates"]))
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-verdict-composed attempt={attempt} "
-                        f"newly_passing_count={len(newly_passing)} still_failing_count={len(still_failing)}"
-                    )
+                        self._append_user_event(
+                            run_label=run_label,
+                            sidecar_path=user_events_path,
+                            attempt=next_attempt,
+                            text=pass_verdict,
+                        )
+                        self._write_worker_permission_config(worktree=worktree)
+                        pass_run = self._run_opencode_with_zero_tool_resumes(
+                            active_cell=active_cell,
+                            initial_inner=feedback_inner,
+                            pure=pure,
+                            worktree=worktree,
+                            events_path=events_path,
+                            env=run_env,
+                            run_label=run_label,
+                            phase=f"verdict-pass-{attempt}",
+                            fallback_session_id=session_id,
+                            prior_cost_usd=cell_cost_usd,
+                            kill_hook=active_cell.kill_worker_processes,
+                            stdin_text=pass_verdict,
+                        )
+                        next_attempt_cost_usd += pass_run.cost_usd
+                        cell_cost_usd += pass_run.cost_usd
+                        if pass_run.session_id:
+                            session_id = pass_run.session_id
 
-                    next_attempt_cost_usd = 0.0
-                    if newly_passing:
-                        pass_verdict = self._build_pass_verdict(newly_passing=newly_passing)
-                        if pass_verdict:
-                            self._progress(
-                                f"PROGRESS run_label={run_label} step=feedback-pass-injection attempt={attempt} "
-                                f"newly_passing_count={len(newly_passing)} session_id={session_id}"
-                            )
-                            self._emit_cost_target_warning_if_reached(
-                                run_label=run_label,
-                                phase=f"verdict-pass-{attempt}",
-                                cumulative_cost_usd=cell_cost_usd,
-                            )
-                            self._append_user_event(
-                                run_label=run_label,
-                                sidecar_path=user_events_path,
-                                attempt=next_attempt,
-                                text=pass_verdict,
-                            )
-                            self._write_worker_permission_config(worktree=worktree)
-                            pass_run = self._run_opencode_with_zero_tool_resumes(
-                                active_cell=active_cell,
-                                initial_inner=feedback_inner,
-                                pure=pure,
-                                worktree=worktree,
-                                events_path=events_path,
-                                env=run_env,
-                                run_label=run_label,
-                                phase=f"verdict-pass-{attempt}",
-                                fallback_session_id=session_id,
-                                prior_cost_usd=cell_cost_usd,
-                                kill_hook=active_cell.kill_worker_processes,
-                                stdin_text=pass_verdict,
-                            )
-                            next_attempt_cost_usd += pass_run.cost_usd
-                            cell_cost_usd += pass_run.cost_usd
-                            if pass_run.session_id:
-                                session_id = pass_run.session_id
+                        input_tokens_total += pass_run.input_tokens
+                        output_tokens_total += pass_run.output_tokens + pass_run.reasoning_tokens
+                        turns_total += pass_run.turns
+                        truncations_total += pass_run.truncations
+                        zero_tool_turns_total += pass_run.zero_tool_turns
+                        zero_tool_resumes_total += pass_run.zero_tool_resumes
+                        if pass_run.zero_tool_turn_honest_fail:
+                            zero_tool_turn_honest_fails_total += 1
+                        worker_killed_reason = pass_run.killed_reason
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=feedback-pass-injection-done attempt={attempt} "
+                            f"exit={pass_run.exit_code} killed={pass_run.killed_reason or 'none'} "
+                            f"turns={pass_run.turns} input={pass_run.input_tokens} "
+                            f"output={pass_run.output_tokens} reasoning={pass_run.reasoning_tokens} "
+                            f"cost_usd={pass_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
+                        )
+                        if pass_run.budget_stop_detected:
+                            verdict = "BUDGET_STOP"
+                            attempts_to_green = "BUDGET_STOP"
+                            termination_reason = "budget_stop_mid_attempt"
+                            break
+                        if pass_run.zero_tool_turn_honest_fail:
+                            verdict = "FAIL"
+                            attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                            termination_reason = "zero_tool_turn_honest_fail"
+                            if attempt_reports:
+                                attempt_reports[-1]["zero_tool_turn_honest_fail"] = True
+                            break
+                        if (
+                            pass_run.exit_code not in (0, None)
+                            and pass_run.killed_reason not in _HARNESS_LIMIT_REASONS
+                        ):
+                            verdict = "FAIL"
+                            attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                            termination_reason = "harness_error"
+                            break
 
-                            input_tokens_total += pass_run.input_tokens
-                            output_tokens_total += pass_run.output_tokens + pass_run.reasoning_tokens
-                            turns_total += pass_run.turns
-                            truncations_total += pass_run.truncations
-                            zero_tool_turns_total += pass_run.zero_tool_turns
-                            zero_tool_resumes_total += pass_run.zero_tool_resumes
-                            if pass_run.zero_tool_turn_honest_fail:
-                                zero_tool_turn_honest_fails_total += 1
-                            worker_killed_reason = pass_run.killed_reason
-                            self._progress(
-                                f"PROGRESS run_label={run_label} step=feedback-pass-injection-done attempt={attempt} "
-                                f"exit={pass_run.exit_code} killed={pass_run.killed_reason or 'none'} "
-                                f"turns={pass_run.turns} input={pass_run.input_tokens} "
-                                f"output={pass_run.output_tokens} reasoning={pass_run.reasoning_tokens} "
-                                f"cost_usd={pass_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
-                            )
-                            if pass_run.budget_stop_detected:
-                                verdict = "BUDGET_STOP"
-                                attempts_to_green = "BUDGET_STOP"
-                                termination_reason = "budget_stop_mid_attempt"
-                                break
-                            if pass_run.zero_tool_turn_honest_fail:
-                                verdict = "FAIL"
-                                attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                                termination_reason = "zero_tool_turn_honest_fail"
-                                if attempt_reports:
-                                    attempt_reports[-1]["zero_tool_turn_honest_fail"] = True
-                                break
-                            if (
-                                pass_run.exit_code not in (0, None)
-                                and pass_run.killed_reason not in _HARNESS_LIMIT_REASONS
-                            ):
-                                verdict = "FAIL"
-                                attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                                termination_reason = "harness_error"
-                                break
+                feedback_checks = [
+                    str(p.get("check", "")).strip()
+                    for p in problems
+                    if isinstance(p, dict) and str(p.get("check", "")).strip()
+                ]
+                feedback = self._build_feedback_prompt(
+                    checks=feedback_checks,
+                    had_pass_verdict=bool(newly_passing),
+                )
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
+                    f"checks={len(feedback_checks)}"
+                )
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
+                    f"problem_count={len(problems)} session_id={session_id}"
+                )
 
-                    feedback_checks = [
-                        str(p.get("check", "")).strip()
-                        for p in problems
-                        if isinstance(p, dict) and str(p.get("check", "")).strip()
-                    ]
-                    feedback = self._build_feedback_prompt(
-                        checks=feedback_checks,
-                        had_pass_verdict=bool(newly_passing),
-                    )
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
-                        f"checks={len(feedback_checks)}"
-                    )
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
-                        f"problem_count={len(problems)} session_id={session_id}"
-                    )
+                self._emit_cost_target_warning_if_reached(
+                    run_label=run_label,
+                    phase=f"feedback-{attempt}",
+                    cumulative_cost_usd=cell_cost_usd,
+                )
 
-                    self._emit_cost_target_warning_if_reached(
-                        run_label=run_label,
-                        phase=f"feedback-{attempt}",
-                        cumulative_cost_usd=cell_cost_usd,
-                    )
+                self._append_user_event(
+                    run_label=run_label,
+                    sidecar_path=user_events_path,
+                    attempt=next_attempt,
+                    text=feedback,
+                )
 
-                    self._append_user_event(
-                        run_label=run_label,
-                        sidecar_path=user_events_path,
-                        attempt=next_attempt,
-                        text=feedback,
-                    )
+                self._write_worker_permission_config(worktree=worktree)
 
-                    self._write_worker_permission_config(worktree=worktree)
+                feedback_run = self._run_opencode_with_zero_tool_resumes(
+                    active_cell=active_cell,
+                    initial_inner=feedback_inner,
+                    pure=pure,
+                    worktree=worktree,
+                    events_path=events_path,
+                    env=run_env,
+                    run_label=run_label,
+                    phase=f"feedback-{attempt}",
+                    fallback_session_id=session_id,
+                    prior_cost_usd=cell_cost_usd,
+                    kill_hook=active_cell.kill_worker_processes,
+                    stdin_text=feedback,
+                )
+                next_attempt_cost_usd += feedback_run.cost_usd
+                attempt_costs_usd[next_attempt] = next_attempt_cost_usd
+                observed_attempt_costs.append(next_attempt_cost_usd)
+                cell_cost_usd += feedback_run.cost_usd
+                if feedback_run.session_id:
+                    session_id = feedback_run.session_id
 
-                    feedback_run = self._run_opencode_with_zero_tool_resumes(
-                        active_cell=active_cell,
-                        initial_inner=feedback_inner,
-                        pure=pure,
-                        worktree=worktree,
-                        events_path=events_path,
-                        env=run_env,
-                        run_label=run_label,
-                        phase=f"feedback-{attempt}",
-                        fallback_session_id=session_id,
-                        prior_cost_usd=cell_cost_usd,
-                        kill_hook=active_cell.kill_worker_processes,
-                        stdin_text=feedback,
-                    )
-                    next_attempt_cost_usd += feedback_run.cost_usd
-                    attempt_costs_usd[next_attempt] = next_attempt_cost_usd
-                    observed_attempt_costs.append(next_attempt_cost_usd)
-                    cell_cost_usd += feedback_run.cost_usd
-                    if feedback_run.session_id:
-                        session_id = feedback_run.session_id
-
-                    input_tokens_total += feedback_run.input_tokens
-                    output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
-                    turns_total += feedback_run.turns
-                    truncations_total += feedback_run.truncations
-                    zero_tool_turns_total += feedback_run.zero_tool_turns
-                    zero_tool_resumes_total += feedback_run.zero_tool_resumes
-                    if feedback_run.zero_tool_turn_honest_fail:
-                        zero_tool_turn_honest_fails_total += 1
-                    worker_killed_reason = feedback_run.killed_reason
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
-                        f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
-                        f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
-                        f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens} "
-                        f"cost_usd={feedback_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
-                    )
-                    if feedback_run.budget_stop_detected:
-                        verdict = "BUDGET_STOP"
-                        attempts_to_green = "BUDGET_STOP"
-                        termination_reason = "budget_stop_mid_attempt"
-                        break
-                    if feedback_run.zero_tool_turn_honest_fail:
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "zero_tool_turn_honest_fail"
-                        if attempt_reports:
-                            attempt_reports[-1]["zero_tool_turn_honest_fail"] = True
-                        break
-                    if (
-                        feedback_run.exit_code not in (0, None)
-                        and feedback_run.killed_reason not in _HARNESS_LIMIT_REASONS
-                    ):
-                        verdict = "FAIL"
-                        attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
-                        termination_reason = "harness_error"
-                        break
+                input_tokens_total += feedback_run.input_tokens
+                output_tokens_total += feedback_run.output_tokens + feedback_run.reasoning_tokens
+                turns_total += feedback_run.turns
+                truncations_total += feedback_run.truncations
+                zero_tool_turns_total += feedback_run.zero_tool_turns
+                zero_tool_resumes_total += feedback_run.zero_tool_resumes
+                if feedback_run.zero_tool_turn_honest_fail:
+                    zero_tool_turn_honest_fails_total += 1
+                worker_killed_reason = feedback_run.killed_reason
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
+                    f"exit={feedback_run.exit_code} killed={feedback_run.killed_reason or 'none'} "
+                    f"turns={feedback_run.turns} input={feedback_run.input_tokens} "
+                    f"output={feedback_run.output_tokens} reasoning={feedback_run.reasoning_tokens} "
+                    f"cost_usd={feedback_run.cost_usd:.4f} cell_cost_usd={cell_cost_usd:.4f}"
+                )
+                if feedback_run.budget_stop_detected:
+                    verdict = "BUDGET_STOP"
+                    attempts_to_green = "BUDGET_STOP"
+                    termination_reason = "budget_stop_mid_attempt"
+                    break
+                if feedback_run.zero_tool_turn_honest_fail:
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "zero_tool_turn_honest_fail"
+                    if attempt_reports:
+                        attempt_reports[-1]["zero_tool_turn_honest_fail"] = True
+                    break
+                if (
+                    feedback_run.exit_code not in (0, None)
+                    and feedback_run.killed_reason not in _HARNESS_LIMIT_REASONS
+                ):
+                    verdict = "FAIL"
+                    attempts_to_green = "DID_NOT_CONFORM" if not conformed else "FAIL"
+                    termination_reason = "harness_error"
+                    break
 
         if termination_reason == "pending":
             verdict = "FAIL"
