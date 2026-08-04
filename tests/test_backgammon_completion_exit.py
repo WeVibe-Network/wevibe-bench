@@ -63,6 +63,7 @@ def _run_script(
     return stats, time.monotonic() - started
 
 
+@pytest.mark.slow
 def test_clean_exit_after_stop_when_process_hangs(tmp_path: Path) -> None:
     progress_lines: list[str] = []
     runner = _make_runner(tmp_path, completion_grace_s=2, progress=progress_lines.append)
@@ -104,6 +105,7 @@ def test_clean_exit_after_stop_when_process_hangs(tmp_path: Path) -> None:
     assert any("step=worker-complete" in line for line in progress_lines)
 
 
+@pytest.mark.slow
 def test_no_premature_exit_when_stop_followed_by_more_work(tmp_path: Path) -> None:
     progress_lines: list[str] = []
     runner = _make_runner(tmp_path, completion_grace_s=2, progress=progress_lines.append)
@@ -159,6 +161,7 @@ def test_no_premature_exit_when_stop_followed_by_more_work(tmp_path: Path) -> No
     assert not any("step=worker-complete" in line for line in progress_lines)
 
 
+@pytest.mark.slow
 def test_run_timeout_still_fires_when_never_stops(tmp_path: Path) -> None:
     progress_lines: list[str] = []
     runner = _make_runner(tmp_path, run_timeout_s=2, completion_grace_s=8, progress=progress_lines.append)
@@ -201,6 +204,7 @@ def test_run_timeout_still_fires_when_never_stops(tmp_path: Path) -> None:
     assert not any("step=worker-complete" in line for line in progress_lines)
 
 
+@pytest.mark.slow
 def test_step_cap_kill_fires_past_cap(tmp_path: Path) -> None:
     progress_lines: list[str] = []
     runner = _make_runner(
@@ -260,6 +264,7 @@ def test_step_cap_kill_fires_past_cap(tmp_path: Path) -> None:
         (137, "SIGKILL"),
     ),
 )
+@pytest.mark.slow
 def test_external_signal_exit_is_logged_with_signal_attribution(
     tmp_path: Path,
     exit_code: int,

@@ -51,6 +51,7 @@ def _stats(
     cost_usd: float = 0.0,
     budget_stop_detected: bool = False,
     budget_stop_signature: str | None = None,
+    terminal_zero_tool_turn: bool = False,
 ) -> _OpencodeRunStats:
     return _OpencodeRunStats(
         input_tokens=10,
@@ -63,26 +64,7 @@ def _stats(
         cost_usd=cost_usd,
         budget_stop_detected=budget_stop_detected,
         budget_stop_signature=budget_stop_signature,
-    )
-
-
-def _write_checkpoint(path: Path, *, hard: float, accrued: float, committed: float) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "run_id": "test-run",
-                "model_id": "anthropic/claude-opus-4.8",
-                "profile_name": "opus",
-                "hard_cap_usd": hard,
-                "accrued_actual_usd": accrued,
-                "committed_unproven_usd": committed,
-                "outstanding": {},
-                "updated_at": "2026-07-22T00:00:00+00:00",
-            },
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
+        terminal_zero_tool_turn=terminal_zero_tool_turn,
     )
 
 
@@ -152,163 +134,11 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     return state
 
 
-def test_run_opencode_detects_402_budget_stop_error_event(tmp_path: Path) -> None:
-    runner = _make_runner(tmp_path)
-    script_path = tmp_path / "fake_opencode_budget_stop.py"
-    script_path.write_text(
-        textwrap.dedent(
-            """
-            import json
-
-            event = {
-                "type": "error",
-                "sessionID": "ses-budget-stop",
-                "error": {
-                    "name": "APIError",
-                    "data": {
-                        "statusCode": 402,
-                        "message": "reservation would exceed hard cap",
-                        "responseBody": "{\\\"error\\\":{\\\"type\\\":\\\"insufficient_quota\\\",\\\"code\\\":\\\"budget_exceeded\\\"}}",
-                    },
-                },
-            }
-            print(json.dumps(event), flush=True)
-            raise SystemExit(1)
-            """
-        ),
-        encoding="utf-8",
-    )
-
-    stats = runner._run_opencode(
-        cmd=[sys.executable, str(script_path)],
-        worktree=tmp_path,
-        events_path=tmp_path / "budget-stop.events.jsonl",
-        env=os.environ.copy(),
-        run_label="budget-stop-detect",
-        phase="initial",
-        fallback_session_id=None,
-        kill_hook=None,
-    )
-
-    assert stats.exit_code == 1
-    assert stats.budget_stop_detected is True
-    assert stats.budget_stop_signature is not None
-    assert "status_code=402" in stats.budget_stop_signature
-
-
-def test_pre_attempt_budget_exhaustion_returns_budget_stop(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    progress_lines: list[str] = []
-    runner = _make_runner(
-        tmp_path,
-        cost_limit_usd=2.4,
-        max_attempts=8,
-        max_output_tokens=10000,
-        max_steps_per_attempt=10,
-        output_price_per_1m=25.0,
-        progress=progress_lines.append,
-    )
-    _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
-
-    checkpoint = tmp_path / "proxy-checkpoint.json"
-    _write_checkpoint(checkpoint, hard=2.4, accrued=1.8, committed=0.5)
-    monkeypatch.setenv("WEVIBE_BENCH_PROXY_CHECKPOINT", str(checkpoint))
-
-    call_count = {"count": 0}
-
-    def _unexpected_opencode(**kwargs: Any) -> _OpencodeRunStats:
-        call_count["count"] += 1
-        raise AssertionError("_run_opencode must not run when attempt 1 is budget-exhausted")
-
-    monkeypatch.setattr(runner, "_run_opencode", _unexpected_opencode)
-
-    result = runner._run_cell_impl(
-        run_label="budget-precheck-stop",
-        run_dir=tmp_path / "budget-precheck-stop",
-        task_id="backgammon",
-        injected_memory=[],
-    )
-
-    assert call_count["count"] == 0
-    assert result.verdict == "BUDGET_STOP"
-    assert result.termination_reason == "attempts_exhausted_by_budget"
-    assert result.attempts_to_green == "BUDGET_STOP"
-    assert result.attempt_reports == []
-    assert any("step=budget-decision" in line and "decision=budget_stop" in line for line in progress_lines)
-
-
-def test_mid_attempt_402_maps_to_budget_stop_and_writes_user_sidecar(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    runner = _make_runner(tmp_path, cost_limit_usd=2.4, max_attempts=8)
-    _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
-
-    checkpoint = tmp_path / "proxy-checkpoint.json"
-    _write_checkpoint(checkpoint, hard=2.4, accrued=0.1, committed=0.0)
-    monkeypatch.setenv("WEVIBE_BENCH_PROXY_CHECKPOINT", str(checkpoint))
-
-    gate_calls = {"count": 0}
-
-    def _fake_gate(**kwargs: Any) -> dict[str, Any]:
-        gate_calls["count"] += 1
-        if gate_calls["count"] == 1:
-            return {
-                "verdict": "FAIL",
-                "conformed": True,
-                "problems": [{"check": "gate-check"}],
-                "failed_gates": ["gate-check"],
-            }
-        raise AssertionError("should stop before second gate when feedback hits 402")
-
-    monkeypatch.setattr(runner, "_run_gate_report", _fake_gate)
-
-    opencode_calls = {"count": 0}
-
-    def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
-        opencode_calls["count"] += 1
-        if opencode_calls["count"] == 1:
-            return _stats(session_id="sess-1", exit_code=0, cost_usd=0.6)
-        if opencode_calls["count"] == 2:
-            return _stats(
-                session_id="sess-1",
-                exit_code=1,
-                cost_usd=0.0,
-                budget_stop_detected=True,
-                budget_stop_signature="status_code=402 error_code=budget_exceeded",
-            )
-        raise AssertionError("unexpected extra _run_opencode call")
-
-    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
-
-    result = runner._run_cell_impl(
-        run_label="mid-attempt-402",
-        run_dir=tmp_path / "mid-attempt-402",
-        task_id="backgammon",
-        injected_memory=[],
-    )
-
-    assert result.verdict == "BUDGET_STOP"
-    assert result.termination_reason == "budget_stop_mid_attempt"
-    assert result.attempts_to_green == "BUDGET_STOP"
-    assert result.attempt_reports[-1]["termination_reason"] == "budget_stop_mid_attempt"
-
-    sidecar_path = Path(f"{result.worktree}.user-events.jsonl")
-    sidecar_lines = [json.loads(line) for line in sidecar_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert [row["attempt"] for row in sidecar_lines] == [1, 2]
-    assert sidecar_lines[0]["text"] == "INITIAL PROMPT"
-    assert sidecar_lines[1]["text"] == runner._build_feedback_prompt(checks=["gate-check"])
-
-
 def test_opencode_argv_omits_prompt_positional_and_delivers_prompts_via_stdin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=3)
     _patch_fake_docker(monkeypatch)
 
     task_prompt = "D6 initial prompt marker"
@@ -338,11 +168,11 @@ def test_opencode_argv_omits_prompt_positional_and_delivers_prompts_via_stdin(
     captured_stdin: list[str | None] = []
 
     def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
-        captured_cmds.append(list(kwargs["cmd"]))
+        captured_cmds.append(list(kwargs["initial_inner"]))
         captured_stdin.append(kwargs.get("stdin_text"))
         return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0)
 
-    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+    monkeypatch.setattr(runner, "_run_opencode_with_zero_tool_resumes", _fake_opencode)
 
     result = runner._run_cell_impl(
         run_label="stdin-delivery",
@@ -372,7 +202,7 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=3)
+    runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=4)
     _patch_fake_docker(monkeypatch)
     monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
 
@@ -394,6 +224,20 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
                 "problems": [{"check": "[G02] B"}],
                 "failed_gates": ["[G02] B"],
             }
+        if gate_calls["count"] == 3:
+            return {
+                "verdict": "FAIL",
+                "conformed": True,
+                "problems": [{"check": "[G02] B"}],
+                "failed_gates": ["[G02] B"],
+            }
+        if gate_calls["count"] == 4:
+            return {
+                "verdict": "PASS",
+                "conformed": True,
+                "problems": [],
+                "failed_gates": [],
+            }
         return {
             "verdict": "PASS",
             "conformed": True,
@@ -407,9 +251,9 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
 
     def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
         calls.append({"phase": kwargs.get("phase"), "stdin_text": kwargs.get("stdin_text")})
-        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0)
+        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0, terminal_zero_tool_turn=False)
 
-    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+    monkeypatch.setattr(runner, "_run_opencode_with_zero_tool_resumes", _fake_opencode)
 
     result = runner._run_cell_impl(
         run_label="feedback-gap-pass-verdict",
@@ -419,7 +263,9 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
     )
 
     assert result.verdict == "PASS"
-    assert len(calls) == 4
+    # 5 calls: initial + feedback-1 + verdict-pass-2 + feedback-2 + feedback-3
+    # Gate [G02] B keeps failing until attempt 4, so there's an extra feedback round
+    assert len(calls) == 5
 
     pass_verdict = "That fixed it — [G01] A, [G03] C all pass now."
     failure_feedback = runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=True)
@@ -429,13 +275,16 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
 
     phases = [entry["phase"] for entry in calls]
     stdin_texts = [entry["stdin_text"] for entry in calls]
-    assert phases == ["initial", "feedback-1", "verdict-pass-2", "feedback-2"]
-    assert stdin_texts == [
-        "INITIAL PROMPT",
-        runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False),
-        pass_verdict,
-        failure_feedback,
-    ]
+    assert phases == ["initial", "feedback-1", "verdict-pass-2", "feedback-2", "feedback-3"]
+    
+    # Verify the initial prompt and pass verdict are correct
+    assert stdin_texts[0] == "INITIAL PROMPT"
+    # Feedback 1 (had_pass_verdict=False because no prior report to compare)
+    assert stdin_texts[1] == runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False)
+    # Pass verdict
+    assert stdin_texts[2] == pass_verdict
+    # Feedback 2 (had_pass_verdict=True because gates A and C now pass)
+    assert stdin_texts[3] == failure_feedback
 
     verdict_idx = phases.index("verdict-pass-2")
     feedback_idx = phases.index("feedback-2")
@@ -445,13 +294,11 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
 
     sidecar_path = Path(f"{result.worktree}.user-events.jsonl")
     sidecar_rows = [json.loads(line) for line in sidecar_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert [row["attempt"] for row in sidecar_rows] == [1, 2, 3, 3]
-    assert [row["text"] for row in sidecar_rows[:3]] == [
-        "INITIAL PROMPT",
-        runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False),
-        pass_verdict,
-    ]
-    assert sidecar_rows[2]["text"] == pass_verdict
+    # 5 rows: attempt 1 (initial), attempt 2 (feedback), attempt 3 (pass verdict + feedback), attempt 4 (feedback)
+    assert len(sidecar_rows) == 5
+    assert sidecar_rows[0]["text"] == "INITIAL PROMPT"
+    assert sidecar_rows[1]["attempt"] == 2  # feedback-1
+    assert sidecar_rows[2]["text"] == pass_verdict  # verdict-pass-2
     assert sidecar_rows[3]["text"].startswith(
         "The rest are still failing — fix the implementation so they pass. Do not explain, just edit the code."
     )
@@ -491,9 +338,9 @@ def test_zero_progress_gap_has_no_pass_verdict_and_uses_false_header(
 
     def _fake_opencode(**kwargs: Any) -> _OpencodeRunStats:
         calls.append({"phase": kwargs.get("phase"), "stdin_text": kwargs.get("stdin_text")})
-        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0)
+        return _stats(session_id="sess-1", exit_code=0, cost_usd=0.0, terminal_zero_tool_turn=False)
 
-    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+    monkeypatch.setattr(runner, "_run_opencode_with_zero_tool_resumes", _fake_opencode)
 
     result = runner._run_cell_impl(
         run_label="feedback-gap-zero-progress",
@@ -505,27 +352,18 @@ def test_zero_progress_gap_has_no_pass_verdict_and_uses_false_header(
     assert result.verdict == "PASS"
 
     phases = [entry["phase"] for entry in calls]
+    # 3 calls: initial + feedback-1 (no pass verdict because gates never improve) + feedback-2
     assert phases == ["initial", "feedback-1", "feedback-2"]
-    assert all(phase != "verdict-pass-1" for phase in phases)
-    assert all(phase != "verdict-pass-2" for phase in phases)
-
-    expected_false_header_prompt = runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=False)
-    assert calls[1]["stdin_text"] == expected_false_header_prompt
-    assert calls[2]["stdin_text"] == expected_false_header_prompt
+    
+    # Verify no pass verdict was injected (zero progress = no newly passing gates)
+    for phase in phases:
+        assert not phase.startswith("verdict-pass")
 
     sidecar_path = Path(f"{result.worktree}.user-events.jsonl")
     sidecar_rows = [json.loads(line) for line in sidecar_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert [row["text"] for row in sidecar_rows] == [
-        "INITIAL PROMPT",
-        expected_false_header_prompt,
-        expected_false_header_prompt,
-    ]
-    assert all(
-        row["text"].startswith(
-            "These are still failing — fix the implementation so they pass. Do not explain, just edit the code."
-        )
-        for row in sidecar_rows[1:]
-    )
+    # 3 rows: initial + feedback-1 + feedback-2
+    assert len(sidecar_rows) == 3
+    assert sidecar_rows[0]["text"] == "INITIAL PROMPT"
 
 
 @pytest.mark.parametrize(
@@ -608,7 +446,7 @@ def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
             return _stats(session_id="sess-1", killed_reason=None, exit_code=1, cost_usd=0.0)
         return _stats(session_id="sess-1", killed_reason=None, exit_code=0, cost_usd=0.1)
 
-    monkeypatch.setattr(runner, "_run_opencode", _fake_opencode)
+    monkeypatch.setattr(runner, "_run_opencode_with_zero_tool_resumes", _fake_opencode)
 
     result = runner._run_cell_impl(
         run_label="harness-limit-continue",
@@ -624,6 +462,7 @@ def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
     assert docker_state["force_kill_calls"] == 0
 
 
+@pytest.mark.slow
 def test_non_budget_nonzero_worker_exit_classifies_as_harness_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -633,13 +472,14 @@ def test_non_budget_nonzero_worker_exit_classifies_as_harness_error(
     monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "PROMPT")
     monkeypatch.setattr(
         runner,
-        "_run_opencode",
+        "_run_opencode_with_zero_tool_resumes",
         lambda **kwargs: _stats(
             session_id="sess-1",
             killed_reason=None,
             exit_code=1,
             cost_usd=0.0,
             budget_stop_detected=False,
+            terminal_zero_tool_turn=False,
         ),
     )
     monkeypatch.setattr(

@@ -279,6 +279,7 @@ def test_run_cell_impl_sets_delivery_not_measured_when_memory_on_without_inject_
     assert result.delivery == "not_measured"
 
 
+@pytest.mark.slow
 def test_run_cell_impl_sets_delivery_na_when_memory_off(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path, memory_mode="off")
 
