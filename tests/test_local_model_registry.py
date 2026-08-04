@@ -12,7 +12,7 @@ from wevibe_bench.adapters.backgammon import build_worker_opencode_config
 from wevibe_bench.config import WORKER_MODEL_REGISTRY
 
 LOCAL_MODEL_IDS = (
-    "qwen3.6-35b-a3b-bench",
+    "wevibe-bench-worker",
     "qwen3.6-40b-deckard-bench",
     "qwen3.6-27b-fable-bench",
 )

@@ -337,37 +337,22 @@ class LadderRung:
 
 
 # Scored-ladder roster — the single source of truth for the ordered rungs.
-# CURRENT (2026-07-31, Walter): LOCAL-MODEL PIVOT — three local LM Studio bench
-# aliases (see the amendment comment on the tuple below). SUPERSEDED paid era
-# (retained for history): OrcaRouter migration 2026-07-24, kimi-k3 source /
-# kimi-k2.7-code (BRACKET) / tencent-hy3 measure; GLM-5.2 deselected 2026-07-27;
-# xiaomi/mimo-v2.5-pro dropped (absent from catalog); OpenRouter-era rungs
-# (opus/big-pickle) removed. OrcaRouter exposes no upstream provider pins.
-# Roster amendment (Walter 2026-07-31 — LOCAL-MODEL PIVOT): the scored roster is
-# now the three LOCAL LM Studio bench aliases, all role=measure with (off, on)
-# self-lift arms; capability ordering is EMPIRICAL (established by the OFF
-# baselines), never assumed from size. The paid OrcaRouter roster above is
-# SUPERSEDED history (kimi-k3 source off-only; k2.7-code BRACKET; hy3 measure).
-# Slugs keep the `orcarouter/` prefix purely as the worker→proxy opencode
-# provider selector; the base URL now points at the LOCAL llm proxy :4545 via
-# WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL (env-only pluggability, no mechanism
-# change). LM Studio is strictly serial: one model loaded at a time, swapped
-# via the proxy's /control/load; cells run one at a time.
+# CURRENT (2026-08-03, D4): SINGLE SUBJECT. The bench never selects a model —
+# it tests whatever is loaded and learns which via API-response observation
+# (identity handled separately by the observed-extraction invariant; see D2).
+# There is ONE subject = whichever model is resident in LM Studio at run time,
+# with two self-lift arms off/on. The `orcarouter/wevibe-bench-worker` slug is a
+# neutral marker for "whatever is loaded" — the worker→proxy opencode provider
+# selector (already the default) — NOT a specific model identity.
+#
+# SUPERSEDED history: paid OrcaRouter era 2026-07-24 (kimi-k3 source /
+# kimi-k2.7-code BRACKET / tencent-hy3 measure; GLM-5.2 deselected 2026-07-27;
+# xiaomi/mimo-v2.5-pro dropped), and the local-model pivot 2026-07-31 that
+# enumerated THREE LM Studio aliases (qwen3.6-35b-a3b/40b-deckard/27b-fable).
+# Both eras named models; under the one-subject design the roster names none.
 BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
     LadderRung(
-        model="orcarouter/qwen3.6-35b-a3b-bench",
-        role="measure",
-        memory_modes=("off", "on"),
-        recorded_class=None,
-    ),
-    LadderRung(
-        model="orcarouter/qwen3.6-40b-deckard-bench",
-        role="measure",
-        memory_modes=("off", "on"),
-        recorded_class=None,
-    ),
-    LadderRung(
-        model="orcarouter/qwen3.6-27b-fable-bench",
+        model="orcarouter/wevibe-bench-worker",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class=None,
@@ -404,15 +389,16 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             "output": 262_144,
         },
     },
-    # Local LM Studio roster (Walter 2026-07-31: bench the three local models,
-    # no paid ones). Model ids are the bench aliases served by the LOCAL
+    # Local LM Studio declarations. These are opencode MODEL BLOCKS used by
+    # build_worker_opencode_config — NOT scored-roster rungs (the roster is now a
+    # single subject under D4). Model ids are the bench aliases served by the LOCAL
     # llm proxy (config/models.yaml, "Bench aliases"); the worker reaches it
     # via WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL=http://host.docker.internal:4545/v1
     # (or --proxy-base-url). Full native context 262144 per Walter's
     # full-context order; output 32768 so reasoning can never eat the whole
     # completion budget (R2 clamp-guillotine pattern, applied to local
     # thinking models that take no separate reasoning budget).
-    "qwen3.6-35b-a3b-bench": {
+    "wevibe-bench-worker": {
         "name": "Qwen3.6 35B A3B (local)",
         "reasoning": True,
         "tool_call": True,

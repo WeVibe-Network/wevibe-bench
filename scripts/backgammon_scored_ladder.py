@@ -1,16 +1,15 @@
-"""Stage-8 scored backgammon ladder driver (roster A).
+"""Stage-8 scored backgammon ladder driver.
 
 Runs the scored OFF/ON ladder by invoking scripts/backgammon_ladder.py once per
 cell in strict roster order, deriving the roster from wevibe_bench/config.py
-(``backgammon_scored_ladder_roster()``). The SOURCE rung (GLM-5.2) runs session +
-self-extraction to populate the org pool; MEASURE rungs run scored OFF/ON
-session-only cells consuming that pool (no extraction below the source, so the
-pool is frozen for repeats).
+(``backgammon_scored_ladder_roster()``). The bench never selects a model: there
+is ONE subject = whichever model is resident in LM Studio at run time, with
+off/on self-lift arms; identity (what model actually served) is OBSERVED from
+API responses and handled separately. No expected-upstream-model assertion.
 
 Per cell this driver owns:
 - stage-ledger admission (stage 8) + prebudget/post-run recording,
-- per-cell OpenRouter proxy lifecycle (pinned profile, live pricing, hard cap),
-- upstream-identity assertion (expected_upstream_model rungs, e.g. tencent/hy3),
+- per-cell proxy lifecycle (live pricing, hard cap),
 - delivery log-assertion for memory-ON cells (clone /v1/recall 200s +
   recall_env_injection=container),
 - variance policy N-logic (docs/VARIANCE-POLICY.md): N=1 baseline, borderline
@@ -101,11 +100,14 @@ REQUIRED_RUNG_PARAM_FIELDS = (
     "cost_limit",
     "cost_target",
 )
+# D4: expected_upstream_model removed — there is no expected model; the bench
+# tests whatever is loaded and observes identity via API response (D2). The two
+# code paths that read it use .get() defensively, so legacy frozen rung_params
+# carrying the key are skipped harmlessly.
 OPTIONAL_RUNG_PARAM_FIELDS = (
     "provider_order",
     "provider_quant",
     "output_price_per_1m",
-    "expected_upstream_model",
 )
 
 IMPORT_SCHEMA_VERSION = 1
@@ -388,7 +390,9 @@ def _build_manifest(
         "trace": trace,
     }
     manifest["preregistration"] = {
-        "roster": "kimi-k3 SOURCE OFF (+ self-extraction) -> kimi-k2.7-code MEASURE OFF/ON -> hy3 MEASURE OFF/ON; OrcaRouter upstream via host proxy profiles (kimik3, kimicode, hy3); memories flow down",
+        # D4: single subject — whichever model is resident in LM Studio at run
+        # time; arms are off/on self-lift. No model names by design.
+        "roster": "SINGLE SUBJECT (whatever model is loaded) MEASURE OFF/ON self-lift arms",
         "task": "locked backgammon prompt/CONTRACT/oracle",
         "feedback": "problems-only",
         "disclosures": disclosures,

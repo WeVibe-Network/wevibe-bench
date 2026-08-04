@@ -302,23 +302,22 @@ def test_no_embedded_roster_derives_from_config() -> None:
 
 
 def test_exact_roster_a_cell_allocation() -> None:
+    # D4: single-subject roster — ONE model (whatever is loaded), two self-lift
+    # arms off/on. The 3-rung × 2-arm = 6-cell shape of the local-model-pivot
+    # era is gone; the bench never enumerates models.
     plan = bl._build_plan()
-    assert len(plan) == 6
+    assert len(plan) == 2
 
     expected = [
         (1, "orcarouter/wevibe-bench-worker", "measure", "off", "session"),
         (2, "orcarouter/wevibe-bench-worker", "measure", "on", "session"),
-        (3, "orcarouter/qwen3.6-40b-deckard-bench", "measure", "off", "session"),
-        (4, "orcarouter/qwen3.6-40b-deckard-bench", "measure", "on", "session"),
-        (5, "orcarouter/qwen3.6-27b-fable-bench", "measure", "off", "session"),
-        (6, "orcarouter/qwen3.6-27b-fable-bench", "measure", "on", "session"),
     ]
     actual = [
         (int(c["run_number"]), str(c["model"]), str(c["role"]), str(c["memory_mode"]), str(c["phase"]))
         for c in plan
     ]
     assert actual == expected
-    assert [int(c["run_number"]) for c in plan] == list(range(1, 7))
+    assert [int(c["run_number"]) for c in plan] == list(range(1, 3))
 
 
 def test_roster_validation_rejects_source_after_measure() -> None:
@@ -345,8 +344,9 @@ def test_manifest_freeze_deterministic_and_fingerprint() -> None:
     assert bl._manifest_comparable(m1) == bl._manifest_comparable(m2)
     assert m1["config_fingerprint"] == backgammon_ladder_roster_fingerprint()
     assert m1["schema_version"] == BACKGAMMON_LADDER_SCHEMA_VERSION
-    assert m1["total_cells"] == 6
-    assert len(m1["cell_allocation"]) == 6
+    # D4: single-subject roster — one model, off/on arms = 2 cells.
+    assert m1["total_cells"] == 2
+    assert len(m1["cell_allocation"]) == 2
 
     comparable_for_guard = dict(bl._manifest_comparable(m1))
     comparable_for_guard.pop("preregistration", None)
@@ -1152,7 +1152,10 @@ def test_dry_run_prints_plan_without_execution(tmp_path: pathlib.Path, monkeypat
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--dry-run"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "wevibe-bench-worker" in out and "40b-deckard-bench" in out and "27b-fable-bench" in out
+    # D4: single subject (whatever model is loaded) — only the neutral marker
+    # slug appears; no specific bench aliases are named by the roster.
+    assert "wevibe-bench-worker" in out
+    assert "deckard-bench" not in out and "fable-bench" not in out
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
@@ -1174,7 +1177,8 @@ def test_dry_run_with_rung_params_discloses_binding_budget(tmp_path: pathlib.Pat
     rows = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert rows
     assert all(row["binding_budget_meter"] == bl.BINDING_BUDGET_METER for row in rows)
-    assert [float(row["binding_budget_usd"]) for row in rows] == pytest.approx([12.0, 12.0, 2.7, 2.7, 2.0, 2.0])
+    # D4: single subject (off/on arms) → two rows, one cap each.
+    assert [float(row["binding_budget_usd"]) for row in rows] == pytest.approx([12.0, 2.7])
 
 
 @pytest.mark.parametrize(
@@ -1240,6 +1244,7 @@ def test_only_reps_dry_run_prints_exact_selected_reps(
     monkeypatch: Any,
     capsys: Any,
 ) -> None:
+    # D4: single-subject roster has runs {1,2} (off/on arms); select exact pairs.
     params_path = _write_rung_params(tmp_path)
     exit_code = _invoke_main(
         monkeypatch,
@@ -1250,7 +1255,7 @@ def test_only_reps_dry_run_prints_exact_selected_reps(
             str(params_path),
             "--dry-run",
             "--only-reps",
-            "1:1,2:2,4:1",
+            "1:1,2:2",
         ],
     )
     assert exit_code == 0
@@ -1261,7 +1266,6 @@ def test_only_reps_dry_run_prints_exact_selected_reps(
     assert [(int(row["run_number"]), int(row.get("rep", 1))) for row in rows] == [
         (1, 1),
         (2, 2),
-        (4, 1),
     ]
 
 
@@ -1278,11 +1282,11 @@ def test_only_reps_executes_exact_selected_pairs(tmp_path: pathlib.Path, monkeyp
             "--rung-params",
             str(params_path),
             "--only-reps",
-            "1:1,2:2,4:1",
+            "1:1,2:2",
         ],
     )
     assert exit_code == 0
-    assert recorder == [(1, 1), (2, 2), (4, 1)]
+    assert recorder == [(1, 1), (2, 2)]
 
 
 def test_only_reps_rep2_only_bypasses_trigger_evaluation(
@@ -1390,17 +1394,18 @@ def test_fresh_run_writes_manifest_and_runs_all_cells(tmp_path: pathlib.Path, mo
         monkeypatch,
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)],
     )
+    # D4: single-subject roster — one model (off/on arms) = runs 1..2.
     assert exit_code == 0
-    assert recorder == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
+    assert recorder == [(1, 1), (2, 1)]
 
     manifest = bl._load_json(tmp_path / bl.MANIFEST_NAME)
     assert manifest is not None
     assert manifest["config_fingerprint"] == backgammon_ladder_roster_fingerprint()
-    assert len(manifest["cell_allocation"]) == 6
+    assert len(manifest["cell_allocation"]) == 2
 
     summary = bl._load_json(tmp_path / bl.SUMMARY_NAME)
     assert summary is not None
-    assert [c["n"] for c in summary["cells"]] == [1, 1, 1, 1, 1, 1]
+    assert [c["n"] for c in summary["cells"]] == [1, 1]
     assert all(c["triggers_fired"] == [] for c in summary["cells"])
 
 
@@ -1419,8 +1424,9 @@ def test_borderline_cell_repeats_to_n3_and_discloses_n(tmp_path: pathlib.Path, m
         monkeypatch,
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)],
     )
+    # D4: single subject — run 1 (OFF arm) is borderline → N=3; run 2 (ON arm).
     assert exit_code == 0
-    assert recorder == [(1, 1), (1, 2), (1, 3), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
+    assert recorder == [(1, 1), (1, 2), (1, 3), (2, 1)]
 
     summary = bl._load_json(tmp_path / bl.SUMMARY_NAME)
     assert summary is not None
@@ -1511,7 +1517,8 @@ def test_valid_resume_skips_completed_and_proceeds(tmp_path: pathlib.Path, monke
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path), "--resume"],
     )
     assert exit_code == 0
-    assert recorder == [(2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
+    # D4: single subject — plan is runs {1,2} (off/on); run 1 was checkpointed.
+    assert recorder == [(2, 1)]
 
 
 def test_checkpoint_round_trip_accepts_new_and_historical_entry_shapes(
@@ -1549,7 +1556,8 @@ def test_checkpoint_round_trip_accepts_new_and_historical_entry_shapes(
         ["--runs-dir", str(tmp_path), "--rung-params", str(params_path), "--resume"],
     )
     assert exit_code == 0
-    assert recorder == [(3, 1), (4, 1), (5, 1), (6, 1)]
+    # D4: single subject — plan is runs {1,2}; both checkpointed → nothing left.
+    assert recorder == []
 
 
 def test_resume_rejects_roster_fingerprint_drift(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
@@ -1736,7 +1744,8 @@ def test_pricing_drift_aborts_before_any_paid_cell(
     params_path = _write_rung_params(tmp_path)
     exit_code = _invoke_main(monkeypatch, ["--runs-dir", str(tmp_path), "--rung-params", str(params_path)])
     assert exit_code == 3
-    assert captured_roster_models == ["wevibe-bench-worker", "qwen3.6-40b-deckard-bench", "qwen3.6-27b-fable-bench"]
+    # D4: single subject — pricing gate sees exactly one roster model.
+    assert captured_roster_models == ["wevibe-bench-worker"]
 
     escalation = bl._load_json(tmp_path / bl.ESCALATE_NAME)
     assert escalation is not None
