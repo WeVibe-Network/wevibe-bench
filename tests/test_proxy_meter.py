@@ -6,6 +6,8 @@ from urllib.error import HTTPError
 
 import pytest
 
+import psycopg
+
 from wevibe_bench.proxy_meter import ModelIdentity, PricingVerdict, SpendMeter, verify_pricing
 
 
@@ -94,6 +96,33 @@ def test_run_spend_maps_row_and_is_select_only(monkeypatch: pytest.MonkeyPatch, 
     assert "session_id=sess-1" in caplog.text
     assert "true_usd=1.23456789" in caplog.text
     assert "benchmark_usd=2.34567890" in caplog.text
+
+
+def test_run_spend_degrades_to_unmetered_when_db_unavailable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def fake_connect(dsn: str, *, connect_timeout: int) -> None:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr("wevibe_bench.proxy_meter.psycopg.connect", fake_connect)
+    caplog.set_level(logging.WARNING)
+
+    meter = SpendMeter("postgresql://bench")
+    result = meter.run_spend("sess-x")
+
+    assert result.calls == 0
+    assert result.true_usd == 0.0
+    assert result.benchmark_usd == 0.0
+    assert result.uncached_input_tokens == 0
+    assert result.cached_input_tokens == 0
+    assert result.output_tokens == 0
+    assert result.reasoning_tokens == 0
+    assert result.unmetered_calls == 0
+    assert result.last_call_at is None
+
+    assert "outcome=unmetered" in caplog.text
+    assert "meter_unavailable" in caplog.text
+    assert "session_id=sess-x" in caplog.text
 
 
 def test_model_identity_and_mismatch_basename_rules(monkeypatch: pytest.MonkeyPatch) -> None:

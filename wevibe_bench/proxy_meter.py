@@ -104,10 +104,28 @@ class SpendMeter:
             "MAX(ts) "
             "FROM spend_events WHERE session_id=%s"
         )
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, (session_id,))
-                row = cur.fetchone()
+        try:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (session_id,))
+                    row = cur.fetchone()
+        except (psycopg.OperationalError, OSError) as exc:
+            logger.warning(
+                "proxy_meter.run_spend op=run_spend session_id=%s outcome=unmetered reason=meter_unavailable error_type=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            return RunSpend(
+                calls=0,
+                true_usd=0.0,
+                benchmark_usd=0.0,
+                uncached_input_tokens=0,
+                cached_input_tokens=0,
+                output_tokens=0,
+                reasoning_tokens=0,
+                unmetered_calls=0,
+                last_call_at=None,
+            )
 
         if row is None:
             row = (0, 0, 0, 0, 0, 0, 0, 0, None)
