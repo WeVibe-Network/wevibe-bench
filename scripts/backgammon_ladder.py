@@ -17,7 +17,9 @@ from typing import Any
 from wevibe_bench.lifecycle.logging_util import new_trace_id, run_logger
 
 
-DEFAULT_ORG_ID = "wevibe-org-0"
+# D5a: no silent default org. Pinned explicitly by the scored_ladder driver for phase all/extraction;
+# wevibe-org-0 is never a valid arm target.
+DEFAULT_ORG_ID = ""
 DEFAULT_EXTRACT_TIMEOUT = 900
 DEFAULT_MAX_RETRIES = 5
 _PHASE_ORDER = ("session", "extraction")
@@ -286,7 +288,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory-modes", default="off")
     parser.add_argument("--extract-timeout", type=int, default=DEFAULT_EXTRACT_TIMEOUT)
     parser.add_argument("--extract-model", default=None)
-    parser.add_argument("--org-id", default=DEFAULT_ORG_ID)
+    parser.add_argument("--org-id", default=DEFAULT_ORG_ID, help='Org for extraction (phase all/extraction). MUST be pinned explicitly; "wevibe-org-0" is never a valid arm target.')
     parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
     parser.add_argument("--mock", choices=("none", "golden", "scaffold"), default="none")
     parser.add_argument("--session-id", default="")
@@ -439,6 +441,14 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         _split_extra_flags(str(args.extra_extract_flags))
     except ValueError as exc:
         parser.error(f"invalid --extra-extract-flags: {exc}")
+    # D5a: fail loudly when the run needs an org (extraction / all) but none is pinned.
+    phase_needs_org = str(args.phase).strip().lower() in ("all", "extraction")
+    if phase_needs_org:
+        resolved = str(args.org_id or "").strip()
+        if resolved == "":
+            parser.error("--org-id MUST be explicitly pinned for this run (no silent default); e.g. --org-id wevibe-org-2")
+        if resolved == "wevibe-org-0":
+            parser.error('--org-id="wevibe-org-0" is NEVER a valid arm target; pin an explicit org (e.g. wevibe-org-2)')
 
 
 def main() -> int:

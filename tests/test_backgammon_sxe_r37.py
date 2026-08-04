@@ -546,7 +546,7 @@ def _run_main_capture_extract_call(
     args = argparse.Namespace(
         run_label=run_label,
         source_mode=source_mode,
-        org_id=sx.DEFAULT_ORG_ID,
+        org_id="wevibe-org-2",  # D5a: no DEFAULT_ORG_ID; extraction must pin an explicit (non-org-0) arm target.
         session_model="orcarouter/opencode/big-pickle",
         extract_model=None,
         extract_timeout=60,
@@ -616,10 +616,10 @@ def _run_main_capture_extract_call(
 
     class _FakeOrchestrator:
         def __init__(self, *_args, **_kwargs) -> None:
-            self.org_id = sx.DEFAULT_ORG_ID
+            self.org_id = "wevibe-org-2"
 
         def run_m1(self) -> dict[str, str]:
-            return {"org_id": sx.DEFAULT_ORG_ID}
+            return {"org_id": "wevibe-org-2"}
 
     monkeypatch.setattr(sx, "McpProcessManager", _FakeProcman)
     monkeypatch.setattr(sx, "LifecycleOrchestrator", _FakeOrchestrator)

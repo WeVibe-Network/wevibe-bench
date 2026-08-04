@@ -272,6 +272,10 @@ def _synthetic_entry(cell: dict[str, Any], rep: int, **stats_kwargs: Any) -> dic
 
 
 def _invoke_main(monkeypatch: Any, argv: list[str]) -> int:
+    # D5a: --org-id is now required with no silent default. Pin an explicit valid
+    # arm org (wevibe-org-2) unless the test already supplies its own.
+    if "--org-id" not in argv:
+        argv = [*argv, "--org-id", "wevibe-org-2"]
     monkeypatch.setattr(sys, "argv", ["backgammon_scored_ladder.py", *argv])
     return bl.main()
 

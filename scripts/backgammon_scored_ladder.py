@@ -84,7 +84,6 @@ MAX_STEPS_PER_ATTEMPT = 100
 MAX_OUTPUT_TOKENS = 32000
 REASONING_EFFORT = "high"
 EXTRACT_TIMEOUT_S = 900
-DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_CLONE_LOG = "runs/clone4550.log"
 BINDING_BUDGET_METER = "proxy_budget_ledger.hard_cap_usd"
 PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
@@ -2103,7 +2102,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rung-params", default=None, help="JSON file with per-model proxy/pricing/cost params (required unless --dry-run).")
     parser.add_argument("--clone-log", default=str(_repo_root() / DEFAULT_CLONE_LOG), help="Recall clone logfile for ON-cell delivery assertion.")
     parser.add_argument("--proxy-port", type=int, default=None)
-    parser.add_argument("--org-id", default=DEFAULT_ORG_ID)
+    parser.add_argument(
+        "--org-id",
+        required=True,
+        help="Org MUST be explicitly pinned (e.g. --org-id wevibe-org-2). "
+        '"wevibe-org-0" is NEVER a valid arm target.',
+    )
     parser.add_argument(
         "--import-cell",
         default=None,
@@ -2238,6 +2242,12 @@ def main() -> int:
         parser.error("--only-reps cannot be combined with --start-cell")
     if args.start_cell is not None and int(args.start_cell) < 1:
         parser.error("--start-cell must be >= 1")
+    # D5a: org MUST be pinned explicitly. "wevibe-org-0" is never a valid arm target;
+    # silently defaulting to it pointed scored runs at the wrong (invalid) org.
+    if not args.org_id or str(args.org_id).strip() == "":
+        raise LadderAbort("--org-id must be explicitly pinned (e.g. --org-id wevibe-org-2); no silent default.")
+    if str(args.org_id).strip() == "wevibe-org-0":
+        raise LadderAbort('--org-id="wevibe-org-0" is NEVER a valid arm target; pin an explicit org (e.g. wevibe-org-2).')
 
     plan = _build_plan()
     valid_runs = {int(cell["run_number"]) for cell in plan}

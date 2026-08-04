@@ -34,7 +34,8 @@ from wevibe_bench.spend_key import (
 
 
 DEFAULT_RUN_LABEL = "backgammon-smoke"
-DEFAULT_ORG_ID = "wevibe-org-0"
+# D5a: no silent default org. Extraction requires an explicitly pinned org; wevibe-org-0 is never a valid arm target.
+DEFAULT_ORG_ID = ""
 DEFAULT_RUNS_DIR = "runs/backgammon"
 DEFAULT_EXTRACT_TIMEOUT_S = 900
 TASK_HEADER = "Build a Node+TypeScript backgammon game passing the CONTRACT gates"
@@ -119,7 +120,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--org-id",
         default=DEFAULT_ORG_ID,
-        help="Target org id for submit/approve/prove (default: wevibe-org-0).",
+        help='Target org id for submit/approve/prove. MUST be explicitly pinned; "wevibe-org-0" is never a valid arm target.',
     )
     parser.add_argument(
         "--session-model",
@@ -604,6 +605,12 @@ def _commit_status_label(verify_payload: Any, submission_hash: str) -> str:
 def main() -> int:
     load_bench_env()
     args = _build_arg_parser().parse_args()
+    # D5a: extraction requires an explicitly pinned org; fail loudly if none is pinned.
+    resolved_org_id = str(args.org_id or "").strip()
+    if resolved_org_id == "":
+        raise RuntimeError("--org-id MUST be explicitly pinned for this extraction (no silent default); e.g. --org-id wevibe-org-2")
+    if resolved_org_id == "wevibe-org-0":
+        raise RuntimeError('--org-id="wevibe-org-0" is NEVER a valid arm target; pin an explicit org (e.g. wevibe-org-2)')
     extract_model = args.extract_model or args.session_model
 
     runs_dir = Path(args.runs_dir).expanduser().resolve()

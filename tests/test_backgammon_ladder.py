@@ -45,6 +45,10 @@ def _patch_driver_logging(monkeypatch: Any, runs_dir: pathlib.Path) -> None:
 
 
 def _invoke_main(monkeypatch: Any, argv: list[str]) -> int:
+    # D5a: org must be explicitly pinned (no silent default). Inject a valid arm
+    # org unless the test already supplies its own.
+    if "--org-id" not in argv:
+        argv = [*argv, "--org-id", "wevibe-org-2"]
     monkeypatch.setattr(sys, "argv", ["backgammon_ladder.py", *argv])
     return bl.main()
 

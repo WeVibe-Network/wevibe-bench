@@ -264,7 +264,8 @@ class RunConfig:
     served_memories_host_path: str = field(default_factory=_default_served_memories_host_path)
     served_memories_container_path: str = "/home/worker/.wevibe/served-memories.json"
     require_delivery_verification: bool = True  # BENCHMARK INTEGRITY: refuse to score an ON cell whose delivery != YES
-    org_id: str = "wevibe-org-0"  # the single benchmark org (one-org invariant)
+    org_id: str = ""  # D5a: org MUST be pinned explicitly by the run driver; wevibe-org-0 is never a valid arm target.
+    # orchestrator._resolve_owned_org handles empty/None gracefully; do NOT make this required (tests build RunConfig() bare).
     mc_version: int = 1  # MC-1
     hub_url: str = field(default_factory=lambda: os.environ.get("WEVIBE_BENCH_HUB_URL") or "http://127.0.0.1:4440")  # wevibe-hub Docker container `wevibe-hub`; health GET /health (public, no auth). The ONE hub. NOT the mcp.
     mcp_recall_url: str = field(default_factory=lambda: os.environ.get("WEVIBE_BENCH_MCP_RECALL_URL") or "http://127.0.0.1:4450")  # wevibe-mcp recall CLIENT; health GET /v1/health (bearer-gated). :4450 default, :4550 = Option-C bench clone. NOT the hub.
