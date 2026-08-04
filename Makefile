@@ -1,10 +1,9 @@
 .PHONY: test test-fast test-file test-name test-slowest test-all
 
 test:
-	@pip install -e ".[test]" pytest-xdist pytest-timeout
 	@TIMESTAMP=$$(date +%Y%m%dT%H%M%S) && \
 	mkdir -p runs && \
-	pytest -v > runs/pytest-$$TIMESTAMP.log 2>&1; \
+	.venv/bin/python -m pytest -v > runs/pytest-$$TIMESTAMP.log 2>&1; \
 	CODE=$$?; \
 	cp runs/pytest-$$TIMESTAMP.log runs/pytest-last.log; \
 	cd runs && ls -1t pytest-*.log | tail -n +11 | xargs -r rm --; \
