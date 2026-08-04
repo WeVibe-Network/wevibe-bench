@@ -107,7 +107,7 @@ def test_resolve_spend_db_dsn_defaults_and_overrides(tmp_path: Path) -> None:
 
 def test_resolve_spend_proxy_base_url_defaults_and_overrides(tmp_path: Path) -> None:
     default = resolve_spend_proxy_base_url(env={}, dotenv_path=tmp_path / ".env")
-    assert default == "http://127.0.0.1:4480/v1"
+    assert default == "http://127.0.0.1:4545/v1"
 
     dotenv = tmp_path / ".env"
     dotenv.write_text("WEVIBE_BENCH_SPEND_PROXY_BASE_URL=http://from-dotenv/v1\n", encoding="utf-8")
@@ -123,7 +123,7 @@ def test_resolve_spend_proxy_base_url_defaults_and_overrides(tmp_path: Path) -> 
 
 def test_resolve_worker_spend_proxy_base_url_defaults_and_overrides(tmp_path: Path) -> None:
     default = resolve_worker_spend_proxy_base_url(env={}, dotenv_path=tmp_path / ".env")
-    assert default == "http://host.docker.internal:4480/v1"
+    assert default == "http://host.docker.internal:4545/v1"
     assert default == DEFAULT_WORKER_SPEND_PROXY_BASE_URL
 
     dotenv = tmp_path / ".env"
@@ -142,7 +142,7 @@ def test_resolve_worker_spend_proxy_base_url_defaults_and_overrides(tmp_path: Pa
 
     assert (
         resolve_worker_spend_proxy_base_url(
-            env={"WEVIBE_BENCH_SPEND_PROXY_BASE_URL": "http://127.0.0.1:4480/v1"},
+            env={"WEVIBE_BENCH_SPEND_PROXY_BASE_URL": "http://127.0.0.1:4545/v1"},
             dotenv_path=tmp_path / "missing.env",
         )
         == DEFAULT_WORKER_SPEND_PROXY_BASE_URL

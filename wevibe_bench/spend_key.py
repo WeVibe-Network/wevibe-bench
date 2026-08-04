@@ -22,11 +22,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_DOTENV_PATH = _REPO_ROOT / ".env"
 _DEFAULT_OPENCODE_CONFIG_PATH = Path("~/.config/opencode/opencode.json")
 _DEFAULT_SPEND_DB_DSN = "postgresql://spend_proxy:spend_proxy_dev@127.0.0.1:5440/spend_proxy"
-_DEFAULT_SPEND_PROXY_BASE_URL = "http://127.0.0.1:4480/v1"
+_DEFAULT_SPEND_PROXY_BASE_URL = "http://127.0.0.1:4545/v1"
 # Container-facing default for worker cells; Docker launch adds
 # --add-host host.docker.internal:host-gateway (docker_worker.py), which is
 # reachable on macOS Docker Desktop and Linux.
-DEFAULT_WORKER_SPEND_PROXY_BASE_URL = "http://host.docker.internal:4480/v1"
+DEFAULT_WORKER_SPEND_PROXY_BASE_URL = "http://host.docker.internal:4545/v1"
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
