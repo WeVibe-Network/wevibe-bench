@@ -642,6 +642,16 @@ def test_non_budget_nonzero_worker_exit_classifies_as_harness_error(
             budget_stop_detected=False,
         ),
     )
+    monkeypatch.setattr(
+        runner,
+        "_run_gate_report",
+        lambda **kwargs: {
+            "verdict": "FAIL",
+            "conformed": True,
+            "problems": [{"check": "x"}],
+            "failed_gates": ["x"],
+        },
+    )
 
     result = runner._run_cell_impl(
         run_label="harness-error",
