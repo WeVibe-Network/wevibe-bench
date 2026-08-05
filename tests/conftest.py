@@ -11,7 +11,7 @@ import pytest
 def pytest_report_header(config):
     """Print usage guidance on every test run."""
     lines = []
-    lines.append("See TESTING.md for usage.")
+    lines.append("See RUNBOOK.md for usage.")
     lines.append(
         "NEVER pipe pytest through tail/head/grep — "
         "tee to runs/pytest-*.log and read the file."
