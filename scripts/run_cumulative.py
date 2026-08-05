@@ -100,7 +100,6 @@ _LOG = logging.getLogger("run_cumulative")
 
 DEFAULT_MANIFEST_PATH = Path("runs") / "cumulative" / "manifest.json"
 DEFAULT_TASK_LABEL = "backgammon-cumulative-primary"
-DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_EXTRACT_TIMEOUT_S = 900
 DEFAULT_SEED = config.RunConfig().rng_seed
 DEFAULT_ON_BUDGET = 0
@@ -2505,8 +2504,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--org",
-        default=DEFAULT_ORG_ID,
-        help=f"Org id for extraction/commit flow (default: {DEFAULT_ORG_ID}).",
+        default=None,
+        help="Org id for extraction/commit flow; required for the campaign/commit flow, no default.",
     )
     parser.add_argument(
         "--roster-model",

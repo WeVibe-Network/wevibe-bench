@@ -374,22 +374,6 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             "output": 128_000,
         },
     },
-    "kimi/kimi-k2.7-code": {
-        "name": "Kimi K2.7 Code",
-        "tool_call": True,
-        "limit": {
-            "context": 262_144,
-            "output": 262_144,
-        },
-    },
-    "tencent/hy3": {
-        "name": "Hy3",
-        "tool_call": True,
-        "limit": {
-            "context": 262_144,
-            "output": 262_144,
-        },
-    },
     # Local LM Studio declarations. These are opencode MODEL BLOCKS used by
     # build_worker_opencode_config — NOT scored-roster rungs (the roster is now a
     # single subject under D4). Model ids are the bench aliases served by the LOCAL
@@ -410,26 +394,6 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         # Pinned so opencode's provider-default temperature (0.55 for Qwen)
         # can never leak into a scored cell invisibly; matches the local
         # proxy's bench-profile default.
-        "options": {"temperature": 0.6},
-    },
-    "qwen3.6-40b-deckard-bench": {
-        "name": "Qwen3.6 40B Deckard (local)",
-        "reasoning": True,
-        "tool_call": True,
-        "limit": {
-            "context": 262_144,
-            "output": 32_768,
-        },
-        "options": {"temperature": 0.6},
-    },
-    "qwen3.6-27b-fable-bench": {
-        "name": "Qwen3.6 27B Fable (local)",
-        "reasoning": True,
-        "tool_call": True,
-        "limit": {
-            "context": 262_144,
-            "output": 32_768,
-        },
         "options": {"temperature": 0.6},
     },
 }
