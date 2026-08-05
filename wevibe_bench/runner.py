@@ -221,7 +221,6 @@ def _cell_from_outcome(
     _ = wave_index
     pattern_position = f"{wave_id}:{position_in_wave}" if wave_id else None
     run_block = wave_id if wave_id else None
-    is_on_condition = condition.startswith("ON")
 
     return Cell(
         model=model,
@@ -238,9 +237,9 @@ def _cell_from_outcome(
         not_scored_reason=not_scored_reason,
         pattern_position=pattern_position,
         run_block=run_block,
-        injection_count=injection_count if is_on_condition else 0,
-        injected_block_chars=(injected_block_chars if is_on_condition else None),
-        injected_block_est_tokens=(injected_block_est_tokens if is_on_condition else None),
+        injection_count=injection_count,
+        injected_block_chars=injected_block_chars,
+        injected_block_est_tokens=injected_block_est_tokens,
         memory_mode=memory_mode,
         keyword_match_rate=keyword_match_rate,
         keyword_matched_count=keyword_matched_count,

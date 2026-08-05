@@ -365,15 +365,6 @@ BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
 # additions (interleaved + optional headers) are layered by
 # adapters.backgammon.build_worker_opencode_config.
 WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
-    "kimi/kimi-k3": {
-        "name": "Kimi K3",
-        "reasoning": True,
-        "tool_call": True,
-        "limit": {
-            "context": 1_048_576,
-            "output": 128_000,
-        },
-    },
     # Local LM Studio declarations. These are opencode MODEL BLOCKS used by
     # build_worker_opencode_config — NOT scored-roster rungs (the roster is now a
     # single subject under D4). Model ids are the bench aliases served by the LOCAL
