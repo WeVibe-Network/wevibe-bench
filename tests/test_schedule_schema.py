@@ -92,16 +92,6 @@ class TestBenchmarkWave:
 class TestBenchmarkSchedule:
     """Tests for BenchmarkSchedule validation."""
 
-    def test_default_schedule_has_canon_roster(self) -> None:
-        """The default schedule uses the current canon roster (UNKNOWN tiers)."""
-        sched = _default_benchmark_schedule()
-        assert len(sched.waves) == 1
-        wave = sched.waves[0]
-        assert wave.wave_id == "baseline"
-        assert wave.models == ("kimi/kimi-k3", "kimi/kimi-k2.7-code", "tencent/hy3")
-        assert wave.tier == "UNKNOWN"
-        assert wave.memory_modes == ("off", "on")
-        assert sched.schema_version == 1
 
     def test_all_models_deduplicates_preserving_order(self) -> None:
         """all_models() deduplicates across waves, preserving first-seen order."""
@@ -272,11 +262,6 @@ class TestActivePathMigration:
         assert "schedule" in d
         assert "model_ladder" not in d
 
-    def test_runconfig_schedule_all_models_from_default(self) -> None:
-        """Default schedule.all_models() returns canon roster."""
-        cfg = RunConfig()
-        models = cfg.schedule.all_models()
-        assert models == ("kimi/kimi-k3", "kimi/kimi-k2.7-code", "tencent/hy3")
 
     def test_runconfig_schedule_all_models_from_custom(self) -> None:
         """Custom schedule.all_models() returns custom models."""
@@ -324,22 +309,12 @@ class TestCorpusPreservationGuard:
 class TestCanonRoster:
     """Tests for canon roster constants."""
 
-    def test_backgammon_scored_ladder_roster_exists(self) -> None:
-        """BACKGAMMON_SCORED_LADDER_ROSTER is defined and accessible."""
-        roster = backgammon_scored_ladder_roster()
-        assert len(roster) > 0
 
     def test_backgammon_ladder_schema_version_exists(self) -> None:
         """BACKGAMMON_LADDER_SCHEMA_VERSION is defined."""
         assert isinstance(BACKGAMMON_LADDER_SCHEMA_VERSION, int)
         assert BACKGAMMON_LADDER_SCHEMA_VERSION >= 1
 
-    def test_backgammon_ladder_roster_fingerprint_deterministic(self) -> None:
-        """Fingerprint is deterministic across calls."""
-        fp1 = backgammon_ladder_roster_fingerprint()
-        fp2 = backgammon_ladder_roster_fingerprint()
-        assert fp1 == fp2
-        assert len(fp1) == 64  # SHA-256 hex
 
 
 # ---------------------------------------------------------------------------

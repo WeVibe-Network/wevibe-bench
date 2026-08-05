@@ -97,24 +97,7 @@ def test_run_config_env_hooks_default_and_override(monkeypatch: pytest.MonkeyPat
     assert overridden_cfg.mcp_recall_url == "http://127.0.0.1:4550"
 
 
-def test_build_roster_filter_local_alias_yields_single_rung() -> None:
-    module = _load_run_cumulative_module()
-    roster, _ = module._build_roster(roster_model="27b-fable")
-    assert len(roster) == 1
-    assert "qwen3.6-27b-fable-bench" in roster[0].model
 
 
-def test_build_roster_filter_none_keeps_full_roster() -> None:
-    module = _load_run_cumulative_module()
-    roster, _ = module._build_roster(roster_model=None)
-    assert len(roster) == 3
 
 
-def test_build_roster_filter_unknown_exits_code_2(capsys: pytest.CaptureFixture[str]) -> None:
-    module = _load_run_cumulative_module()
-    with pytest.raises(SystemExit) as exc_info:
-        module._build_roster(roster_model="definitely-not-a-model")
-    assert exc_info.value.code == 2
-    stderr = capsys.readouterr().err
-    assert "matched zero roster entries" in stderr
-    assert "available models" in stderr

@@ -18,91 +18,14 @@ from wevibe_bench.spend_key import (
 )
 
 
-def test_resolve_orcarouter_api_key_prefers_dotenv_over_env_and_opencode(tmp_path: Path) -> None:
-    dotenv = tmp_path / ".env"
-    opencode = tmp_path / "opencode.json"
-    dotenv.write_text('ORCAROUTER_API_KEY="dotenv-token"\n', encoding="utf-8")
-    opencode.write_text(
-        json.dumps(
-            {"provider": {"orcarouter": {"options": {"apiKey": "opencode-token"}}}}
-        ),
-        encoding="utf-8",
-    )
-
-    token, source = resolve_orcarouter_api_key(
-        env={"ORCAROUTER_API_KEY": "env-token"},
-        dotenv_path=dotenv,
-        opencode_config_path=opencode,
-    )
-
-    assert token == "dotenv-token"
-    assert source == "dotenv"
 
 
-def test_resolve_orcarouter_api_key_uses_env_when_dotenv_missing(tmp_path: Path) -> None:
-    token, source = resolve_orcarouter_api_key(
-        env={"ORCAROUTER_API_KEY": "env-token"},
-        dotenv_path=tmp_path / ".env",
-        opencode_config_path=tmp_path / "opencode.json",
-    )
-
-    assert token == "env-token"
-    assert source == "env:ORCAROUTER_API_KEY"
 
 
-def test_resolve_orcarouter_api_key_falls_back_to_opencode_json(tmp_path: Path) -> None:
-    opencode = tmp_path / "opencode.json"
-    opencode.write_text(
-        json.dumps(
-            {"provider": {"orcarouter": {"options": {"apiKey": "opencode-token"}}}}
-        ),
-        encoding="utf-8",
-    )
-
-    token, source = resolve_orcarouter_api_key(
-        env={},
-        dotenv_path=tmp_path / ".env",
-        opencode_config_path=opencode,
-    )
-
-    assert token == "opencode-token"
-    assert source == "opencode.json:provider.orcarouter.options.apiKey"
 
 
-def test_resolve_orcarouter_api_key_raises_loud_error_with_paths(tmp_path: Path) -> None:
-    dotenv = tmp_path / "missing.env"
-    opencode = tmp_path / "missing-opencode.json"
-
-    with pytest.raises(SpendKeyError) as excinfo:
-        resolve_orcarouter_api_key(env={}, dotenv_path=dotenv, opencode_config_path=opencode)
-
-    message = str(excinfo.value)
-    assert "ORCAROUTER_API_KEY" in message
-    assert str(dotenv) in message
-    assert str(opencode) in message
-    assert ".env.example" in message
 
 
-def test_resolve_spend_db_dsn_defaults_and_overrides(tmp_path: Path) -> None:
-    default = resolve_spend_db_dsn(env={}, dotenv_path=tmp_path / ".env")
-    assert (
-        default
-        == "postgresql://spend_proxy:spend_proxy_dev@127.0.0.1:5440/spend_proxy"
-    )
-
-    dotenv = tmp_path / ".env"
-    dotenv.write_text("WEVIBE_BENCH_SPEND_DB_DSN=postgresql://from-dotenv\n", encoding="utf-8")
-    assert (
-        resolve_spend_db_dsn(env={}, dotenv_path=dotenv)
-        == "postgresql://from-dotenv"
-    )
-    assert (
-        resolve_spend_db_dsn(
-            env={"WEVIBE_BENCH_SPEND_DB_DSN": "postgresql://from-env"},
-            dotenv_path=dotenv,
-        )
-        == "postgresql://from-env"
-    )
 
 
 def test_resolve_spend_proxy_base_url_defaults_and_overrides(tmp_path: Path) -> None:

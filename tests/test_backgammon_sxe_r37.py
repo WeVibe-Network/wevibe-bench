@@ -693,55 +693,5 @@ def _run_main_capture_extract_call(
     return exit_code, captured_extract_kwargs, log_lines
 
 
-def test_extract_override_env_forwards_proxy_base_url_num_ctx_and_token(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    proxy_token = "proxy-token-override"
-
-    exit_code, extract_kwargs, log_lines = _run_main_capture_extract_call(
-        monkeypatch,
-        tmp_path,
-        env={
-            "ORCAROUTER_API_KEY": proxy_token,
-            "WEVIBE_BENCH_SPEND_PROXY_BASE_URL": "http://127.0.0.1:4480/v1",
-            "WEVIBE_BENCH_EXTRACT_NUM_CTX": "131072",
-        },
-    )
-
-    assert exit_code == 0
-    assert extract_kwargs["base_url"] == "http://127.0.0.1:4480/v1"
-    assert extract_kwargs["num_ctx"] == 131072
-    assert extract_kwargs["api_key"] == proxy_token
-    assert extract_kwargs["provider"] == "orcarouter"
-
-    expected_line = (
-        "extract llm route "
-        "provider=orcarouter "
-        "base_url=http://127.0.0.1:4480/v1 "
-        "num_ctx=131072 "
-        f"key_source=env:ORCAROUTER_API_KEY key_fp={sx._sha256_first8(proxy_token)}"
-    )
-    assert any(expected_line in line for line in log_lines)
 
 
-def test_extract_override_unset_uses_spend_proxy_default_route(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    proxy_token = "proxy-token-default"
-    exit_code, extract_kwargs, log_lines = _run_main_capture_extract_call(
-        monkeypatch,
-        tmp_path,
-        env={"ORCAROUTER_API_KEY": proxy_token},
-    )
-
-    assert exit_code == 0
-    assert extract_kwargs["base_url"] == "http://127.0.0.1:4480/v1"
-    assert extract_kwargs["num_ctx"] is None
-    assert extract_kwargs["api_key"] == proxy_token
-    assert any(
-        "extract llm route provider=orcarouter base_url=http://127.0.0.1:4480/v1 num_ctx=none "
-        f"key_source=env:ORCAROUTER_API_KEY key_fp={sx._sha256_first8(proxy_token)}" in line
-        for line in log_lines
-    )

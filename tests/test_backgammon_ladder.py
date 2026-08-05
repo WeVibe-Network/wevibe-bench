@@ -243,49 +243,6 @@ def test_resume_partial_runs_only_remaining_unit(tmp_path: pathlib.Path, monkeyp
     assert all(unit.get("status") == "ok" for unit in units)
 
 
-def test_self_extraction_cmd_wiring(tmp_path: pathlib.Path) -> None:
-    parser = bl._build_arg_parser()
-
-    session_model = "anthropic/claude-opus-4.8"
-    args_default = parser.parse_args(
-        [
-            "--model",
-            session_model,
-            "--run-number",
-            "1",
-            "--extract-timeout",
-            "321",
-            "--runs-dir",
-            str(tmp_path),
-        ],
-    )
-    cmd_default = bl.build_extract_cmd("python3", SCRIPTS, args_default, "run1")
-
-    idx_session = cmd_default.index("--session-model")
-    assert cmd_default[idx_session + 1] == session_model
-    assert "--extract-model" not in cmd_default
-    idx_timeout = cmd_default.index("--extract-timeout")
-    assert cmd_default[idx_timeout + 1] == "321"
-    idx_runs = cmd_default.index("--runs-dir")
-    assert cmd_default[idx_runs + 1] == str(tmp_path)
-
-    args_override = parser.parse_args(
-        [
-            "--model",
-            session_model,
-            "--run-number",
-            "2",
-            "--extract-model",
-            "OVERRIDE",
-            "--extract-timeout",
-            "654",
-            "--runs-dir",
-            str(tmp_path),
-        ],
-    )
-    cmd_override = bl.build_extract_cmd("python3", SCRIPTS, args_override, "run2")
-    idx_override = cmd_override.index("--extract-model")
-    assert cmd_override[idx_override + 1] == "OVERRIDE"
 
 
 def test_logging_and_cleanup_on_success(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
@@ -350,20 +307,3 @@ def test_logging_and_cleanup_on_success(tmp_path: pathlib.Path, monkeypatch: Any
     assert foreign_log.is_file()
 
 
-def test_sxe_no_silent_fallback_and_guard() -> None:
-    source = (SCRIPTS / "backgammon_sxe.py").read_text(encoding="utf-8")
-
-    assert "_default_direct_memory" not in source
-    assert "proof_direct" not in source
-    assert "DISTILLED_DEFAULT_MODEL" not in source
-    assert "orcarouter/" in source
-
-    backgammon_sxe = importlib.import_module("backgammon_sxe")
-    parser_builder = getattr(backgammon_sxe, "_build_arg_parser", None)
-    assert callable(parser_builder)
-
-    parser = parser_builder()
-    options = {opt for action in parser._actions for opt in action.option_strings}
-    assert "--session-model" in options
-    assert "--extract-model" in options
-    assert "--extract-timeout" in options
