@@ -21,6 +21,7 @@ from .leader_client import ApplyResult, LeaderClient
 from .manifest import atomic_write, resume_or_create, roster_hash
 from .ordering import build_schedule
 from .progress import progress_from_cell_result
+from .run_artifacts import StatusStream, build_scorecard, default_status_stream_path
 from .types import (
     ConsumerGateRecord,
     PhaseGroup,
@@ -261,6 +262,13 @@ class CumulativeSequencer:
                 self._record_consumer_gate_outcome(session)
                 halt_gate = self._first_stopping_walk_gate(session)
                 if halt_gate is not None:
+                    # Extraction never ran because the session halted on gate.
+                    self._append_extraction_status(
+                        session,
+                        invoked=False,
+                        cut_off=False,
+                        candidate_count=None,
+                    )
                     session.set_phase(SessionPhase.HALTED_ON_GATE)
                     self._checkpoint()
                     halted = self._halted_descriptor(session)
@@ -284,11 +292,31 @@ class CumulativeSequencer:
                     session.sequence_index,
                     session.memory_mode,
                 )
-                extraction_payload = self._runner.extract(session)
+                try:
+                    extraction_payload = self._runner.extract(session)
+                except Exception as exc:
+                    # Observability-only: record that extraction was invoked but
+                    # cut off (e.g. timeout), then re-raise. Behaviour is
+                    # preserved exactly — the run still aborts as before; only
+                    # an append-only extraction record is left behind.
+                    self._append_extraction_status(
+                        session,
+                        invoked=True,
+                        cut_off=True,
+                        candidate_count=session.extraction_candidate_count,
+                        error=str(exc),
+                    )
+                    raise
                 if not isinstance(extraction_payload, Mapping):
                     raise ValueError("runner.extract must return a mapping payload")
 
                 self._populate_extraction_result(session, extraction_payload)
+                self._append_extraction_status(
+                    session,
+                    invoked=True,
+                    cut_off=False,
+                    candidate_count=session.extraction_candidate_count,
+                )
                 session.set_phase(SessionPhase.AWAIT_COORDINATOR_REVIEW)
                 self._checkpoint()
 
@@ -594,6 +622,47 @@ class CumulativeSequencer:
         )
         return manifest
 
+    def _append_extraction_status(
+        self,
+        session: SessionRecord,
+        *,
+        invoked: bool,
+        cut_off: bool,
+        candidate_count: int | None,
+        error: str | None = None,
+    ) -> None:
+        """Append one extraction-attempt observability record to the status stream.
+
+        Instrumentation-only: must never alter run behaviour or abort the run.
+        An explicit ``extraction_state`` is ALWAYS set (never a defaulted pass),
+        honouring the absent-flag-must-NOT-read-as-pass principle.
+        """
+        if invoked:
+            state = "invoked_cut_off" if cut_off else "invoked_completed"
+        else:
+            state = "never_invoked"
+
+        record: dict[str, Any] = {
+            "type": "extraction",
+            "schema_version": 1,
+            "sequence_index": session.sequence_index,
+            "memory_mode": str(session.memory_mode),
+            "org_id": str(session.org_id or self._manifest.org_id),
+            "extraction_state": state,
+            "extraction_candidate_count": candidate_count,
+            "extraction_error": error,
+            "session_fp": str(session.session_fp or ""),
+            "session_id": session.session_id,
+        }
+
+        StatusStream(default_status_stream_path(self._manifest_path)).append(record)
+        _LOG.info(
+            "cumulative.sequencer.extraction_status sequence_index=%d extraction_state=%s candidate_count=%s",
+            session.sequence_index,
+            state,
+            candidate_count,
+        )
+
     def _populate_extraction_result(
         self,
         session: SessionRecord,
@@ -716,7 +785,7 @@ class CumulativeSequencer:
         }
 
     def _done_state(self) -> DoneState:
-        convergence = build_convergence_trend(self._manifest.session_records).to_dict()
+        convergence = self._convergence_for_done_state()
         _LOG.info(
             "cumulative.sequencer.done sessions_completed=%d sessions_green=%d trend_hash=%s",
             int(convergence.get("sessions_completed", 0)),
@@ -727,6 +796,26 @@ class CumulativeSequencer:
             "status": "done",
             "convergence": convergence,
         }
+
+    def _convergence_for_done_state(self) -> dict[str, Any]:
+        """Source done-state standings from the scorecard (run-manifest + status
+        stream only), falling back to the mutable manifest when the artifacts
+        are missing so behaviour is never broken by missing artifacts."""
+        try:
+            scorecard = build_scorecard(self._manifest_path)
+            return dict(scorecard["convergence"])
+        except FileNotFoundError as exc:
+            _LOG.error(
+                "cumulative.sequencer.scorecard_missing falling_back_to_manifest reason=%s",
+                exc,
+            )
+            return build_convergence_trend(self._manifest.session_records).to_dict()
+        except OSError as exc:
+            _LOG.error(
+                "cumulative.sequencer.scorecard_unreadable falling_back_to_manifest reason=%s",
+                exc,
+            )
+            return build_convergence_trend(self._manifest.session_records).to_dict()
 
     @staticmethod
     def _utc_now_iso() -> str:

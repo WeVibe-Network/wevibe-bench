@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
+import hashlib
 import importlib.util
 import json
 import logging
@@ -70,6 +71,14 @@ from wevibe_bench.cumulative.prerun import (
     CachedSessionRunner,
     prerun_off_cells,
     resolve_off_concurrency,
+)
+from wevibe_bench.cumulative.progress import progress_from_cell_result
+from wevibe_bench.cumulative.run_artifacts import (
+    RunManifest,
+    StatusStream,
+    default_run_manifest_path,
+    default_status_stream_path,
+    write_run_manifest,
 )
 from wevibe_bench.cumulative.run_context import collect_run_context, compare_run_context
 from wevibe_bench.cumulative.sequencer import CumulativeSequencer
@@ -717,6 +726,8 @@ class RealSessionRunner:
         consumer_decision_manifest: ConsumerDecisionManifest | None,
         served_store_host_path: Path,
         bridge_state_path: Path | None = None,
+        run_manifest_base_path: str | None = None,
+        seed: int | None = None,
     ) -> None:
         self._task = task
         self._org_id = org_id
@@ -782,6 +793,19 @@ class RealSessionRunner:
 
         self._runner_cls = BackgammonRunner
 
+        # Write-once run-manifest + append-only status stream sit as siblings of
+        # the MUTABLE cumulative manifest. ``run_manifest_base_path`` is the
+        # mutable manifest path; when None it falls back to
+        # ``<runs_dir>/manifest.json``. The manifest is written exactly once
+        # per run, guarded so subsequent sessions never attempt a rewrite.
+        self._run_manifest_base_path = (
+            str(run_manifest_base_path)
+            if run_manifest_base_path is not None
+            else str(Path(self._runs_dir) / "manifest.json")
+        )
+        self._run_manifest_written = False
+        self._seed = seed
+
     def clone_for_prerun_cell(self) -> RealSessionRunner:
         clone = object.__new__(type(self))
         clone._task = self._task
@@ -818,6 +842,9 @@ class RealSessionRunner:
         clone._spend_meter = self._spend_meter
         clone._session_states = {}
         clone._runner_cls = self._runner_cls
+        clone._run_manifest_base_path = self._run_manifest_base_path
+        clone._run_manifest_written = self._run_manifest_written
+        clone._seed = self._seed
         return clone
 
     @staticmethod
@@ -887,6 +914,249 @@ class RealSessionRunner:
             )
 
         result.contention = contention
+
+    @staticmethod
+    def _current_git_head(repo_root: Path | None) -> str | None:
+        """Best-effort source git commit; None on any failure. Never raises."""
+        if repo_root is None:
+            return None
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as exc:
+            _LOG.warning(
+                "run_cumulative.git_head_failed error_type=%s",
+                type(exc).__name__,
+            )
+            return None
+        if completed.returncode != 0:
+            return None
+        commit = str(completed.stdout).strip()
+        return commit or None
+
+    def _compute_task_template_hash(self) -> str | None:
+        """Stable SHA-256 over task scaffold files (sorted relative paths + bytes).
+
+        Best-effort; None when the scaffold directory is unavailable. Never
+        raises.
+        """
+        task_dir = getattr(self, "_task_dir", None)
+        if task_dir is None:
+            return None
+        scaffold = Path(task_dir) / "scaffold"
+        if not scaffold.is_dir():
+            return None
+        digest = hashlib.sha256()
+        files = sorted((p for p in scaffold.rglob("*") if p.is_file()), key=lambda p: str(p))
+        for path in files:
+            try:
+                rel = str(path.relative_to(scaffold))
+                digest.update(rel.encode("utf-8"))
+                digest.update(path.read_bytes())
+            except OSError:
+                continue
+        return digest.hexdigest()
+
+    @staticmethod
+    def _serialize_worker_fingerprint(result: Any) -> dict | str | None:
+        """Serialize an ImageFingerprint (image_id/created) as dict, or str."""
+        fingerprint = getattr(result, "worker_image_fingerprint", None)
+        if fingerprint is None:
+            return None
+        if isinstance(fingerprint, Mapping):
+            return dict(fingerprint)
+        to_dict = getattr(fingerprint, "to_dict", None)
+        if callable(to_dict):
+            try:
+                rendered = to_dict()
+                if isinstance(rendered, Mapping):
+                    return dict(rendered)
+            except Exception:
+                pass
+        return str(fingerprint)
+
+    def _observe_served_model(
+        self,
+        session_id: Any,
+        requested_model: str,
+    ) -> tuple[str | None, dict | None]:
+        """Observe the API-reported served model; never aborts the run.
+
+        Returns ``(upstream_str, served_dict)`` where ``served_dict`` has the
+        ``{"model": requested, "upstream_model": served|None}`` shape. Both are
+        None on failure or when the spend DB records nothing (local pivot).
+        """
+        session_id_str = (
+            str(session_id).strip()
+            if isinstance(session_id, str) and str(session_id).strip()
+            else None
+        )
+        if session_id_str is None:
+            return None, None
+        spend_meter = getattr(self, "_spend_meter", None)
+        if spend_meter is None:
+            return None, None
+        try:
+            identities = spend_meter.model_identity(session_id_str)
+        except Exception as exc:
+            _LOG.exception(
+                "run_cumulative.model_identity_failed session_fp=%s error_type=%s",
+                SessionRecord.session_fp_of(session_id_str),
+                type(exc).__name__,
+            )
+            return None, None
+        if not identities:
+            return None, None
+        first = identities[0]
+        upstream = getattr(first, "upstream_model", None)
+        model = getattr(first, "model", None)
+        served_upstream = str(upstream).strip() if upstream is not None else None
+        if not served_upstream:
+            model_str = str(model).strip() if model is not None else ""
+            served_upstream = model_str or None
+        served_dict = {
+            "model": str(requested_model),
+            "upstream_model": served_upstream,
+        }
+        return served_upstream, served_dict
+
+    def _write_run_manifest_once(
+        self,
+        *,
+        session: SessionRecord,
+        served_model: str | None,
+        result: Any,
+    ) -> None:
+        """Write the write-once run manifest after the first served-model observation.
+
+        Instrumentation-only: must never alter run behaviour or abort the run.
+        """
+        if getattr(self, "_run_manifest_written", False):
+            return
+        run_manifest_base_path = (
+            getattr(self, "_run_manifest_base_path", None)
+            or str(Path(self._runs_dir) / "manifest.json")
+        )
+        try:
+            manifest = RunManifest(
+                run_id=Path(self._runs_dir).name,
+                created_at=_utc_now_iso(),
+                served_model=served_model,
+                requested_model=str(session.model),
+                memory_mode=str(session.memory_mode),
+                org_id=str(getattr(self, "_org_id", None) or ""),
+                source_commit=self._current_git_head(getattr(self, "_repo_root", None)),
+                worker_image_fingerprint=self._serialize_worker_fingerprint(result),
+                seed=getattr(self, "_seed", None),
+                template_hash=self._compute_task_template_hash(),
+                roster_fingerprint=None,
+            )
+            write_run_manifest(
+                default_run_manifest_path(run_manifest_base_path),
+                manifest,
+            )
+            self._run_manifest_written = True
+        except FileExistsError:
+            # Already written by an earlier session — write-once invariant.
+            self._run_manifest_written = True
+        except Exception as exc:
+            _LOG.exception(
+                "run_cumulative.run_manifest_write_failed run_id=%s error_type=%s",
+                Path(self._runs_dir).name,
+                type(exc).__name__,
+            )
+
+    def _append_status_records(
+        self,
+        *,
+        session: SessionRecord,
+        result: Any,
+        served_model: dict | None,
+    ) -> None:
+        """Append per-attempt status records to the append-only stream.
+
+        Instrumentation-only: must never alter run behaviour or abort the run.
+        """
+        try:
+            progress_dict = progress_from_cell_result(result).to_dict()
+        except Exception as exc:
+            _LOG.exception(
+                "run_cumulative.status_progress_failed sequence_index=%s error_type=%s",
+                session.sequence_index,
+                type(exc).__name__,
+            )
+            return
+
+        input_tokens = int(getattr(result, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(result, "output_tokens", 0) or 0)
+        progress_injected_est = progress_dict.get("injected_block_est_tokens")
+        progress_consumer_injected = progress_dict.get("consumer_injected_count")
+
+        session_id = getattr(result, "session_id", None)
+        session_fp = (
+            SessionRecord.session_fp_of(session_id)
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
+
+        base: dict[str, Any] = {
+            "type": "attempt",
+            "schema_version": 1,
+            "sequence_index": session.sequence_index,
+            "memory_mode": str(session.memory_mode),
+            "org_id": str(getattr(self, "_org_id", None) or ""),
+            "served_model": served_model,
+            "progress": progress_dict,
+            "work_input_tokens": input_tokens,
+            "work_output_tokens": output_tokens,
+            "work_total_tokens": input_tokens + output_tokens,
+            "injected_block_est_tokens": progress_injected_est,
+            "injected_count": getattr(result, "injected_count", None),
+            "injected_block_chars": getattr(result, "injected_block_chars", None),
+            "consumer_injected_count": progress_consumer_injected,
+            "extraction_state": "unknown",
+            "extraction_candidate_count": None,
+            "terminal_outcome": None,
+            "terminal_reason": "",
+            "session_fp": session_fp,
+            "session_id": session_id,
+        }
+
+        stream = StatusStream(
+            default_status_stream_path(
+                getattr(self, "_run_manifest_base_path", None)
+                or str(Path(self._runs_dir) / "manifest.json")
+            )
+        )
+        attempt_reports = getattr(result, "attempt_reports", None)
+        if isinstance(attempt_reports, list) and attempt_reports:
+            for idx, attempt in enumerate(attempt_reports, start=1):
+                attempt_record = dict(base)
+                if isinstance(attempt, Mapping):
+                    attempt_record["attempt"] = attempt.get("attempt", idx)
+                    attempt_record["verdict"] = attempt.get("verdict", result.verdict)
+                    attempt_record["n_problems"] = attempt.get("n_problems")
+                    attempt_record["failed_gates"] = list(attempt.get("failed_gates", []) or [])
+                    attempt_record["conformed"] = attempt.get("conformed")
+                    attempt_record["attempt_cost_usd"] = attempt.get("attempt_cost_usd")
+                else:
+                    attempt_record["attempt"] = idx
+                    attempt_record["verdict"] = result.verdict
+                attempt_record["termination_reason"] = getattr(result, "termination_reason", "")
+                attempt_record["attempts_to_green"] = getattr(result, "attempts_to_green", None)
+                stream.append(attempt_record)
+        else:
+            record = dict(base)
+            record["attempt"] = 1
+            record["verdict"] = getattr(result, "verdict", "")
+            record["termination_reason"] = getattr(result, "termination_reason", "")
+            record["attempts_to_green"] = getattr(result, "attempts_to_green", None)
+            stream.append(record)
 
     def _state_for_session(self, session: SessionRecord) -> _SessionRunState:
         state = self._session_states.get(session.sequence_index)
@@ -1231,6 +1501,24 @@ class RealSessionRunner:
         state.last_session_id = result.session_id or state.last_session_id
         self._populate_contention_covariates(result)
 
+        # Instrumentation-only run artifacts (write-once manifest + append-only
+        # status stream). Must never alter scoring/extraction/gates/feedback or
+        # abort the run; served_model is only known after the first run_cell.
+        served_upstream, served_dict = self._observe_served_model(
+            getattr(result, "session_id", None),
+            str(session.model),
+        )
+        self._write_run_manifest_once(
+            session=session,
+            served_model=served_upstream,
+            result=result,
+        )
+        self._append_status_records(
+            session=session,
+            result=result,
+            served_model=served_dict,
+        )
+
         _LOG.info(
             "run_cumulative.run_session sequence_index=%d memory_mode=%s verdict=%s session_fp=%s",
             session.sequence_index,
@@ -1528,6 +1816,8 @@ def _build_real_runner_and_leader_client(
         consumer_decision_manifest=consumer_decision_manifest,
         served_store_host_path=served_store_host_path,
         bridge_state_path=bridge_paths.state_path,
+        run_manifest_base_path=str(layout.manifest_path),
+        seed=int(args.seed),
     )
 
     catalog = PrivateCatalog(str(layout.catalog_path))
