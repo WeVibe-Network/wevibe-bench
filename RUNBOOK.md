@@ -42,7 +42,7 @@ required before any "models get better" statement, internal or external.
 | Subject model | **whatever is resident** — the bench never selects a model (RC-7) |
 | Org | **one org for the entire campaign**, recorded in the manifest; chain assigned `wevibe-org-3`, leader fp `f534aa02` |
 | Runtime | **oMLX.** The operator manages what is loaded. Identity is read from the API response and recorded in the manifest, so this row is documentation, never a selector |
-| Transport | local relay proxy `:4545`, single `auto` alias resolving to the resident model |
+| Transport | local relay proxy `:4545`, single `auto (Local LLM Proxy - oMLX)` alias resolving to the resident model |
 | Harness | OpenCode in a Docker worker image + plugin. **The version is not asserted here** — the worker image fingerprint is measured at run time and recorded in the manifest (RC-5), and the stack smoke asserts it matches the commit under test (§6) |
 | Task | the LOCKED backgammon prompt — unstructured, no requirements checklist |
 | Oracle | deterministic: Playwright conformance + Vitest backend + Playwright chromium. **No LLM judge exists anywhere in scoring.** |
