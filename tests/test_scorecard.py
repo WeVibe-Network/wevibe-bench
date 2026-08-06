@@ -343,3 +343,85 @@ def test_manifest_contains_verbatim_config_seed_version_created_at_and_json_roun
     assert payload["manifest"]["harness_version"] == cfg.harness_version
     assert payload["manifest"]["created_at"] == fixed_now.isoformat()
     assert payload["manifest"]["split_disclosure"] == {"seed_count": 1}
+
+
+def test_model_diffs_metrics_are_invariant_to_arm_label() -> None:
+    """Guard for Ruling #1: computed per-arm metrics depend only on the numeric
+    inputs, never on which arm label (OFF vs ON) a cell sits under."""
+    cfg = _cfg()
+    fixed_now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+
+    # Scenario 1: one OFF and one ON cell with IDENTICAL numeric inputs.
+    # Reading the arm label to group/label is not branching, and the pure
+    # arithmetic must yield the same numbers under either label.
+    scorecard = Scorecard(cfg, _now=fixed_now)
+    scorecard.add_cell(
+        _cell(
+            model="model-a",
+            task_id="same",
+            condition="OFF",
+            resolved=True,
+            input_tokens=100,
+            output_tokens=100,
+            wall_cost_usd=1.0,
+        )
+    )
+    scorecard.add_cell(
+        _cell(
+            model="model-a",
+            task_id="same",
+            condition="ON",
+            resolved=True,
+            input_tokens=100,
+            output_tokens=100,
+            wall_cost_usd=1.0,
+        )
+    )
+    diff = scorecard.model_diffs()[0]
+    assert diff.off_pass_rate == diff.on_pass_rate == 1.0
+    assert diff.off_total_tokens == diff.on_total_tokens == 200
+    assert diff.off_cost_usd == diff.on_cost_usd == 1.0
+    assert diff.total_token_delta_pct == 0.0
+    assert diff.cost_delta_pct == 0.0
+    assert diff.capability_lift_pp == 0.0
+
+    # Scenario 2: two distinct numeric cells, then the arm labels swapped via
+    # dataclasses.replace. Each arm's computed numbers must travel with the
+    # underlying data, not with the label.
+    from dataclasses import replace
+
+    off_data = _cell(
+        model="model-a",
+        task_id="data-x",
+        condition="OFF",
+        resolved=True,
+        input_tokens=50,
+        output_tokens=50,
+        wall_cost_usd=0.5,
+    )
+    on_data = _cell(
+        model="model-a",
+        task_id="data-y",
+        condition="ON",
+        resolved=False,
+        input_tokens=80,
+        output_tokens=120,
+        wall_cost_usd=2.0,
+    )
+
+    set_a = Scorecard(cfg, _now=fixed_now)
+    set_a.add_cell(off_data)
+    set_a.add_cell(on_data)
+    diff_a = set_a.model_diffs()[0]
+
+    set_b = Scorecard(cfg, _now=fixed_now)
+    set_b.add_cell(replace(off_data, condition="ON"))
+    set_b.add_cell(replace(on_data, condition="OFF"))
+    diff_b = set_b.model_diffs()[0]
+
+    assert diff_a.off_total_tokens == diff_b.on_total_tokens == 100
+    assert diff_a.on_total_tokens == diff_b.off_total_tokens == 200
+    assert diff_a.off_cost_usd == diff_b.on_cost_usd == 0.5
+    assert diff_a.on_cost_usd == diff_b.off_cost_usd == 2.0
+    assert diff_a.off_pass_rate == diff_b.on_pass_rate == 1.0
+    assert diff_a.on_pass_rate == diff_b.off_pass_rate == 0.0

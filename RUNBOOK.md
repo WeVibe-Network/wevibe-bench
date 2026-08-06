@@ -168,6 +168,11 @@ by contract on OFF cells are not a branch; anything else is. This is enforceable
 fails on any mode-conditional branch outside the injection call site, and that test closes the
 entire class of "the arms were not comparable" defects that has voided runs before.
 
+The ON delivery-verification gate (runner.py:340-350) is NOT a second branch — it runs only inside
+the one permitted injection branch (`if "on" in wave.memory_modes`, runner.py:337), and OFF has no
+equivalent by design. It changes no computed metric; it only affects which ON cells are scored
+(not_scored), so the per-arm numbers stay comparable.
+
 **RC-5 · One run directory, one manifest, one status stream.** Every run writes a manifest — model
 identity as reported by the API, mode, org, commit, **worker image fingerprint**, seed, template
 hash — and an append-only status file. The watcher reads **only** the status file. The scorecard is
