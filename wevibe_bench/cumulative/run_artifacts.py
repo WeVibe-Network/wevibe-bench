@@ -50,9 +50,41 @@ Extraction-attempt observability:
   The absent-flag-must-NOT-read-as-pass principle: a missing value is never
   defaulted to a pass; an explicit state is always set.
 
-Terminal outcome:
-- ``terminal_outcome``: bool | None
-- ``terminal_reason``: str
+Terminal outcome (WO-TRUNC-1 — recorded, never placeholder-null):
+- ``terminal_outcome``: bool — True iff the cell resolved (verdict PASS);
+  False for every other ending.
+- ``terminal_reason``: str — the cell's machine termination reason, so a
+  scorecard can tell "the model failed" (``attempt_ceiling_reached``) from
+  "the stream died" (``transport_incomplete`` / ``harness_error``).
+
+Turn-terminal accounting (WO-TRUNC-1):
+- ``length_truncations``: int — metered ``finish_reason=length`` turns.
+- ``truncated_turns`` / ``truncated_turns_retried``: int — anomalous turn
+  endings (no-signal truncations, guard aborts, transport deaths) and how many
+  of them a later step or resume picked up.
+- ``unmetered_turns`` / ``unmetered_turn_wall_s``: int / float — turns whose
+  usage frame never survived the stream drop. Their true upstream token burn
+  is unmetered client-side and is NEVER synthesized (rule 5.14); their
+  measured wall-clock is real cost and is recorded.
+
+``turn_terminal`` records (WO-TRUNC-1)
+--------------------------------------
+One record per anomalously-ended turn, appended after the attempt records of
+the cell. Keys: ``type``: "turn_terminal", ``schema_version``: 1,
+``sequence_index``, ``memory_mode``, ``org_id``, ``session_fp``,
+``session_id``, ``phase`` (which worker invocation: initial / feedback-N /
+…), ``turn_index`` (step index within that invocation), ``terminal`` in
+{"truncated_no_signal","guard_abort","transport_error","stream_died_open",
+"unclassified_finish"}, ``reason`` (the observed signature: ``unknown``,
+``stream-incomplete``, ``stream_incomplete``, ``loop_guard``,
+``idle_timeout``, ``provider_error``, ``no_terminal_signal``, …),
+``tool_uses``, ``file_writes``, ``input_tokens`` / ``output_tokens`` /
+``reasoning_tokens`` (whatever partial usage survived — usually zero),
+``cost_usd``, ``tokens_unmetered`` (bool), ``wall_seconds`` (measured,
+None if unmeasurable), ``retried`` (bool) and ``retry_kind`` in
+{"client_auto","harness_resume"} | None — the burned attempt and its retry
+are both recorded, so a scorecard can tell "the model failed" apart from
+"the stream died and we tried again".
 """
 
 from __future__ import annotations

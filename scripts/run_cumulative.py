@@ -807,6 +807,7 @@ class RealSessionRunner:
             else None
         )
 
+        verdict_str = str(getattr(result, "verdict", "") or "")
         base: dict[str, Any] = {
             "type": "attempt",
             "schema_version": 1,
@@ -824,8 +825,23 @@ class RealSessionRunner:
             "consumer_injected_count": progress_consumer_injected,
             "extraction_state": "unknown",
             "extraction_candidate_count": None,
-            "terminal_outcome": None,
-            "terminal_reason": "",
+            # WO-TRUNC-1: the terminal outcome is now recorded, not placeholder-
+            # null. True = the cell resolved (verdict PASS); False = every other
+            # ending. terminal_reason carries the machine reason so a scorecard
+            # can tell "the model failed" (attempt_ceiling_reached) from "the
+            # stream died" (transport_incomplete / harness_error).
+            "terminal_outcome": verdict_str == "PASS",
+            "terminal_reason": str(getattr(result, "termination_reason", "") or ""),
+            # Truncated-turn accounting (WO-TRUNC-1): anomalous turn endings are
+            # first-class. length_truncations is the metered finish_reason=
+            # length class; the truncated_* fields are the no-signal classes
+            # whose upstream token burn is unmetered client-side (never
+            # synthesized) but whose wall-clock is measured and real.
+            "length_truncations": int(getattr(result, "truncations", 0) or 0),
+            "truncated_turns": int(getattr(result, "truncated_turns", 0) or 0),
+            "truncated_turns_retried": int(getattr(result, "truncated_turns_retried", 0) or 0),
+            "unmetered_turns": int(getattr(result, "unmetered_turns", 0) or 0),
+            "unmetered_turn_wall_s": float(getattr(result, "unmetered_turn_wall_s", 0.0) or 0.0),
             "session_fp": session_fp,
             "session_id": session_id,
         }
@@ -860,6 +876,43 @@ class RealSessionRunner:
             record["termination_reason"] = getattr(result, "termination_reason", "")
             record["attempts_to_green"] = getattr(result, "attempts_to_green", None)
             stream.append(record)
+
+        # WO-TRUNC-1: one turn_terminal record per anomalously-ended turn. These
+        # are records, never rewrites — the stream stays append-only, and a run
+        # that died mid-cell simply has fewer of them. `terminal` +
+        # `reason` distinguish truncated_no_signal / guard_abort /
+        # transport_error / stream_died_open / unclassified_finish from every
+        # other way a turn can end; `retried`/`retry_kind` make the
+        # burned-then-retried pair attributable.
+        turn_anomalies = getattr(result, "turn_anomalies", None)
+        if isinstance(turn_anomalies, list):
+            for anomaly in turn_anomalies:
+                if not isinstance(anomaly, Mapping):
+                    continue
+                turn_record = {
+                    "type": "turn_terminal",
+                    "schema_version": 1,
+                    "sequence_index": session.sequence_index,
+                    "memory_mode": str(session.memory_mode),
+                    "org_id": str(getattr(self, "_org_id", None) or ""),
+                    "session_fp": session_fp,
+                    "session_id": session_id,
+                    "phase": str(anomaly.get("phase", "")),
+                    "turn_index": anomaly.get("turn_index"),
+                    "terminal": str(anomaly.get("terminal", "")),
+                    "reason": str(anomaly.get("reason", "")),
+                    "tool_uses": anomaly.get("tool_uses"),
+                    "file_writes": anomaly.get("file_writes"),
+                    "input_tokens": anomaly.get("input_tokens"),
+                    "output_tokens": anomaly.get("output_tokens"),
+                    "reasoning_tokens": anomaly.get("reasoning_tokens"),
+                    "cost_usd": anomaly.get("cost_usd"),
+                    "tokens_unmetered": bool(anomaly.get("tokens_unmetered")),
+                    "wall_seconds": anomaly.get("wall_seconds"),
+                    "retried": bool(anomaly.get("retried")),
+                    "retry_kind": anomaly.get("retry_kind"),
+                }
+                stream.append(turn_record)
 
     def _state_for_session(self, session: SessionRecord) -> _SessionRunState:
         state = self._session_states.get(session.sequence_index)

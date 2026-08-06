@@ -149,6 +149,32 @@ _REASONING_EFFORT_ENV = "WEVIBE_BENCH_REASONING_EFFORT"
 MAX_ZERO_TOOL_RESUMES = 2
 ZERO_TOOL_RESUME_NUDGE = "Continue. Edit files with tools — do not explain."
 _FILE_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch", "multi_edit"})
+
+# Turn-terminal taxonomy (WO-TRUNC-1). A turn is one model generation step,
+# delimited by step_start/step_finish on the worker's JSON event stream.
+# step_finish reasons that mean "the provider stream ended without a finish
+# reason" — the turn's content and usage frame were lost in transit.
+TRUNCATED_STEP_FINISH_REASONS = frozenset({"unknown", "stream-incomplete"})
+# step_finish reasons that close a turn normally and need no anomaly record.
+_NORMAL_STEP_FINISH_REASONS = frozenset({"stop", "tool-calls", "tool_calls", "length"})
+# Substring signatures in `error`-event payloads that classify a turn aborted
+# by transport/guard rather than by the model. Guard trips and upstream drops
+# both surface to the client as terminal error events (see the loopguard
+# diagnostic report); the open step they interrupt never gets a step_finish.
+_LOOP_GUARD_SIGNATURE = "relay_loop_detected"
+_TRANSPORT_ERROR_SIGNATURES = (
+    ("stream_incomplete", "stream incomplete"),
+    ("idle_timeout", "idle timeout"),
+    ("provider_error", "provider returned error"),
+    ("unexpected_server_error", "unexpected server error"),
+    ("corrupted_thought_signature", "corrupted thought signature"),
+)
+# Anomaly terminal classes recorded on turn_terminal records.
+TURN_TERMINAL_TRUNCATED = "truncated_no_signal"
+TURN_TERMINAL_GUARD_ABORT = "guard_abort"
+TURN_TERMINAL_TRANSPORT_ERROR = "transport_error"
+TURN_TERMINAL_STREAM_DIED_OPEN = "stream_died_open"
+TURN_TERMINAL_UNCLASSIFIED_FINISH = "unclassified_finish"
 DEFAULT_REASONING_EFFORT = "low"  # bounded default; relay attempts cap at 600s; override via WEVIBE_BENCH_REASONING_EFFORT
 
 # Canonical budget-bounded attempt ceiling.
@@ -286,6 +312,16 @@ class _OpencodeRunStats:
     zero_tool_resumes: int = 0
     zero_tool_turn_honest_fail: bool = False
     resume_count: int = 0
+    # WO-TRUNC-1: per-anomalous-turn terminal records (truncated/guard/transport
+    # endings and their retries). Normal stop/tool-calls/length turns stay
+    # aggregate-only. Each dict is a turn_terminal payload ready for the
+    # append-only status stream.
+    turn_anomalies: tuple[dict[str, Any], ...] = ()
+    # Turns whose usage frame never survived the stream drop: their true
+    # upstream token burn is unmetered client-side (never synthesized), but
+    # their measured wall-clock is real cost and lands here.
+    unmetered_turns: int = 0
+    unmetered_turn_wall_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -455,6 +491,16 @@ class BackgammonCellResult:
     zero_tool_resumes: int = 0
     zero_tool_turn_honest_fails: int = 0
     transport_resume_count: int = 0
+    # WO-TRUNC-1: ledger of anomalously-ended turns across every worker
+    # invocation of the cell (truncated_no_signal / guard_abort /
+    # transport_error / stream_died_open / unclassified_finish), each with its
+    # retry linkage. truncated_turns counts them; truncated_turns_retried counts
+    # those a later step or resume picked up.
+    turn_anomalies: list[dict[str, Any]] | None = None
+    truncated_turns: int = 0
+    truncated_turns_retried: int = 0
+    unmetered_turns: int = 0
+    unmetered_turn_wall_s: float = 0.0
     contention: ContentionCovariates | None = None
     worker_image_fingerprint: ImageFingerprint | None = None
 
@@ -709,6 +755,22 @@ class BackgammonRunner(AgentRunner):
             wall_seconds=result.wall_seconds,
         )
 
+    @staticmethod
+    def _mark_harness_resume(prev: _OpencodeRunStats | None) -> None:
+        """Mark the previous invocation's last burned turn as harness-resumed.
+
+        A follow-up ``opencode run --session <id>`` invocation (pass-injection
+        or feedback) on the same session IS the retry of a turn the transport
+        burned at the tail of the previous invocation. Mutates the shared
+        anomaly dict so the cell ledger sees the linkage.
+        """
+        if prev is None or not prev.turn_anomalies:
+            return
+        last = prev.turn_anomalies[-1]
+        if not last.get("retried"):
+            last["retried"] = True
+            last["retry_kind"] = "harness_resume"
+
     def _run_cell_impl(
         self,
         *,
@@ -743,6 +805,10 @@ class BackgammonRunner(AgentRunner):
         zero_tool_turns_total = 0
         zero_tool_resumes_total = 0
         zero_tool_turn_honest_fails_total = 0
+        turn_anomalies_all: list[dict[str, Any]] = []
+        unmetered_turns_total = 0
+        unmetered_turn_wall_total = 0.0
+        prev_run_stats: _OpencodeRunStats | None = None
         events_path = Path(f"{worktree}.events.jsonl")
         user_events_path = Path(f"{worktree}.user-events.jsonl")
 
@@ -900,6 +966,10 @@ class BackgammonRunner(AgentRunner):
                     zero_tool_resumes_total += first_run.zero_tool_resumes
                     if first_run.zero_tool_turn_honest_fail:
                         zero_tool_turn_honest_fails_total += 1
+                    turn_anomalies_all.extend(first_run.turn_anomalies)
+                    unmetered_turns_total += first_run.unmetered_turns
+                    unmetered_turn_wall_total += first_run.unmetered_turn_wall_s
+                    prev_run_stats = first_run
                     worker_killed_reason = first_run.killed_reason
                     self._progress(
                         f"PROGRESS run_label={run_label} step=worker-launch-end mode=real "
@@ -947,6 +1017,9 @@ class BackgammonRunner(AgentRunner):
                                 zero_tool_resumes=first_run.zero_tool_resumes,
                                 zero_tool_turn_honest_fail=first_run.zero_tool_turn_honest_fail,
                                 resume_count=1,
+                                turn_anomalies=first_run.turn_anomalies,
+                                unmetered_turns=first_run.unmetered_turns,
+                                unmetered_turn_wall_s=first_run.unmetered_turn_wall_s,
                             )
                             if self.resume_budget > 0:
                                 self._progress(
@@ -1149,6 +1222,7 @@ class BackgammonRunner(AgentRunner):
                             text=pass_verdict,
                         )
                         self._write_worker_permission_config(worktree=worktree)
+                        self._mark_harness_resume(prev_run_stats)
                         pass_run = self._run_opencode_with_zero_tool_resumes(
                             active_cell=active_cell,
                             initial_inner=feedback_inner,
@@ -1176,6 +1250,10 @@ class BackgammonRunner(AgentRunner):
                         zero_tool_resumes_total += pass_run.zero_tool_resumes
                         if pass_run.zero_tool_turn_honest_fail:
                             zero_tool_turn_honest_fails_total += 1
+                        turn_anomalies_all.extend(pass_run.turn_anomalies)
+                        unmetered_turns_total += pass_run.unmetered_turns
+                        unmetered_turn_wall_total += pass_run.unmetered_turn_wall_s
+                        prev_run_stats = pass_run
                         worker_killed_reason = pass_run.killed_reason
                         self._progress(
                             f"PROGRESS run_label={run_label} step=feedback-pass-injection-done attempt={attempt} "
@@ -1238,6 +1316,7 @@ class BackgammonRunner(AgentRunner):
 
                 self._write_worker_permission_config(worktree=worktree)
 
+                self._mark_harness_resume(prev_run_stats)
                 feedback_run = self._run_opencode_with_zero_tool_resumes(
                     active_cell=active_cell,
                     initial_inner=feedback_inner,
@@ -1267,6 +1346,10 @@ class BackgammonRunner(AgentRunner):
                 zero_tool_resumes_total += feedback_run.zero_tool_resumes
                 if feedback_run.zero_tool_turn_honest_fail:
                     zero_tool_turn_honest_fails_total += 1
+                turn_anomalies_all.extend(feedback_run.turn_anomalies)
+                unmetered_turns_total += feedback_run.unmetered_turns
+                unmetered_turn_wall_total += feedback_run.unmetered_turn_wall_s
+                prev_run_stats = feedback_run
                 worker_killed_reason = feedback_run.killed_reason
                 self._progress(
                     f"PROGRESS run_label={run_label} step=feedback-injection-done attempt={attempt} "
@@ -1447,6 +1530,11 @@ class BackgammonRunner(AgentRunner):
             zero_tool_resumes=zero_tool_resumes_total,
             zero_tool_turn_honest_fails=zero_tool_turn_honest_fails_total,
             transport_resume_count=first_run.resume_count if first_run else 0,
+            turn_anomalies=turn_anomalies_all,
+            truncated_turns=len(turn_anomalies_all),
+            truncated_turns_retried=sum(1 for record in turn_anomalies_all if record.get("retried")),
+            unmetered_turns=unmetered_turns_total,
+            unmetered_turn_wall_s=unmetered_turn_wall_total,
             worker_image_fingerprint=worker_image_identity,
         )
 
@@ -1540,6 +1628,9 @@ class BackgammonRunner(AgentRunner):
                 zero_tool_resumes=resume_count,
                 zero_tool_turn_honest_fail=False,
                 resume_count=aggregate.resume_count + resumed.resume_count,
+                turn_anomalies=aggregate.turn_anomalies + resumed.turn_anomalies,
+                unmetered_turns=aggregate.unmetered_turns + resumed.unmetered_turns,
+                unmetered_turn_wall_s=aggregate.unmetered_turn_wall_s + resumed.unmetered_turn_wall_s,
             )
             current = resumed
 
@@ -1567,6 +1658,9 @@ class BackgammonRunner(AgentRunner):
             zero_tool_resumes=resume_count,
             zero_tool_turn_honest_fail=honest_fail,
             resume_count=aggregate.resume_count,
+            turn_anomalies=aggregate.turn_anomalies,
+            unmetered_turns=aggregate.unmetered_turns,
+            unmetered_turn_wall_s=aggregate.unmetered_turn_wall_s,
         )
 
     def _write_worker_permission_config(self, *, worktree: Path) -> None:
@@ -1858,6 +1952,17 @@ class BackgammonRunner(AgentRunner):
             "active_tool_uses": 0,
             "active_file_writes": 0,
             "active_step_index": 0,
+            # WO-TRUNC-1 turn-terminal tracking. ``active_step_open`` marks an
+            # in-flight step (the ts is only for wall measurement and may be
+            # absent); ``turn_anomalies`` accumulates one record per
+            # anomalously-ended turn; ``unretried_anomaly`` indexes the latest
+            # anomaly a later step_start may still mark as retried.
+            "active_step_open": False,
+            "active_step_open_ts_ms": None,
+            "turn_anomalies": [],
+            "unretried_anomaly": None,
+            "unmetered_turns": 0,
+            "unmetered_turn_wall_s": 0.0,
         }
         stderr_tail: collections.deque[str] = collections.deque(maxlen=120)
         reader_failures: list[str] = []
@@ -1962,6 +2067,46 @@ class BackgammonRunner(AgentRunner):
                                     f"PROGRESS run_label={run_label} step=budget-stop-detected phase={phase} "
                                     f"source=event-error signal={signal}"
                                 )
+                                continue
+                            # WO-TRUNC-1: a non-budget error event is a terminal
+                            # signal for the in-flight turn — the stream died (or
+                            # the proxy guard aborted it) and the open step will
+                            # never see a step_finish. Close it as an anomaly.
+                            error_reason = self._classify_transport_error(event)
+                            terminal = (
+                                TURN_TERMINAL_GUARD_ABORT
+                                if error_reason == "loop_guard"
+                                else TURN_TERMINAL_TRANSPORT_ERROR
+                            )
+                            with state_lock:
+                                open_index = self._to_int(state.get("active_step_index", 0))
+                                open_ts = state.get("active_step_open_ts_ms")
+                                wall_s = self._step_wall_seconds(open_ts, event.get("timestamp"))
+                                self._append_turn_anomaly(
+                                    state,
+                                    phase=phase,
+                                    turn_index=open_index,
+                                    terminal=terminal,
+                                    reason=error_reason or "error_event",
+                                    tool_uses=self._to_int(state.get("active_tool_uses", 0)),
+                                    file_writes=self._to_int(state.get("active_file_writes", 0)),
+                                    input_tokens=0,
+                                    output_tokens=0,
+                                    reasoning_tokens=0,
+                                    cost_usd=0.0,
+                                    tokens_unmetered=True,
+                                    wall_seconds=wall_s,
+                                    session_id=state.get("session_id"),
+                                )
+                                state["active_step_open"] = False
+                                state["active_step_open_ts_ms"] = None
+                                state["active_tool_uses"] = 0
+                                state["active_file_writes"] = 0
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=TURN-TERMINAL phase={phase} "
+                                f"turn={open_index} terminal={terminal} "
+                                f"reason={error_reason or 'error_event'} unmetered=1"
+                            )
                             continue
                         if event_type == "step_start":
                             with state_lock:
@@ -1969,7 +2114,12 @@ class BackgammonRunner(AgentRunner):
                                 state["active_tool_uses"] = 0
                                 state["active_file_writes"] = 0
                                 state["active_step_index"] = self._to_int(state.get("active_step_index", 0)) + 1
+                                state["active_step_open"] = True
+                                state["active_step_open_ts_ms"] = event.get("timestamp")
                                 state["terminal_zero_tool_turn"] = False
+                                # A new step after an anomalous terminal is the
+                                # client's internal auto-retry of the burned turn.
+                                self._mark_anomaly_retried(state, retry_kind="client_auto")
                             continue
                         if event_type == "tool_use":
                             part = event.get("part") if isinstance(event.get("part"), dict) else {}
@@ -2000,6 +2150,10 @@ class BackgammonRunner(AgentRunner):
                             state["sum_cost"] += float(step_cost) if isinstance(step_cost, (int, float)) else 0.0
                             if input_tokens > state["max_input"]:
                                 state["max_input"] = input_tokens
+                            turn_index = self._to_int(state.get("active_step_index", 0))
+                            open_ts = state.get("active_step_open_ts_ms")
+                            state["active_step_open"] = False
+                            state["active_step_open_ts_ms"] = None
                             if reason == "stop":
                                 state["completed_at"] = time.monotonic()
                             elif reason == "length":
@@ -2011,7 +2165,63 @@ class BackgammonRunner(AgentRunner):
 
                             tool_uses = self._to_int(state.get("active_tool_uses", 0))
                             file_writes = self._to_int(state.get("active_file_writes", 0))
-                            if tool_uses == 0 and file_writes == 0:
+
+                            if reason in TRUNCATED_STEP_FINISH_REASONS:
+                                # WO-TRUNC-1: the stream ended without a finish
+                                # reason; the client synthesized this finish with
+                                # a zeroed usage frame. The turn burned real
+                                # upstream tokens that never reached the client —
+                                # recorded as unmetered, never synthesized. This
+                                # is NOT a zero-tool turn: the model did not
+                                # choose silence, the transport chose for it.
+                                unmetered = (
+                                    input_tokens == 0 and output_tokens == 0 and reasoning_tokens == 0
+                                )
+                                wall_s = self._step_wall_seconds(open_ts, event.get("timestamp"))
+                                self._append_turn_anomaly(
+                                    state,
+                                    phase=phase,
+                                    turn_index=turn_index,
+                                    terminal=TURN_TERMINAL_TRUNCATED,
+                                    reason=str(reason),
+                                    tool_uses=tool_uses,
+                                    file_writes=file_writes,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    reasoning_tokens=reasoning_tokens,
+                                    cost_usd=float(step_cost) if isinstance(step_cost, (int, float)) else 0.0,
+                                    tokens_unmetered=unmetered,
+                                    wall_seconds=wall_s,
+                                    session_id=state.get("session_id"),
+                                )
+                                state["terminal_zero_tool_turn"] = False
+                                self._progress(
+                                    f"PROGRESS run_label={run_label} step=TURN-TERMINAL phase={phase} "
+                                    f"turn={turn_index} terminal={TURN_TERMINAL_TRUNCATED} "
+                                    f"reason={reason} unmetered={1 if unmetered else 0}"
+                                )
+                            elif reason not in _NORMAL_STEP_FINISH_REASONS:
+                                wall_s = self._step_wall_seconds(open_ts, event.get("timestamp"))
+                                self._append_turn_anomaly(
+                                    state,
+                                    phase=phase,
+                                    turn_index=turn_index,
+                                    terminal=TURN_TERMINAL_UNCLASSIFIED_FINISH,
+                                    reason=str(reason),
+                                    tool_uses=tool_uses,
+                                    file_writes=file_writes,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    reasoning_tokens=reasoning_tokens,
+                                    cost_usd=float(step_cost) if isinstance(step_cost, (int, float)) else 0.0,
+                                    tokens_unmetered=False,
+                                    wall_seconds=wall_s,
+                                    session_id=state.get("session_id"),
+                                )
+
+                            if reason in TRUNCATED_STEP_FINISH_REASONS:
+                                pass
+                            elif tool_uses == 0 and file_writes == 0:
                                 state["zero_tool_turns"] = self._to_int(state.get("zero_tool_turns", 0)) + 1
                                 state["terminal_zero_tool_turn"] = True
                                 self._progress(
@@ -2188,6 +2398,43 @@ class BackgammonRunner(AgentRunner):
         for failure in reader_failures:
             self._progress(f"PROGRESS run_label={run_label} step=reader-failure phase={phase} detail={failure}")
 
+        # WO-TRUNC-1: the process exited with a step still open — no step_finish,
+        # no error event. The turn burned upstream tokens and wall-clock with no
+        # terminal signal of any kind. Close it as stream_died_open and count it
+        # toward the turn budget: a truncation storm must never run unbounded,
+        # and a burned turn must never be invisible.
+        with state_lock:
+            open_ts = state.get("active_step_open_ts_ms")
+            if open_ts is not None:
+                open_index = self._to_int(state.get("active_step_index", 0))
+                wall_s = self._step_wall_seconds(open_ts, int(time.time() * 1000))
+                state["turns"] += 1
+                self._append_turn_anomaly(
+                    state,
+                    phase=phase,
+                    turn_index=open_index,
+                    terminal=TURN_TERMINAL_STREAM_DIED_OPEN,
+                    reason="no_terminal_signal",
+                    tool_uses=self._to_int(state.get("active_tool_uses", 0)),
+                    file_writes=self._to_int(state.get("active_file_writes", 0)),
+                    input_tokens=0,
+                    output_tokens=0,
+                    reasoning_tokens=0,
+                    cost_usd=0.0,
+                    tokens_unmetered=True,
+                    wall_seconds=wall_s,
+                    session_id=state.get("session_id"),
+                )
+                state["active_step_open_ts_ms"] = None
+                state["active_tool_uses"] = 0
+                state["active_file_writes"] = 0
+                state["terminal_zero_tool_turn"] = False
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=TURN-TERMINAL phase={phase} "
+                    f"turn={open_index} terminal={TURN_TERMINAL_STREAM_DIED_OPEN} "
+                    f"reason=no_terminal_signal unmetered=1 exit={exit_code}"
+                )
+
         with state_lock:
             session_id = state["session_id"]
             turns = self._to_int(state["turns"])
@@ -2200,6 +2447,9 @@ class BackgammonRunner(AgentRunner):
             truncations = self._to_int(state.get("truncations", 0))
             zero_tool_turns = self._to_int(state.get("zero_tool_turns", 0))
             terminal_zero_tool_turn = bool(state.get("terminal_zero_tool_turn", False))
+            turn_anomalies = tuple(dict(record) for record in state.get("turn_anomalies") or [])
+            unmetered_turns = self._to_int(state.get("unmetered_turns", 0))
+            unmetered_turn_wall_s = float(state.get("unmetered_turn_wall_s", 0.0))
 
         if exit_code not in (0, None) and stderr_tail:
             self._progress(
@@ -2243,6 +2493,9 @@ class BackgammonRunner(AgentRunner):
             truncations=truncations,
             zero_tool_turns=zero_tool_turns,
             terminal_zero_tool_turn=terminal_zero_tool_turn,
+            turn_anomalies=turn_anomalies,
+            unmetered_turns=unmetered_turns,
+            unmetered_turn_wall_s=unmetered_turn_wall_s,
         )
 
     def _emit_cost_target_warning_if_reached(
@@ -2529,7 +2782,16 @@ class BackgammonRunner(AgentRunner):
             return f"SIGNAL_{signal_number}"
 
     def _detect_stream_incomplete(self, events_path: Path) -> bool:
-        """Return True if events file contains a step_finish with reason=stream-incomplete."""
+        """Return True if the events file carries a transport-death signature.
+
+        Two live signatures of the same upstream condition, from two observation
+        points: a ``step_finish`` with ``reason`` in
+        TRUNCATED_STEP_FINISH_REASONS, or an ``error`` event whose payload
+        matches a transport/guard signature (``relay: stream incomplete (...)``
+        is what the local relay actually emits; the step_finish form has zero
+        occurrences in retained artifacts but is what the D-EXIT1-TERMINAL path
+        was built against).
+        """
         try:
             with events_path.open("r", encoding="utf-8") as fh:
                 for raw_line in fh:
@@ -2540,14 +2802,114 @@ class BackgammonRunner(AgentRunner):
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if event.get("type") != "step_finish":
+                    event_type = event.get("type")
+                    if event_type == "step_finish":
+                        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+                        if part.get("reason") in TRUNCATED_STEP_FINISH_REASONS:
+                            return True
                         continue
-                    part = event.get("part") if isinstance(event.get("part"), dict) else {}
-                    if part.get("reason") == "stream-incomplete":
-                        return True
+                    if event_type == "error":
+                        if self._budget_stop_signature_from_event(event) is not None:
+                            continue
+                        if self._classify_transport_error(event) is not None:
+                            return True
         except OSError:
             pass
         return False
+
+    @staticmethod
+    def _classify_transport_error(event: dict[str, Any]) -> str | None:
+        """Classify a non-budget ``error`` event's transport/guard signature.
+
+        Returns a stable reason code (``loop_guard``, ``stream_incomplete``,
+        ``idle_timeout``, ``provider_error``, …) or ``generic_error`` when the
+        payload matches no known signature. Never returns None: every non-budget
+        error event terminates the in-flight turn and must be recorded.
+        """
+        error_block = event.get("error") if isinstance(event.get("error"), dict) else {}
+        data = error_block.get("data") if isinstance(error_block.get("data"), dict) else {}
+        message = str(data.get("message", ""))
+        haystack = message.lower()
+        if _LOOP_GUARD_SIGNATURE in haystack:
+            return "loop_guard"
+        for reason_code, signature in _TRANSPORT_ERROR_SIGNATURES:
+            if signature in haystack:
+                return reason_code
+        if message.strip():
+            return "generic_error"
+        return None
+
+    @staticmethod
+    def _step_wall_seconds(open_ts_ms: Any, close_ts_ms: Any) -> float | None:
+        """Wall-clock of one turn from event timestamps (ms epoch)."""
+        try:
+            if open_ts_ms is None or close_ts_ms is None:
+                return None
+            delta = (float(close_ts_ms) - float(open_ts_ms)) / 1000.0
+        except (TypeError, ValueError):
+            return None
+        return delta if delta >= 0 else None
+
+    @staticmethod
+    def _append_turn_anomaly(
+        state: dict[str, Any],
+        *,
+        phase: str,
+        turn_index: int,
+        terminal: str,
+        reason: str,
+        tool_uses: int,
+        file_writes: int,
+        input_tokens: int,
+        output_tokens: int,
+        reasoning_tokens: int,
+        cost_usd: float,
+        tokens_unmetered: bool,
+        wall_seconds: float | None,
+        session_id: Any,
+    ) -> None:
+        """Append one turn_terminal anomaly record to the invocation ledger.
+
+        Caller must hold ``state_lock``. ``retried`` starts False; a later
+        ``step_start`` (client auto-retry) flips it via
+        ``_mark_anomaly_retried``.
+        """
+        record = {
+            "schema_version": 1,
+            "phase": str(phase),
+            "turn_index": int(turn_index),
+            "terminal": str(terminal),
+            "reason": str(reason),
+            "tool_uses": int(tool_uses),
+            "file_writes": int(file_writes),
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
+            "reasoning_tokens": int(reasoning_tokens),
+            "cost_usd": float(cost_usd),
+            "tokens_unmetered": bool(tokens_unmetered),
+            "wall_seconds": wall_seconds,
+            "retried": False,
+            "retry_kind": None,
+            "session_id": session_id if isinstance(session_id, str) else None,
+        }
+        state["turn_anomalies"].append(record)
+        state["unretried_anomaly"] = len(state["turn_anomalies"]) - 1
+        if tokens_unmetered:
+            state["unmetered_turns"] = int(state.get("unmetered_turns", 0) or 0) + 1
+            if wall_seconds is not None:
+                state["unmetered_turn_wall_s"] = float(state.get("unmetered_turn_wall_s", 0.0)) + wall_seconds
+
+    @staticmethod
+    def _mark_anomaly_retried(state: dict[str, Any], *, retry_kind: str) -> None:
+        """Mark the latest unretried anomaly as retried. Caller holds the lock."""
+        index = state.get("unretried_anomaly")
+        if index is None:
+            return
+        anomalies = state.get("turn_anomalies") or []
+        if 0 <= int(index) < len(anomalies):
+            anomalies[int(index)]["retried"] = True
+            anomalies[int(index)]["retry_kind"] = str(retry_kind)
+        state["unretried_anomaly"] = None
 
     def _budget_stop_signature_from_event(self, event: dict[str, Any]) -> str | None:
         if str(event.get("type", "")).strip().lower() != "error":

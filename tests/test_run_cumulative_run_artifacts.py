@@ -177,7 +177,14 @@ def test_run_manifest_and_status_stream_written(tmp_path: Path) -> None:
         assert record["memory_mode"] == "off"
         assert record["org_id"] == "org-test"
         assert record["extraction_state"] == "unknown"
-        assert record["terminal_outcome"] is None
+        # WO-TRUNC-1: terminal outcome is recorded, never placeholder-null.
+        assert record["terminal_outcome"] is True  # verdict PASS
+        assert record["terminal_reason"] == "gates_green"
+        assert record["length_truncations"] == 0
+        assert record["truncated_turns"] == 0
+        assert record["truncated_turns_retried"] == 0
+        assert record["unmetered_turns"] == 0
+        assert record["unmetered_turn_wall_s"] == 0.0
         assert record["work_input_tokens"] == 100
         assert record["work_output_tokens"] == 50
         assert record["work_total_tokens"] == 150
@@ -222,6 +229,81 @@ def test_run_manifest_write_once_and_stream_append_only(tmp_path: Path) -> None:
     records = _read_status_records(runs_dir)
     assert len(records) == 2
     assert [r["sequence_index"] for r in records] == [0, 1]
+
+
+def test_turn_terminal_records_appended_for_truncated_turns(tmp_path: Path) -> None:
+    """WO-TRUNC-1: a truncated turn lands in the status stream as turn_terminal."""
+    module = _load_run_cumulative_module()
+    runs_dir = tmp_path / "runs"
+
+    result = _cell_result()
+    result.verdict = "FAIL"
+    result.termination_reason = "transport_incomplete"
+    result.truncations = 1
+    result.truncated_turns = 1
+    result.truncated_turns_retried = 1
+    result.unmetered_turns = 1
+    result.unmetered_turn_wall_s = 60.0
+    result.turn_anomalies = [
+        {
+            "phase": "initial",
+            "turn_index": 7,
+            "terminal": "truncated_no_signal",
+            "reason": "unknown",
+            "tool_uses": 0,
+            "file_writes": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+            "tokens_unmetered": True,
+            "wall_seconds": 60.0,
+            "retried": True,
+            "retry_kind": "client_auto",
+            "session_id": "sid-1",
+        }
+    ]
+
+    class _TruncRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            self._kwargs = kwargs
+
+        def run_cell(self, run_label: str, run_dir: Path, task_id: str = "backgammon") -> Any:
+            return result
+
+    runner = _build_runner(module, tmp_path, runs_dir=runs_dir)
+    runner._runner_cls = _TruncRunner
+    runner.run_session(_session(0))
+
+    records = _read_status_records(runs_dir)
+    attempt_records = [r for r in records if r["type"] == "attempt"]
+    turn_records = [r for r in records if r["type"] == "turn_terminal"]
+
+    assert len(attempt_records) == 1
+    attempt = attempt_records[0]
+    assert attempt["terminal_outcome"] is False  # FAIL, not a placeholder null
+    assert attempt["terminal_reason"] == "transport_incomplete"
+    assert attempt["length_truncations"] == 1
+    assert attempt["truncated_turns"] == 1
+    assert attempt["truncated_turns_retried"] == 1
+    assert attempt["unmetered_turns"] == 1
+    assert attempt["unmetered_turn_wall_s"] == 60.0
+
+    assert len(turn_records) == 1
+    turn = turn_records[0]
+    assert turn["schema_version"] == 1
+    assert turn["sequence_index"] == 0
+    assert turn["memory_mode"] == "off"
+    assert turn["org_id"] == "org-test"
+    assert turn["terminal"] == "truncated_no_signal"
+    assert turn["reason"] == "unknown"
+    assert turn["turn_index"] == 7
+    assert turn["phase"] == "initial"
+    assert turn["tokens_unmetered"] is True
+    assert turn["wall_seconds"] == 60.0
+    assert turn["retried"] is True
+    assert turn["retry_kind"] == "client_auto"
+    assert turn["session_id"] == "sid-1"
 
 
 def test_served_model_capture_and_failure_tolerance(tmp_path: Path) -> None:
