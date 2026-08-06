@@ -179,6 +179,10 @@ DEFAULT_MAX_STEPS_PER_ATTEMPT = 100
 DEFAULT_RUN_TIMEOUT_S = 5400
 
 
+def _worktree_has_injection_record(worktree: Path) -> bool:
+    return (Path(worktree) / ".wevibe" / "org.json").is_file()
+
+
 def _scan_cell_delivery(worktree: Path) -> str | None:
     plugin_log = worktree / ".wevibe" / "logs" / "wevibe-plugin-errors.log"
     try:
@@ -1357,7 +1361,7 @@ class BackgammonRunner(AgentRunner):
             if isinstance(first_n_problems, int):
                 problems_before_count = first_n_problems
 
-        if str(self.memory_mode).strip().lower() == "on":
+        if _worktree_has_injection_record(worktree):
             scanned_delivery = _scan_cell_delivery(worktree)
             delivery = scanned_delivery if scanned_delivery is not None else "not_measured"
             injected_block_chars = _scan_injected_block_chars(worktree)

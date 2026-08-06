@@ -201,6 +201,9 @@ def test_run_cell_impl_sets_delivery_yes_when_memory_on_and_inject_log_exists(
                 dst_dir,
                 "[inject] injected count=2 chars=1207 sid=ses_delivery newly_served=2\n",
             )
+            marker = dst_dir / ".wevibe" / "org.json"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
         BackgammonRunner,
@@ -239,6 +242,9 @@ def test_run_cell_impl_sets_injected_block_est_tokens_from_scanned_chars(
                 dst_dir,
                 "[inject] injected count=2 block_chars=1207 sid=ses_tokens newly_served=2\n",
             )
+            marker = dst_dir / ".wevibe" / "org.json"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
         BackgammonRunner,
@@ -262,7 +268,14 @@ def test_run_cell_impl_sets_delivery_not_measured_when_memory_on_without_inject_
     tmp_path: Path,
 ) -> None:
     runner = _make_runner(tmp_path, memory_mode="on")
-    monkeypatch.setattr(runner, "_prepare_memory_mode", lambda *, worktree: False)
+
+    def _prepare_with_marker(*, worktree: Path) -> bool:
+        marker = worktree / ".wevibe" / "org.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}", encoding="utf-8")
+        return False
+
+    monkeypatch.setattr(runner, "_prepare_memory_mode", _prepare_with_marker)
     monkeypatch.setattr(
         runner,
         "_run_gate_report",
