@@ -277,6 +277,8 @@ def test_done_state_sources_scorecard_and_creates_artifacts(tmp_path: Path) -> N
     sequencer = _make_sequencer(tmp_path, runner=runner)
 
     paused = sequencer.step_until_review()
+    assert paused["status"] == "awaiting_extract"
+    paused = sequencer.extract_current()
     assert paused["status"] == "awaiting_coordinator_review"
 
     # The status stream is created as a sibling of the mutable manifest (by the
@@ -319,6 +321,8 @@ def test_extraction_completed_record_appended(tmp_path: Path) -> None:
     sequencer = _make_sequencer(tmp_path, runner=runner)
 
     paused = sequencer.step_until_review()
+    assert paused["status"] == "awaiting_extract"
+    paused = sequencer.extract_current()
     assert paused["status"] == "awaiting_coordinator_review"
 
     records = _extraction_records(tmp_path)
@@ -366,8 +370,10 @@ def test_cut_off_record_appended_and_reraises(tmp_path: Path) -> None:
     )
     sequencer = _make_sequencer(tmp_path, runner=runner)
 
+    pending = sequencer.step_until_review()
+    assert pending["status"] == "awaiting_extract"
     with pytest.raises(RuntimeError, match="extract timed out"):
-        sequencer.step_until_review()
+        sequencer.extract_current()
 
     records = _extraction_records(tmp_path)
     assert len(records) == 1

@@ -271,7 +271,9 @@ def _make_harness(
 
 
 def _await_review(harness: Harness) -> dict[str, Any]:
-    paused = harness.sequencer.step_until_review()
+    pending = harness.sequencer.step_until_review()
+    assert pending["status"] == "awaiting_extract"
+    paused = harness.sequencer.extract_current()
     assert paused["status"] == "awaiting_coordinator_review"
     return paused
 

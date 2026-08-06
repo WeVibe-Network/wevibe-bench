@@ -277,7 +277,9 @@ def _write_decision(path: Path, payload: dict[str, Any]) -> Path:
 
 
 def _await_review(harness: Harness) -> dict[str, Any]:
-    paused = harness.sequencer.step_until_review()
+    pending = harness.sequencer.step_until_review()
+    assert pending["status"] == "awaiting_extract"
+    paused = harness.sequencer.extract_current()
     assert paused["status"] == "awaiting_coordinator_review"
     return paused
 
@@ -322,9 +324,13 @@ def _not_evaluated_walk_gate(*, ordinal: int = 3) -> WalkGateVerdictRecord:
 def test_step_until_review_phase_walk_stops_before_leader_calls(tmp_path: Path) -> None:
     harness = _make_harness(tmp_path)
 
-    paused = _await_review(harness)
+    pending = harness.sequencer.step_until_review()
+    assert pending["status"] == "awaiting_extract"
+    assert pending["sequence_index"] == 0
+    assert harness.runner.phase_trace == ["PREPARE_FIXTURE", "RUN_SESSION"]
 
-    assert paused["sequence_index"] == 0
+    paused = harness.sequencer.extract_current()
+    assert paused["status"] == "awaiting_coordinator_review"
     assert harness.runner.phase_trace == [
         "PREPARE_FIXTURE",
         "RUN_SESSION",
@@ -427,11 +433,17 @@ def test_step_until_review_is_resume_safe_at_await(tmp_path: Path) -> None:
 
     first_pause = _await_review(harness)
     extract_calls_before = harness.runner.extract_calls
+    run_calls_before = harness.runner.run_calls
 
-    second_pause = harness.sequencer.step_until_review()
-
+    # Idempotent: extract_current again at AWAIT_COORDINATOR_REVIEW re-extracts nothing.
+    second_pause = harness.sequencer.extract_current()
     assert second_pause == first_pause
     assert harness.runner.extract_calls == extract_calls_before
+
+    # Resume-safe: step_until_review at AWAIT_COORDINATOR_REVIEW does not re-run run_session.
+    third_pause = harness.sequencer.step_until_review()
+    assert third_pause == first_pause
+    assert harness.runner.run_calls == run_calls_before
 
 
 @pytest.mark.parametrize("case", ["absent", "uncorrelatable"])
