@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,14 @@ from wevibe_bench.cumulative.catalog import PrivateCatalog, PrivateReviewCard
 from wevibe_bench.cumulative.decision import DENY_FINAL, VERIFY
 from wevibe_bench.cumulative.leader_client import LeaderClient
 from wevibe_bench.cumulative.sequencer import CumulativeSequencer
+from wevibe_bench.cumulative.run_artifacts import (
+    RunManifest,
+    StatusStream,
+    build_scorecard,
+    default_run_manifest_path,
+    default_status_stream_path,
+    write_run_manifest,
+)
 from wevibe_bench.cumulative.types import (
     RosterEntry,
     SessionPhase,
@@ -178,6 +187,8 @@ def _make_harness(
     tmp_path: Path,
     *,
     index_ready_plan: list[bool] | None = None,
+    index_ready_max_polls: int = 3,
+    require_delivery_verification: bool = True,
     on_budget: int = 1,
     walk_gates_by_sequence: dict[int, list[WalkGateVerdictRecord]] | None = None,
 ) -> Harness:
@@ -221,6 +232,8 @@ def _make_harness(
         org_id="org-sequencer-test",
         config_fingerprint="cfg-sequencer-test",
         on_budget=on_budget,
+        index_ready_max_polls=index_ready_max_polls,
+        require_delivery_verification=require_delivery_verification,
     )
 
     return Harness(
@@ -486,6 +499,228 @@ def test_manifest_contract_gate_requires_correlatable_integrity_attestation(
     assert harness.hub_client.deny_calls == []
 
 
+
+
+def test_resume_with_decision_unverified_delivery_is_fail_closed_and_advances(
+    tmp_path: Path,
+) -> None:
+    """A delivery that never becomes ready within the bounded poll must not
+    hang, must append a fail-closed `delivery`/`unverified` status record, and
+    must still advance the run to the next session."""
+    harness = _make_harness(
+        tmp_path,
+        index_ready_plan=[False] * 5,
+        index_ready_max_polls=3,
+    )
+    _await_review(harness)
+
+    session = harness.sequencer.current_session()
+    assert session is not None
+    first_ref = _session_candidate_refs(session)[0]
+    decision_path = _write_decision(
+        tmp_path / f"decision-unverified-{session.sequence_index}.json",
+        _decision_payload(
+            session,
+            candidate_verdicts=[(first_ref, VERIFY, "valuable memory")],
+        ),
+    )
+
+    resumed = harness.sequencer.resume_with_decision(decision_path)
+
+    # (c) still advances to NEXT_SESSION — session committed result returned.
+    assert resumed["status"] == "session_committed"
+    assert resumed["next_index"] == 1
+
+    # (a) bounded loop: exactly max_polls index_ready calls, no hang.
+    assert harness.runner.index_ready_calls == 3
+
+    # (b) fail-closed delivery record with a not_scored_reason appended.
+    stream = StatusStream(default_status_stream_path(harness.manifest_path))
+    delivery_records = [r for r in stream.records() if r.get("type") == "delivery"]
+    assert len(delivery_records) == 1
+    record = delivery_records[0]
+    assert record["type"] == "delivery"
+    assert record["schema_version"] == 1
+    assert record["sequence_index"] == 0
+    assert record["memory_mode"] == "off"
+    assert record["org_id"] == "org-sequencer-test"
+    assert record["delivery_state"] == "unverified"
+    assert record["not_scored_reason"] == "delivery_unverified_after_3_polls"
+
+
+def test_resume_with_decision_verified_delivery_records_no_disposition(
+    tmp_path: Path,
+) -> None:
+    """A delivery that IS verified within the bound records no `delivery`
+    status record (absence = scored normally)."""
+    harness = _make_harness(tmp_path, index_ready_plan=[True], index_ready_max_polls=3)
+    _await_review(harness)
+
+    session = harness.sequencer.current_session()
+    assert session is not None
+    first_ref = _session_candidate_refs(session)[0]
+    decision_path = _write_decision(
+        tmp_path / f"decision-verified-{session.sequence_index}.json",
+        _decision_payload(
+            session,
+            candidate_verdicts=[(first_ref, VERIFY, "valuable memory")],
+        ),
+    )
+
+    resumed = harness.sequencer.resume_with_decision(decision_path)
+    assert resumed["status"] == "session_committed"
+
+    stream = StatusStream(default_status_stream_path(harness.manifest_path))
+    assert [r for r in stream.records() if r.get("type") == "delivery"] == []
+
+
+def test_resume_with_decision_unverified_but_gate_disabled_has_no_disposition(
+    tmp_path: Path,
+) -> None:
+    """When the operator disables delivery verification, an unverified
+    delivery still exits the bounded poll without hanging and proceeds to the
+    next session, but records no disposition (cell scored normally)."""
+    harness = _make_harness(
+        tmp_path,
+        index_ready_plan=[False] * 5,
+        index_ready_max_polls=3,
+        require_delivery_verification=False,
+    )
+    _await_review(harness)
+
+    session = harness.sequencer.current_session()
+    assert session is not None
+    first_ref = _session_candidate_refs(session)[0]
+    decision_path = _write_decision(
+        tmp_path / f"decision-unverified-gate-off-{session.sequence_index}.json",
+        _decision_payload(
+            session,
+            candidate_verdicts=[(first_ref, VERIFY, "valuable memory")],
+        ),
+    )
+
+    resumed = harness.sequencer.resume_with_decision(decision_path)
+    assert resumed["status"] == "session_committed"
+    assert resumed["next_index"] == 1
+    assert harness.runner.index_ready_calls == 3
+
+    stream = StatusStream(default_status_stream_path(harness.manifest_path))
+    assert [r for r in stream.records() if r.get("type") == "delivery"] == []
+
+
+# --- WO-NIGHT2-1a chunk D: EXERCISED-PATH integration proof. The sequencer ---
+# --- (real) WRITES the fail-closed delivery record to a real status stream, ---
+# --- and the SAME real stream feeds build_scorecard — proving no hang, the ---
+# --- cell is excluded from the scored set, not-scored-with-reason is        ---
+# --- reported, and the run advances to the next session.                    ---
+
+
+def test_delivery_failure_marks_cell_not_scored_end_to_end(tmp_path: Path) -> None:
+    """EXERCISED-PATH integration proof (not a unit test).
+
+    Drives the REAL ``CumulativeSequencer`` through the delivery-failure path
+    with ``require_delivery_verification=True``: the sequencer WRITES a
+    fail-closed ``delivery``/``unverified`` record to the real status stream,
+    advances to the next session without hanging (wall-clock-measured), and
+    ``build_scorecard`` — reading that SAME real stream + the write-once
+    RunManifest — excludes the ON cell from the scored set and reports
+    not-scored-with-reason.
+    """
+    harness = _make_harness(
+        tmp_path,
+        index_ready_plan=[False] * 5,
+        index_ready_max_polls=3,
+        require_delivery_verification=True,
+        on_budget=1,
+    )
+    _await_review(harness)
+
+    session = harness.sequencer.current_session()
+    assert session is not None
+
+    # Write the write-once RunManifest the scorecard reads (a B1 artifact the
+    # FAKE runner never creates; mirrors _write_scorecard_manifest in the
+    # wiring test but matched to THIS harness's identity).
+    write_run_manifest(
+        default_run_manifest_path(harness.manifest_path),
+        RunManifest(
+            run_id="run-chunk-d",
+            created_at="2026-08-06T00:00:00Z",
+            served_model=None,
+            requested_model=str(session.model),
+            memory_mode=str(session.memory_mode),
+            org_id=str(session.org_id),
+        ),
+    )
+
+    # Drive resume_with_decision through the delivery-failure path, measuring
+    # wall-clock around the whole call to prove the bounded poll never hangs.
+    t_start = time.monotonic()
+    resumed = _verify_first_candidate_and_advance(harness, tmp_path)
+    t_stop = time.monotonic()
+    elapsed = t_stop - t_start
+
+    assert resumed["status"] == "session_committed"
+    assert resumed["next_index"] == 1
+    assert elapsed < 10.0
+
+    # (a) bounded poll: at most index_ready_max_polls index_ready calls.
+    assert harness.runner.index_ready_calls <= 3
+
+    # The sequencer wrote the fail-closed delivery record to the real stream.
+    stream = StatusStream(default_status_stream_path(harness.manifest_path))
+    records = stream.records()
+    delivery_records = [r for r in records if r.get("type") == "delivery"]
+    assert len(delivery_records) == 1
+    delivery = delivery_records[0]
+    assert delivery["delivery_state"] == "unverified"
+    assert delivery["sequence_index"] == 0
+    assert delivery["memory_mode"] == "off"
+    assert delivery["not_scored_reason"]
+
+    # Append the attempt record (present in a real run from run_session) so the
+    # scorecard sees a would-be-scored cell and must exclude it via the
+    # fail-closed delivery disposition.
+    stream.append(
+        {
+            "type": "attempt",
+            "schema_version": 1,
+            "sequence_index": 0,
+            "memory_mode": "off",
+            "org_id": "org-sequencer-test",
+            "progress": {
+                "problems_before": 3,
+                "problems_after": 1,
+                "resolved_count": 2,
+                "remaining_count": 1,
+                "full_green": True,
+                "attempts_to_green": 1,
+                "turns": 2,
+                "total_tokens": 1000,
+                "wall_seconds": 1.0,
+                "wall_cost_usd": 0.0,
+            },
+            "session_fp": str(session.session_fp),
+            "session_id": session.session_id,
+        }
+    )
+
+    scorecard = build_scorecard(harness.manifest_path)
+
+    # (b) the ON cell is EXCLUDED: no scored cells, neither pass nor fail.
+    assert scorecard["scored_sessions"] == 0
+    assert scorecard["convergence"]["points"] == []
+    assert scorecard["scored_pass"] == 0
+    assert scorecard["scored_fail"] == 0
+
+    # (c) not-scored-with-reason reported for the excluded cell.
+    assert scorecard["not_scored"] == [
+        {
+            "sequence_index": 0,
+            "memory_mode": "off",
+            "not_scored_reason": delivery["not_scored_reason"],
+        }
+    ]
 
 
 

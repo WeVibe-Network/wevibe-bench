@@ -57,6 +57,17 @@ Terminal outcome (WO-TRUNC-1 — recorded, never placeholder-null):
   scorecard can tell "the model failed" (``attempt_ceiling_reached``) from
   "the stream died" (``transport_incomplete`` / ``harness_error``).
 
+``delivery`` records (fail-closed, unverified delivery)
+--------------------------------------------------------
+One record per cell whose delivery could not be verified, appended by the
+writer when a delivery attempt ends without a verifiable proof. The scorecard
+EXCLUDES these cells from the scored set and reports them distinctly as
+``not_scored``. Keys: ``type``: "delivery", ``schema_version``: 1,
+``sequence_index`` (int), ``memory_mode`` (str), ``org_id`` (str),
+``delivery_state`` in {"unverified"} — only the fail-closed ``"unverified"``
+disposition excludes a cell; any other value is ignored by the reader —
+``not_scored_reason`` (str, the reason the cell was not scored).
+
 Turn-terminal accounting (WO-TRUNC-1):
 - ``length_truncations``: int — metered ``finish_reason=length`` turns.
 - ``truncated_turns`` / ``truncated_turns_retried``: int — anomalous turn
@@ -299,7 +310,11 @@ def build_scorecard(
 
     Returns a dict with ``schema_version``, ``manifest`` (the RunManifest
     identity dict), ``convergence`` (the derived trend dict), and the counts of
-    parsed stream records and scored sessions.
+    parsed stream records and scored sessions. The scorecard distinguishes
+    three outcomes: ``scored_pass`` / ``scored_fail`` (counts of the scored set)
+    and ``not_scored`` (the cells excluded via a fail-closed
+    ``delivery_state=="unverified"`` delivery record, each with
+    ``sequence_index``, ``memory_mode`` and ``not_scored_reason``).
     """
     run_manifest_path = default_run_manifest_path(manifest_path)
     resolved_stream_path = (
@@ -311,6 +326,22 @@ def build_scorecard(
     run_manifest = load_run_manifest(run_manifest_path)
     stream = StatusStream(resolved_stream_path)
     records = stream.records()
+
+    # Fail-closed delivery gate (WO-NIGHT2-1a): any cell whose delivery was
+    # written as ``delivery_state=="unverified"`` is EXCLUDED from the scored
+    # set and reported distinctly as not-scored-with-reason. Only the
+    # fail-closed ``unverified`` disposition excludes; any other value is
+    # ignored so a (future) verified disposition never drops a cell.
+    not_scored_by_index: dict[int, dict[str, Any]] = {}
+    for record in records:
+        if record.get("type") != "delivery":
+            continue
+        if record.get("delivery_state") != "unverified":
+            continue
+        seq = record.get("sequence_index")
+        if seq is None:
+            continue
+        not_scored_by_index[int(seq)] = record
 
     # Group records by sequence_index; take the LAST record per cell that has a
     # non-None progress dict (the terminal attempt's final progress).
@@ -326,6 +357,8 @@ def build_scorecard(
             continue
         best_by_cell[int(seq)] = record
 
+    # The ONLY change to which cells enter the scored set: a not-scored cell
+    # (whose attempt record may still exist from ``run_session``) is dropped.
     scored_sessions = [
         _ScoredSession(
             sequence_index=int(record["sequence_index"]),
@@ -334,9 +367,30 @@ def build_scorecard(
             progress=dict(record["progress"]),
         )
         for record in best_by_cell.values()
+        if int(record["sequence_index"]) not in not_scored_by_index
     ]
 
     convergence = build_convergence_trend(scored_sessions).to_dict()
+
+    # scored_pass / scored_fail are derived from the SAME progress objects that
+    # feed ``build_convergence_trend`` (mirroring its ``full_green`` semantics),
+    # so they are perfectly consistent with ``convergence`` — the cells that
+    # ARE scored have their metrics unchanged.
+    def _session_full_green(session: _ScoredSession) -> bool:
+        raw = session.progress.get("full_green", False)
+        return bool(raw) if isinstance(raw, bool) else False
+
+    scored_pass = sum(1 for s in scored_sessions if _session_full_green(s))
+    scored_fail = len(scored_sessions) - scored_pass
+
+    not_scored = [
+        {
+            "sequence_index": int(record["sequence_index"]),
+            "memory_mode": str(record.get("memory_mode") or ""),
+            "not_scored_reason": str(record.get("not_scored_reason") or ""),
+        }
+        for record in not_scored_by_index.values()
+    ]
 
     return {
         "schema_version": RUN_ARTIFACTS_SCHEMA_VERSION,
@@ -344,6 +398,9 @@ def build_scorecard(
         "convergence": convergence,
         "stream_records": len(records),
         "scored_sessions": len(scored_sessions),
+        "scored_pass": scored_pass,
+        "scored_fail": scored_fail,
+        "not_scored": not_scored,
     }
 
 

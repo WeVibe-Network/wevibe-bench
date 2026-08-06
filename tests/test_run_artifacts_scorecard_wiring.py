@@ -398,3 +398,178 @@ def test_done_state_falls_back_when_artifacts_missing(tmp_path: Path) -> None:
     assert isinstance(done["convergence"], dict)
     assert "trend_hash" in done["convergence"]
     assert "sessions_completed" in done["convergence"]
+
+
+# --- WO-NIGHT2-1a chunk C: 3-state scorecard (scored-pass / scored-fail / ---
+# --- not-scored-with-reason) via the fail-closed delivery gate.         ---
+
+
+def _write_scored_attempt(
+    stream: StatusStream,
+    *,
+    sequence_index: int,
+    session_fp: str,
+    session_id: str,
+    full_green: bool,
+) -> None:
+    stream.append(
+        {
+            "type": "attempt",
+            "schema_version": 1,
+            "sequence_index": sequence_index,
+            "memory_mode": "on",
+            "org_id": "org-1",
+            "progress": {
+                "problems_before": 3,
+                "problems_after": 1 if full_green else 2,
+                "resolved_count": 2 if full_green else 1,
+                "remaining_count": 1,
+                "full_green": full_green,
+                "attempts_to_green": 1,
+                "turns": 2,
+                "total_tokens": 1000,
+                "wall_seconds": 1.0,
+                "wall_cost_usd": 0.0,
+            },
+            "session_fp": session_fp,
+            "session_id": session_id,
+        }
+    )
+
+
+def _write_delivery(
+    stream: StatusStream,
+    *,
+    sequence_index: int,
+    delivery_state: str,
+    not_scored_reason: str,
+    memory_mode: str = "on",
+) -> None:
+    stream.append(
+        {
+            "type": "delivery",
+            "schema_version": 1,
+            "sequence_index": sequence_index,
+            "memory_mode": memory_mode,
+            "org_id": "org-1",
+            "delivery_state": delivery_state,
+            "not_scored_reason": not_scored_reason,
+        }
+    )
+
+
+def _write_scorecard_manifest(tmp_path: Path) -> Path:
+    run_manifest_path = default_run_manifest_path(tmp_path / "manifest.json")
+    write_run_manifest(
+        run_manifest_path,
+        RunManifest(
+            run_id="run-chunk-c",
+            created_at="2026-08-06T00:00:00Z",
+            served_model=None,
+            requested_model="model-a",
+            memory_mode="on",
+            org_id="org-1",
+        ),
+    )
+    return tmp_path / "manifest.json"
+
+
+def test_not_scored_cell_excluded_from_scorecard(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    # Cell 0: scored (green). Cell 1: scored (fail). Cell 2: attempt EXISTS
+    # (from run_session) BUT is excluded by an unverified delivery record.
+    _write_scored_attempt(stream, sequence_index=0, session_fp="fp-0", session_id="s-0", full_green=True)
+    _write_scored_attempt(stream, sequence_index=1, session_fp="fp-1", session_id="s-1", full_green=False)
+    _write_scored_attempt(stream, sequence_index=2, session_fp="fp-2", session_id="s-2", full_green=True)
+    _write_delivery(
+        stream,
+        sequence_index=2,
+        delivery_state="unverified",
+        not_scored_reason="delivery proof absent after timeout",
+        memory_mode="on",
+    )
+
+    scorecard = build_scorecard(manifest_path)
+
+    # Cell 2 is EXCLUDED from the scored set despite its attempt record.
+    assert scorecard["scored_sessions"] == 2
+    assert scorecard["stream_records"] == 4
+    assert [p["sequence_index"] for p in scorecard["convergence"]["points"]] == [0, 1]
+
+    # Distinct not-scored-with-reason outcome carries the reason.
+    assert scorecard["not_scored"] == [
+        {
+            "sequence_index": 2,
+            "memory_mode": "on",
+            "not_scored_reason": "delivery proof absent after timeout",
+        }
+    ]
+
+    # scored-pass / scored-fail reflect the reduced scored set only.
+    assert scorecard["scored_pass"] == 1  # cell 0 green
+    assert scorecard["scored_fail"] == 1  # cell 1 fail
+
+
+def test_no_delivery_record_scores_all_as_today(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    _write_scored_attempt(stream, sequence_index=0, session_fp="fp-0", session_id="s-0", full_green=True)
+    _write_scored_attempt(stream, sequence_index=1, session_fp="fp-1", session_id="s-1", full_green=False)
+
+    scorecard = build_scorecard(manifest_path)
+
+    # No behavior change: all attempt cells are scored, not_scored is empty.
+    assert scorecard["scored_sessions"] == 2
+    assert scorecard["not_scored"] == []
+    assert scorecard["scored_pass"] == 1
+    assert scorecard["scored_fail"] == 1
+    assert scorecard["convergence"]["sessions_completed"] == 2
+
+
+def test_verified_delivery_does_not_exclude(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    _write_scored_attempt(stream, sequence_index=0, session_fp="fp-0", session_id="s-0", full_green=True)
+    _write_delivery(
+        stream,
+        sequence_index=0,
+        delivery_state="verified",
+        not_scored_reason="",
+    )
+
+    scorecard = build_scorecard(manifest_path)
+
+    # Only the fail-closed "unverified" disposition excludes a cell.
+    assert scorecard["scored_sessions"] == 1
+    assert scorecard["not_scored"] == []
+    assert scorecard["scored_pass"] == 1
+    assert scorecard["convergence"]["sessions_completed"] == 1
+
+
+def test_mixed_stream_outcome_counts_consistent_with_convergence(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    _write_scored_attempt(stream, sequence_index=0, session_fp="fp-0", session_id="s-0", full_green=True)
+    _write_scored_attempt(stream, sequence_index=1, session_fp="fp-1", session_id="s-1", full_green=False)
+    _write_scored_attempt(stream, sequence_index=2, session_fp="fp-2", session_id="s-2", full_green=True)
+    _write_delivery(
+        stream,
+        sequence_index=2,
+        delivery_state="unverified",
+        not_scored_reason="delivery proof absent",
+    )
+
+    scorecard = build_scorecard(manifest_path)
+    convergence = scorecard["convergence"]
+
+    reduced = scorecard["scored_sessions"]
+    assert scorecard["scored_pass"] + scorecard["scored_fail"] == reduced
+    assert scorecard["scored_pass"] == convergence["sessions_green"]
+    assert scorecard["scored_fail"] == (
+        convergence["sessions_completed"] - convergence["sessions_green"]
+    )

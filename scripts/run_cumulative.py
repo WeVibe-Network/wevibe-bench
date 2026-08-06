@@ -1367,6 +1367,7 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
         config_fingerprint=config_fingerprint,
         on_budget=int(args.on_budget),
         run_context=current_run_context,
+        require_delivery_verification=config.RunConfig().require_delivery_verification,
     )
     recorded_run_context = getattr(getattr(sequencer, "_manifest"), "run_context", None)
     drift = compare_run_context(recorded_run_context, current_run_context)

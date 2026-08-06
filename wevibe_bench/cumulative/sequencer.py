@@ -33,6 +33,13 @@ from .types import (
 
 _LOG = logging.getLogger(__name__)
 
+# Bounds the delivery-wait poll in the COMMIT_INDEX_READY phase. Each poll
+# sleeps 0.25s, so this is ~20s of waiting for committed memories to become
+# visible/indexed. Fail-closed: a delivery that never arrives ends the wait
+# instead of polling forever, and the cell is recorded as unverified rather
+# than left hanging (or wrongly scored).
+INDEX_READY_MAX_POLLS = 80
+
 
 class AwaitingCoordinatorReview(TypedDict):
     status: Literal["awaiting_coordinator_review"]
@@ -113,6 +120,8 @@ class CumulativeSequencer:
         config_fingerprint: str,
         on_budget: int,
         run_context: Mapping[str, Any] | None = None,
+        index_ready_max_polls: int = INDEX_READY_MAX_POLLS,
+        require_delivery_verification: bool = True,
     ) -> None:
         if not isinstance(runner, SessionRunner):
             raise ValueError("runner must implement SessionRunner")
@@ -167,6 +176,8 @@ class CumulativeSequencer:
         self._leader_client = leader_client
         self._review_card = review_card
         self._manifest = manifest
+        self._index_ready_max_polls = index_ready_max_polls
+        self._require_delivery_verification = require_delivery_verification
 
         if not self._manifest.session_records:
             self._manifest.session_records = [
@@ -486,9 +497,8 @@ class CumulativeSequencer:
             )
 
         if phase == SessionPhase.COMMIT_INDEX_READY:
-            poll_count = 0
-            while True:
-                poll_count += 1
+            delivery_verified = False
+            for poll_count in range(1, self._index_ready_max_polls + 1):
                 if self._runner.index_ready(session):
                     _LOG.info(
                         "cumulative.sequencer.index_ready sequence_index=%d session_fp=%s job_id=%s polls=%d committed_count=%d",
@@ -498,6 +508,7 @@ class CumulativeSequencer:
                         poll_count,
                         len(session.committed_ids),
                     )
+                    delivery_verified = True
                     break
 
                 if poll_count == 1 or poll_count % 10 == 0:
@@ -510,6 +521,35 @@ class CumulativeSequencer:
                         len(session.committed_ids),
                     )
                 time.sleep(0.25)
+
+            if not delivery_verified:
+                # Fail-closed: a delivery that never arrives within the bounded
+                # wait is recorded as unverified (never scored as a silent pass)
+                # and the run proceeds to the next session. If the operator has
+                # disabled the integrity gate, the poll is STILL bounded so it
+                # never hangs, but no disposition is recorded (cell scored
+                # normally).
+                if self._require_delivery_verification:
+                    delivery_record: dict[str, Any] = {
+                        "type": "delivery",
+                        "schema_version": 1,
+                        "sequence_index": session.sequence_index,
+                        "memory_mode": str(session.memory_mode),
+                        "org_id": str(session.org_id or self._manifest.org_id),
+                        "delivery_state": "unverified",
+                        "not_scored_reason": (
+                            f"delivery_unverified_after_{self._index_ready_max_polls}_polls"
+                        ),
+                    }
+                    StatusStream(
+                        default_status_stream_path(self._manifest_path)
+                    ).append(delivery_record)
+                    _LOG.warning(
+                        "cumulative.sequencer.delivery_unverified sequence_index=%d memory_mode=%s polls=%d",
+                        session.sequence_index,
+                        session.memory_mode,
+                        self._index_ready_max_polls,
+                    )
 
             session.set_phase(SessionPhase.NEXT_SESSION)
             self._checkpoint()
