@@ -70,7 +70,6 @@ from wevibe_bench.cumulative.manifest import roster_hash as cumulative_roster_ha
 from wevibe_bench.cumulative.prerun import (
     CachedSessionRunner,
     prerun_off_cells,
-    resolve_off_concurrency,
 )
 from wevibe_bench.cumulative.progress import progress_from_cell_result
 from wevibe_bench.cumulative.run_artifacts import (
@@ -1920,22 +1919,19 @@ def _fresh_prerun_runner_factory(runner: object) -> Callable[[SessionRecord], ob
 
 def _maybe_prerun_off_baseline(args: argparse.Namespace, context: CliContext) -> None:
     pending = _pending_off_prerun_sessions(context.sequencer)
-    concurrency = resolve_off_concurrency(getattr(args, "off_concurrency", None))
     checkpoint_dir = context.layout.manifest_path.parent / "prerun"
     _LOG.info(
-        "prerun.stage_start off_pending=%d concurrency=%d",
+        "prerun.stage_start off_pending=%d",
         len(pending),
-        concurrency,
     )
     if not pending:
-        _LOG.info("prerun.stage_end off_pending=0 concurrency=%d done=0 failed=0 skipped=0", concurrency)
+        _LOG.info("prerun.stage_end off_pending=0 done=0 failed=0 skipped=0")
         return
 
     results = prerun_off_cells(
         pending,
         _fresh_prerun_runner_factory(context.runner),
         checkpoint_dir,
-        concurrency=concurrency,
     )
     done_count = sum(1 for item in results if item.get("status") == "done")
     failed_count = sum(1 for item in results if item.get("status") == "failed")
@@ -1951,9 +1947,8 @@ def _maybe_prerun_off_baseline(args: argparse.Namespace, context: CliContext) ->
             outcomes,
         )
     _LOG.info(
-        "prerun.stage_end off_pending=%d concurrency=%d done=%d failed=%d skipped=%d outcomes=%s",
+        "prerun.stage_end off_pending=%d done=%d failed=%d skipped=%d outcomes=%s",
         len(pending),
-        concurrency,
         done_count,
         failed_count,
         skipped_count,
@@ -2824,12 +2819,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Optional ConsumerDecisionManifest JSON path for ON-session consumer gate "
             "(for conformance deny/block/report runs)."
         ),
-    )
-    run_parser.add_argument(
-        "--off-concurrency",
-        type=int,
-        default=None,
-        help="OFF-baseline prerun concurrency (flag > WEVIBE_BENCH_OFF_CONCURRENCY > 3).",
     )
     run_parser.add_argument(
         "--proxy-base-url",

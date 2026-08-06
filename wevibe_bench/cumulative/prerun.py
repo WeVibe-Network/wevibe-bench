@@ -1,8 +1,7 @@
-"""OFF-baseline prerun concurrency core for cumulative benchmark cells."""
+"""OFF-baseline prerun for cumulative benchmark cells (strictly serial)."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 import inspect
@@ -20,18 +19,6 @@ from .progress import progress_from_cell_result
 
 _LOG = logging.getLogger(__name__)
 
-OFF_CONCURRENCY_ENV = "WEVIBE_BENCH_OFF_CONCURRENCY"
-DEFAULT_OFF_CONCURRENCY = 3
-
-_LOCAL_LLM_MARKERS = (
-    "ollama",
-    "lm-studio",
-    "lmstudio",
-    "localhost:1234",
-    "localhost:11434",
-)
-
-
 class _SessionRunnerLike(Protocol):
     def prepare_fixture(self, session: Any) -> None: ...
 
@@ -40,26 +27,6 @@ class _SessionRunnerLike(Protocol):
     def extract(self, session: Any) -> dict[str, Any]: ...
 
     def index_ready(self, session: Any) -> bool: ...
-
-
-def resolve_off_concurrency(value: str | int | None = None) -> int:
-    """Resolve the OFF-baseline concurrency knob; invalid strings are fatal."""
-
-    raw: str | int | None = os.environ.get(OFF_CONCURRENCY_ENV) if value is None else value
-    if raw is None or raw == "":
-        return DEFAULT_OFF_CONCURRENCY
-    try:
-        parsed = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{OFF_CONCURRENCY_ENV} must be an integer >= 1") from exc
-    return max(1, parsed)
-
-
-def is_local_llm(provider_pin_or_model: str) -> bool:
-    """Return True when a provider/model string points at a local LLM lane."""
-
-    text = str(provider_pin_or_model or "").lower()
-    return any(marker in text for marker in _LOCAL_LLM_MARKERS)
 
 
 def _utc_now_iso() -> str:
@@ -116,10 +83,6 @@ def _cell_string(session: Any, name: str, default: str = "") -> str:
 
 def _cell_sequence_index(session: Any) -> int:
     return int(getattr(session, "sequence_index"))
-
-
-def _is_local_cell(session: Any) -> bool:
-    return is_local_llm(_cell_string(session, "provider_pin")) or is_local_llm(_cell_string(session, "model"))
 
 
 def _json_safe(value: Any) -> Any:
@@ -252,40 +215,21 @@ def prerun_off_cells(
     sessions: list[Any],
     runner_factory: Callable[..., _SessionRunnerLike],
     checkpoint_dir: str | os.PathLike[str],
-    concurrency: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Run pending OFF cells with API concurrency and a hard-serial local-LLM lane."""
+    """Run all pending OFF cells strictly serially in roster order.
 
-    max_workers = resolve_off_concurrency(concurrency)
-    api_cells = [session for session in sessions if not _is_local_cell(session)]
-    local_cells = [session for session in sessions if _is_local_cell(session)]
+    The model stream is a single-consumer resource (OFF-concurrency = 1); no
+    harness path may open two concurrent streams, so there is no pool and no
+    api/local split.
+    """
+
     results: dict[int, dict[str, Any]] = {}
-
-    if api_cells:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_run_one_cell, session, runner_factory, checkpoint_dir): session
-                for session in api_cells
-            }
-            for future in as_completed(futures):
-                session = futures[future]
-                results[_cell_sequence_index(session)] = future.result()
-
-    for session in local_cells:
+    for session in sessions:
         results[_cell_sequence_index(session)] = _run_one_cell(session, runner_factory, checkpoint_dir)
-
     ordered = [results[_cell_sequence_index(session)] for session in sessions]
     done_count = sum(1 for item in ordered if item.get("status") == "done")
     failed_count = sum(1 for item in ordered if item.get("status") == "failed")
-    _LOG.info(
-        "prerun.pool_done cells=%d api_cells=%d local_cells=%d concurrency=%d done=%d failed=%d",
-        len(sessions),
-        len(api_cells),
-        len(local_cells),
-        max_workers,
-        done_count,
-        failed_count,
-    )
+    _LOG.info("prerun.serial_done cells=%d done=%d failed=%d", len(sessions), done_count, failed_count)
     return ordered
 
 
@@ -325,12 +269,8 @@ class CachedSessionRunner:
 
 __all__ = [
     "CachedSessionRunner",
-    "DEFAULT_OFF_CONCURRENCY",
-    "OFF_CONCURRENCY_ENV",
     "cell_result_from_dict",
     "cell_result_to_dict",
-    "is_local_llm",
     "load_prerun_checkpoint",
     "prerun_off_cells",
-    "resolve_off_concurrency",
 ]
