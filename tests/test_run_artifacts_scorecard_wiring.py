@@ -573,3 +573,199 @@ def test_mixed_stream_outcome_counts_consistent_with_convergence(tmp_path: Path)
     assert scorecard["scored_fail"] == (
         convergence["sessions_completed"] - convergence["sessions_green"]
     )
+
+
+# --- WO-NIGHT2-1b chunk 2: scorecard-level VOID-INSTRUMENT classification ---
+# --- tests locking the card's contract (RUNBOOK rule 5.10). Recording-level ---
+# --- assertion at test_run_cumulative_run_artifacts.py:284 is PRESERVED; the ---
+# --- classification contract (truncated cell -> void_instrument, not scored) ---
+# --- is asserted here end-to-end through build_scorecard on the REAL surface. ---
+
+
+def _write_truncated_attempt(
+    stream: StatusStream,
+    *,
+    sequence_index: int,
+    session_fp: str,
+    session_id: str,
+    full_green: bool,
+    memory_mode: str = "on",
+    terminal_reason: str | None = None,
+    length_truncations: int = 0,
+    truncated_turns: int = 0,
+    terminal_outcome: bool | None = None,
+) -> None:
+    """Mirror ``_write_scored_attempt`` but with the per-attempt truncation
+    fields that the scorecard's VOID-INSTRUMENT signal reads.
+
+    Defaults carry NO truncation signal (``terminal_reason``/``length_truncations``/
+    ``truncated_turns`` absent or zero) so a caller may also use it for a plain
+    non-truncated non-green cell.
+    """
+    record: dict[str, Any] = {
+        "type": "attempt",
+        "schema_version": 1,
+        "sequence_index": sequence_index,
+        "memory_mode": memory_mode,
+        "org_id": "org-1",
+        "progress": {
+            "problems_before": 3,
+            "problems_after": 1 if full_green else 2,
+            "resolved_count": 2 if full_green else 1,
+            "remaining_count": 1,
+            "full_green": full_green,
+            "attempts_to_green": 1,
+            "turns": 2,
+            "total_tokens": 1000,
+            "wall_seconds": 1.0,
+            "wall_cost_usd": 0.0,
+        },
+        "session_fp": session_fp,
+        "session_id": session_id,
+    }
+    if terminal_reason is not None:
+        record["terminal_reason"] = terminal_reason
+    if length_truncations:
+        record["length_truncations"] = length_truncations
+    if truncated_turns:
+        record["truncated_turns"] = truncated_turns
+    if terminal_outcome is not None:
+        record["terminal_outcome"] = terminal_outcome
+    stream.append(record)
+
+
+def test_truncated_cell_classified_void_instrument_not_scored(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    # Single cell whose terminal attempt is non-green AND died of a transport
+    # truncation (full_green=False, terminal_reason="transport_incomplete",
+    # truncated_turns=1) — the VOID-INSTRUMENT class per rule 5.10.
+    _write_truncated_attempt(
+        stream,
+        sequence_index=0,
+        session_fp="fp-0",
+        session_id="s-0",
+        full_green=False,
+        terminal_reason="transport_incomplete",
+        truncated_turns=1,
+        terminal_outcome=False,
+    )
+
+    scorecard = build_scorecard(manifest_path)
+
+    # Classified VOID-INSTRUMENT with the provider_truncation reason.
+    assert scorecard["void_instrument"] == [
+        {
+            "sequence_index": 0,
+            "memory_mode": "on",
+            "void_reason": "provider_truncation",
+        }
+    ]
+    assert scorecard["void_instrument"][0]["sequence_index"] == 0
+    assert scorecard["void_instrument"][0]["memory_mode"] == "on"
+    assert scorecard["void_instrument"][0]["void_reason"] == "provider_truncation"
+
+    # EXCLUDED from the scored set entirely.
+    assert scorecard["scored_sessions"] == 0
+    assert scorecard["scored_pass"] == 0
+    assert scorecard["scored_fail"] == 0
+    assert scorecard["convergence"]["sessions_completed"] == 0
+    # And NOT mislabelled as a delivery-gate not_scored cell.
+    assert scorecard["not_scored"] == []
+
+
+def test_green_with_truncation_still_scored_pass(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    # Some turns truncated but the cell still reached green: NOT void, scored PASS.
+    _write_truncated_attempt(
+        stream,
+        sequence_index=0,
+        session_fp="fp-0",
+        session_id="s-0",
+        full_green=True,
+        truncated_turns=1,
+        terminal_outcome=False,
+    )
+
+    scorecard = build_scorecard(manifest_path)
+
+    assert scorecard["void_instrument"] == []
+    assert scorecard["scored_sessions"] == 1
+    assert scorecard["scored_pass"] == 1
+    assert scorecard["scored_fail"] == 0
+    assert scorecard["convergence"]["sessions_completed"] == 1
+
+
+def test_non_green_without_truncation_still_scored_fail(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    # Genuine capability failure: non-green terminal attempt with NO truncation
+    # signal (all truncation fields absent) — still scored FAIL, not void.
+    _write_truncated_attempt(
+        stream,
+        sequence_index=0,
+        session_fp="fp-0",
+        session_id="s-0",
+        full_green=False,
+        terminal_outcome=False,
+    )
+
+    scorecard = build_scorecard(manifest_path)
+
+    assert scorecard["void_instrument"] == []
+    assert scorecard["scored_sessions"] == 1
+    assert scorecard["scored_pass"] == 0
+    assert scorecard["scored_fail"] == 1
+    assert scorecard["convergence"]["sessions_completed"] == 1
+
+
+def test_truncation_void_symmetric_across_memory_modes(tmp_path: Path) -> None:
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    # The SAME truncated cell (non-green + transport_incomplete) once under the
+    # ON arm and once under the OFF arm. The classification branches on no mode
+    # flag, so both land in void_instrument identically.
+    _write_truncated_attempt(
+        stream,
+        sequence_index=0,
+        session_fp="fp-0",
+        session_id="s-0",
+        full_green=False,
+        memory_mode="on",
+        terminal_reason="transport_incomplete",
+        terminal_outcome=False,
+    )
+    _write_truncated_attempt(
+        stream,
+        sequence_index=1,
+        session_fp="fp-1",
+        session_id="s-1",
+        full_green=False,
+        memory_mode="off",
+        terminal_reason="transport_incomplete",
+        terminal_outcome=False,
+    )
+
+    scorecard = build_scorecard(manifest_path)
+
+    # Both cells voided identically, differing only in their memory_mode label.
+    assert scorecard["void_instrument"] == [
+        {
+            "sequence_index": 0,
+            "memory_mode": "on",
+            "void_reason": "provider_truncation",
+        },
+        {
+            "sequence_index": 1,
+            "memory_mode": "off",
+            "void_reason": "provider_truncation",
+        },
+    ]
+    assert scorecard["scored_sessions"] == 0
+    assert scorecard["scored_pass"] == 0
+    assert scorecard["scored_fail"] == 0

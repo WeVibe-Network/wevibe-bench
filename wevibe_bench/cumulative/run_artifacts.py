@@ -311,10 +311,14 @@ def build_scorecard(
     Returns a dict with ``schema_version``, ``manifest`` (the RunManifest
     identity dict), ``convergence`` (the derived trend dict), and the counts of
     parsed stream records and scored sessions. The scorecard distinguishes
-    three outcomes: ``scored_pass`` / ``scored_fail`` (counts of the scored set)
-    and ``not_scored`` (the cells excluded via a fail-closed
+    four outcomes: ``scored_pass`` / ``scored_fail`` (counts of the scored set),
+    ``not_scored`` (the cells excluded via a fail-closed
     ``delivery_state=="unverified"`` delivery record, each with
-    ``sequence_index``, ``memory_mode`` and ``not_scored_reason``).
+    ``sequence_index``, ``memory_mode`` and ``not_scored_reason``), and
+    ``void_instrument`` (the cells whose terminal attempt was non-green AND
+    carried a provider-side truncation signal — VOID-INSTRUMENT per RUNBOOK
+    rule 5.10, never scored as a capability FAIL; each entry carries
+    ``sequence_index``, ``memory_mode`` and ``void_reason``).
     """
     run_manifest_path = default_run_manifest_path(manifest_path)
     resolved_stream_path = (
@@ -357,8 +361,44 @@ def build_scorecard(
             continue
         best_by_cell[int(seq)] = record
 
+    # VOID-INSTRUMENT gate (WO-NIGHT2-1b): a cell whose TERMINAL (last) attempt
+    # is non-green AND carries a provider-side truncation signal is VOID-
+    # INSTRUMENT per RUNBOOK rule 5.10 — never scored as a capability FAIL. The
+    # signal reads ONLY per-attempt truncation fields on the terminal attempt:
+    # terminal_reason=="transport_incomplete" OR length_truncations>0 OR
+    # truncated_turns>0. A green terminal attempt is always scored PASS
+    # regardless of earlier truncation; a non-green terminal attempt with NO
+    # truncation signal is a genuine scored FAIL. Symmetric across ON/OFF —
+    # the rule branches on no mode flag.
+    def _terminal_full_green(record: dict[str, Any]) -> bool:
+        progress = record.get("progress")
+        if not isinstance(progress, Mapping):
+            return False
+        raw = progress.get("full_green", False)
+        return bool(raw) if isinstance(raw, bool) else False
+
+    def _truncation_signal(record: dict[str, Any]) -> bool:
+        if str(record.get("terminal_reason") or "") == "transport_incomplete":
+            return True
+        if int(record.get("length_truncations") or 0) > 0:
+            return True
+        if int(record.get("truncated_turns") or 0) > 0:
+            return True
+        return False
+
+    void_instrument_by_index: dict[int, dict[str, Any]] = {}
+    for seq, record in best_by_cell.items():
+        if _terminal_full_green(record):
+            continue
+        if _truncation_signal(record):
+            void_instrument_by_index[seq] = record
+
     # The ONLY change to which cells enter the scored set: a not-scored cell
-    # (whose attempt record may still exist from ``run_session``) is dropped.
+    # (whose attempt record may still exist from ``run_session``) and a
+    # VOID-INSTRUMENT cell are both dropped from the scored set.
+    def _is_scored(seq: int) -> bool:
+        return seq not in not_scored_by_index and seq not in void_instrument_by_index
+
     scored_sessions = [
         _ScoredSession(
             sequence_index=int(record["sequence_index"]),
@@ -367,7 +407,7 @@ def build_scorecard(
             progress=dict(record["progress"]),
         )
         for record in best_by_cell.values()
-        if int(record["sequence_index"]) not in not_scored_by_index
+        if _is_scored(int(record["sequence_index"]))
     ]
 
     convergence = build_convergence_trend(scored_sessions).to_dict()
@@ -392,6 +432,15 @@ def build_scorecard(
         for record in not_scored_by_index.values()
     ]
 
+    void_instrument = [
+        {
+            "sequence_index": int(record["sequence_index"]),
+            "memory_mode": str(record.get("memory_mode") or ""),
+            "void_reason": "provider_truncation",
+        }
+        for record in void_instrument_by_index.values()
+    ]
+
     return {
         "schema_version": RUN_ARTIFACTS_SCHEMA_VERSION,
         "manifest": run_manifest.to_dict(),
@@ -401,6 +450,7 @@ def build_scorecard(
         "scored_pass": scored_pass,
         "scored_fail": scored_fail,
         "not_scored": not_scored,
+        "void_instrument": void_instrument,
     }
 
 
