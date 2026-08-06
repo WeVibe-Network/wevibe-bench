@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -365,3 +366,101 @@ def test_run_opencode_writes_stdin_text_and_closes_pipe(
     assert fake_proc.stdin.flush_calls == 1
     assert fake_proc.stdin.closed is True
     assert stats.exit_code == 0
+
+
+@pytest.mark.slow
+def test_final_step_finish_survives_when_reader_drain_is_slow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reader thread still draining past the OLD 5s join cap must not drop the
+    final step_finish. The blocking join (adapter :2387-2388) waits for the
+    reader to finish; the old join(timeout=5) would abandon the daemon reader
+    mid-sleep(6.0) and silently drop the trailing event.
+
+    Determinism: poll() returns 0 immediately so the main loop breaks at once
+    and reaches the join while the reader is still time.sleep(6.0)-ing. On the
+    OLD join(timeout=5) the main thread abandons the reader and returns with
+    stats.turns == 1 and no sess-load-final line. On the NEW blocking join the
+    main thread waits out the 6s drain, both step_finish events are processed,
+    stats.turns == 2 and sess-load-final is present in the events file.
+    """
+    first_event = {
+        "type": "step_finish",
+        "sessionID": "sess-load",
+        "part": {"reason": "stop", "tokens": {"input": 1, "output": 2, "reasoning": 0}},
+    }
+    final_event = {
+        "type": "step_finish",
+        "sessionID": "sess-load-final",
+        "part": {"reason": "stop", "tokens": {"input": 3, "output": 4, "reasoning": 1}},
+    }
+    first_line = json.dumps(first_event) + "\n"
+    final_line = json.dumps(final_event) + "\n"
+
+    class _SlowDrainStdout:
+        """Yields the first step_finish, then blocks past the old 5s join cap
+        (simulating a reader still draining under load), then yields the final
+        step_finish. close() is the reader's finally no-op."""
+
+        def __init__(self, first: str, final: str) -> None:
+            self._first = first
+            self._final = final
+
+        def __iter__(self):
+            yield self._first
+            time.sleep(6.0)
+            yield self._final
+
+        def close(self) -> None:
+            pass
+
+    class _FakeSlowProc:
+        def __init__(self) -> None:
+            self.stdout = _SlowDrainStdout(first_line, final_line)
+            self.stderr = io.StringIO("")
+            self.stdin = None
+            self.returncode = 0
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            _ = timeout
+            return self.returncode
+
+    fake_proc = _FakeSlowProc()
+
+    def _fake_popen(cmd: list[str], **kwargs: object) -> _FakeSlowProc:
+        return fake_proc
+
+    monkeypatch.setattr("wevibe_bench.adapters.backgammon.subprocess.Popen", _fake_popen)
+
+    progress_lines: list[str] = []
+    runner = _make_runner(tmp_path, progress=progress_lines.append)
+    events_path = tmp_path / "slow-drain.events.jsonl"
+
+    stats = runner._run_opencode(
+        cmd=[sys.executable, "-c", "print('ok')"],
+        worktree=tmp_path,
+        events_path=events_path,
+        env=os.environ.copy(),
+        run_label="slow-drain",
+        phase="attempt-1",
+        fallback_session_id="sess-fallback",
+        kill_hook=None,
+    )
+
+    # 1. The final event survived the slow reader drain.
+    events_text = events_path.read_text(encoding="utf-8")
+    assert '"sess-load-final"' in events_text
+
+    # 2. Turn accounting reflects BOTH step_finish events.
+    assert stats.turns == 2
+
+    # 3. The recorded-bound did not falsely fire: both readers hit EOF so the
+    #    drain events are complete (no step=reader-drain status=incomplete).
+    assert not any(
+        "step=reader-drain" in line and "status=incomplete" in line
+        for line in progress_lines
+    )

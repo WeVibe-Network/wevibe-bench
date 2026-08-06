@@ -2029,6 +2029,9 @@ class BackgammonRunner(AgentRunner):
                 )
                 stdin_writer_thread.start()
 
+            stdout_drained = threading.Event()
+            stderr_drained = threading.Event()
+
             def stdout_reader() -> None:
                 try:
                     assert proc.stdout is not None
@@ -2233,6 +2236,7 @@ class BackgammonRunner(AgentRunner):
 
                             state["active_tool_uses"] = 0
                             state["active_file_writes"] = 0
+                    stdout_drained.set()
                 except Exception as exc:  # noqa: BLE001 - log and continue teardown.
                     reader_failures.append(f"stdout reader failure ({phase}): {exc}")
                 finally:
@@ -2261,6 +2265,7 @@ class BackgammonRunner(AgentRunner):
                         self._progress(
                             f"PROGRESS run_label={run_label} step=worker-stderr phase={phase} line={text}"
                         )
+                    stderr_drained.set()
                 except Exception as exc:  # noqa: BLE001 - log and continue teardown.
                     reader_failures.append(f"stderr reader failure ({phase}): {exc}")
                 finally:
@@ -2373,8 +2378,24 @@ class BackgammonRunner(AgentRunner):
                     self._kill_process_group(proc)
                     proc.wait(timeout=5)
 
-            stdout_thread.join(timeout=5)
-            stderr_thread.join(timeout=5)
+            # Block on the reader threads: the child was already reaped above
+            # (proc.wait / kill+wait), so its stdout/stderr write-ends are closed
+            # and these loops hit EOF. A blocking join therefore cannot hang — it
+            # only waits for the readers to drain the final buffered output. The
+            # former 5s timeout could abandon the daemon reader while it still
+            # held the trailing step_finish, silently dropping it under load.
+            stdout_thread.join()
+            stderr_thread.join()
+            if not stdout_drained.is_set():
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=reader-drain phase={phase} "
+                    "stream=stdout status=incomplete detail=reader_did_not_reach_eof"
+                )
+            if not stderr_drained.is_set():
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=reader-drain phase={phase} "
+                    "stream=stderr status=incomplete detail=reader_did_not_reach_eof"
+                )
             if stdin_writer_thread is not None:
                 stdin_writer_thread.join(timeout=5)
                 if stdin_writer_thread.is_alive():
