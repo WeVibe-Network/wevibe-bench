@@ -29,6 +29,19 @@ from wevibe_bench.config import (
 )
 
 
+def _make_schedule(waves: list[dict]) -> BenchmarkSchedule:
+    """Build a BenchmarkSchedule from a list of {wave_id, models} dicts."""
+    return BenchmarkSchedule(
+        waves=tuple(
+            BenchmarkWave(
+                wave_id=str(wave["wave_id"]),
+                models=tuple(str(model) for model in wave["models"]),
+            )
+            for wave in waves
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # BenchmarkWave validation
 # ---------------------------------------------------------------------------
@@ -103,6 +116,20 @@ class TestBenchmarkSchedule:
             ),
         )
         assert sched.all_models() == ("a", "b", "c", "d")
+
+    def test_schedule_all_models_ignores_wave_order(self) -> None:
+        """all_models() deduplicates, wave iteration preserves repeats (repointed from retired e2e file)."""
+        schedule = _make_schedule(
+            [
+                {"wave_id": "wave_a", "models": ["model-a", "model-b"]},
+                {"wave_id": "wave_b", "models": ["model-b", "model-c"]},
+            ]
+        )
+
+        assert schedule.all_models() == ("model-a", "model-b", "model-c")
+
+        wave_order_models = [model for wave in schedule.waves for model in wave.models]
+        assert wave_order_models == ["model-a", "model-b", "model-b", "model-c"]
 
     def test_empty_schedule_raises(self) -> None:
         """A schedule with no waves raises."""
