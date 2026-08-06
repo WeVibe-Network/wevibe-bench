@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
@@ -77,10 +77,64 @@ IS_PRIMARY_SCORED_PATH = True
 _LOG = logging.getLogger("run_cumulative")
 
 DEFAULT_MANIFEST_PATH = Path("runs") / "cumulative" / "manifest.json"
+DEFAULT_PROXY_RUNS_DIR = Path("/Users/jerrysmith/Desktop/Local LLM Proxy/runs")
 DEFAULT_TASK_LABEL = "backgammon-cumulative-primary"
 DEFAULT_EXTRACT_TIMEOUT_S = 900
 DEFAULT_SEED = config.RunConfig().rng_seed
 DEFAULT_ON_BUDGET = 0
+
+
+def _read_proxy_served_identity(proxy_runs_dir: Path | None = None) -> str | None:
+    """Read the API-reported served model identity from the relay proxy run logs.
+
+    The local relay proxy writes per-day JSONL run logs carrying ``type:
+    "request"`` rows. A genuine served identity is such a row whose
+    ``upstreamModel`` is a non-empty string and differs from ``requestedModel``
+    (alias-echo rows are rejected). Returns the latest genuine ``upstreamModel``
+    across today's file and, for runs crossing midnight, the previous day's file
+    (when the current UTC hour is < 6). Never raises; missing/unparseable input
+    degrades to ``None``.
+    """
+    if proxy_runs_dir is None:
+        proxy_runs_dir = Path(
+            os.environ.get("WEVIBE_PROXY_RUNS_DIR", str(DEFAULT_PROXY_RUNS_DIR))
+        )
+    now_utc = datetime.now(timezone.utc)
+    candidate_dates = [now_utc]
+    if now_utc.hour < 6:
+        candidate_dates.append(now_utc - timedelta(days=1))
+
+    latest_served: str | None = None
+    latest_ts: str = ""
+    for candidate in candidate_dates:
+        run_log = proxy_runs_dir / f"{candidate.strftime('%Y-%m-%d')}.jsonl"
+        try:
+            with open(run_log, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        row = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict) or row.get("type") != "request":
+                        continue
+                    requested = row.get("requestedModel")
+                    upstream = row.get("upstreamModel")
+                    if not isinstance(upstream, str) or not upstream.strip():
+                        continue
+                    if upstream.strip() == requested:
+                        continue
+                    ts = row.get("ts")
+                    if not isinstance(ts, str):
+                        continue
+                    if latest_served is None or ts > latest_ts:
+                        latest_served = upstream.strip()
+                        latest_ts = ts
+        except OSError:
+            continue
+    return latest_served
 
 
 class PathLayout(NamedTuple):
@@ -701,6 +755,13 @@ class RealSessionRunner:
         )
         if session_id_str is None:
             return None, None
+        proxy_served = _read_proxy_served_identity()
+        if proxy_served:
+            served_dict = {
+                "model": str(requested_model),
+                "upstream_model": proxy_served,
+            }
+            return proxy_served, served_dict
         spend_meter = getattr(self, "_spend_meter", None)
         if spend_meter is None:
             return None, None

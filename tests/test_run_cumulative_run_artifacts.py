@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,23 @@ def _cell_result() -> Any:
         worker_image_fingerprint = None
 
     return _R()
+
+
+@pytest.fixture(autouse=True)
+def _empty_proxy_runs_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the relay-proxy run-log source (WEVIBE_PROXY_RUNS_DIR, read at call
+    time inside _read_proxy_served_identity) at an EMPTY temp dir.
+
+    This makes the spend-DB-fallback / NULL-when-meter-empty behaviour
+    deterministic on every machine regardless of whether a real proxy log
+    exists at DEFAULT_PROXY_RUNS_DIR. Tests that intentionally exercise the
+    proxy-log path override this env (their monkeypatch.setenv runs after the
+    fixture's).
+    """
+    empty = tmp_path / "empty-proxy-runs"
+    empty.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("WEVIBE_PROXY_RUNS_DIR", str(empty))
+    return empty
 
 
 def _build_runner(module: Any, tmp_path: Path, *, runs_dir: Path | None = None) -> Any:
@@ -333,3 +351,82 @@ def test_served_model_capture_and_failure_tolerance(tmp_path: Path) -> None:
     assert result.verdict == "PASS"
     records2 = _read_status_records(tmp_path / "runs2")
     assert records2[0]["served_model"] is None
+
+
+def test_local_proxy_log_served_identity_lands_in_manifest_and_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WO-NIGHT2-1d: the relay proxy's API-reported served identity (genuine
+    upstreamModel) lands in BOTH the run manifest and the attempt status
+    records, while alias-echo rows and non-request rows are rejected. The spend
+    DB stays empty here, so the proxy log is the sole source of identity."""
+    module = _load_run_cumulative_module()
+    runs_dir = tmp_path / "runs"
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    proxy_dir = tmp_path / "proxy-runs"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+    log_path = proxy_dir / f"{today}.jsonl"
+    rows = [
+        # Alias-echo row: upstream == requested -> must be REJECTED.
+        {
+            "type": "request",
+            "ts": f"{today}T00:00:01Z",
+            "requestedModel": "auto (Local LLM Proxy - oMLX)",
+            "upstreamModel": "auto (Local LLM Proxy - oMLX)",
+        },
+        # Non-request row: skipped by type.
+        {
+            "type": "heartbeat",
+            "ts": f"{today}T00:00:03Z",
+            "requestedModel": "auto (Local LLM Proxy - oMLX)",
+        },
+        # Genuine row, latest by ts -> selected.
+        {
+            "type": "request",
+            "ts": f"{today}T00:00:05Z",
+            "requestedModel": "auto (Local LLM Proxy - oMLX)",
+            "upstreamModel": "Vontra--DeepSeek-V4-Flash-0731-MXFP4-MLX",
+        },
+    ]
+    log_path.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    # Override the autouse empty-dir fixture: this test exercises the real
+    # proxy-log path.
+    monkeypatch.setenv("WEVIBE_PROXY_RUNS_DIR", str(proxy_dir))
+
+    runner = _build_runner(module, tmp_path, runs_dir=runs_dir)
+    runner._runner_cls = _FakeRunner
+    # Empty spend meter (no identities) so the proxy log is the sole source.
+    runner._spend_meter.identities = []
+    runner.run_session(_session(0))
+
+    # Manifest carries the genuine served identity (NON-NULL).
+    manifest = _read_manifest(runs_dir)
+    assert (
+        manifest["served_model"] == "Vontra--DeepSeek-V4-Flash-0731-MXFP4-MLX"
+    )
+
+    # Status records carry the served-model dict with the genuine upstream.
+    records = _read_status_records(runs_dir)
+    assert len(records) >= 1
+    for record in records:
+        assert record["type"] == "attempt"
+        assert (
+            record["served_model"]["upstream_model"]
+            == "Vontra--DeepSeek-V4-Flash-0731-MXFP4-MLX"
+        )
+        assert record["served_model"]["model"] == "orcarouter/x"
+
+    # Direct reader assertions: genuine identity via the fixture dir, None when
+    # the source dir is empty (fallback degrades).
+    assert (
+        module._read_proxy_served_identity(proxy_dir)
+        == "Vontra--DeepSeek-V4-Flash-0731-MXFP4-MLX"
+    )
+    empty_dir = tmp_path / "empty-proxy-runs"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+    assert module._read_proxy_served_identity(empty_dir) is None
