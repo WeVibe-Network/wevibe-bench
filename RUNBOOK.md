@@ -249,7 +249,10 @@ run has none of the isolation guarantees in §8 and would be scored as though it
    routing adds load-dependent variability, so determinism must never be claimed.
 10. **VOID-INSTRUMENT classes — never scored as capability FAIL:** `finish_reason=length` with
     visible tokens < 100 · any cell run with an unproven seam (§6) · any cell run under a template
-    configuration differing from its paired arm · any provider-side truncation.
+    configuration differing from its paired arm · any provider-side truncation. Since `9786da4`
+    (WO-TRUNC-1), provider-side truncated turns are **recorded as first-class outcomes** in the
+    manifest (`truncated_turns` / `truncated_turns_retried`), not dropped — a truncation is
+    observable, metered, and retry-linked; the cell is still never scored as a capability FAIL.
 11. **Never infer a pass from the absence of a violation flag.** A clean `invariant_violation:
     false` cannot distinguish "extraction never invoked" from "invoked and cut off by the gate."
 12. **A safety mechanism firing is not automatically a pass.** Ask what evidence it destroyed.
@@ -529,18 +532,18 @@ Fixed defects are not listed. They are in git.
 
 | ID | Status | Description | Blocks |
 |---|---|---|---|
-| **D-TEMPLATE-DESYNC** | 🔴 **top campaign risk** | Closed on a config change with **no test run**. The proof — a ≥100-turn tool-enabled session with zero parser desyncs and zero tool calls trapped inside a reasoning block — has never been executed. See §12. | every scored cell |
-| **D-ENTRYPOINTS-MISSING** | 🔴 OPEN | Test, smoke, wipe, bench and extract are not a coherent set of entrypoints; the wipe target lives outside this repo. §2 is a contract, not a description. | §2 |
-| **D-MODE-DRIFT** | 🔴 OPEN | 19 behaviour-changing branches on mode. Six are the legitimate injection call site; **13 are drift** — ten in scoring/metrics, two gates, one telemetry. Direct violation of RC-4: the arms are not currently comparable. | every scored comparison |
-| **D-RUN-STATUS-MISSING** | 🔴 OPEN | No manifest and no append-only status stream (RC-5). §3 step 2 has nothing to read and the scorecard has no single source. | the contract itself |
-| **D-NO-REAPER** | 🔴 OPEN | Nothing kills orphaned processes or asserts a clean host after a run (RC-6). Process-survival behaviour is **unknown**, not clean. | §2 TEST step 4, bench |
-| **D-PRERUN-PAIRING** | 🟡 OPEN | The phase machine is one-cell-per-invocation and compliant, but an OFF-baseline prerun path loops all pending OFF cells in one invocation with three-way concurrency and pairs the arms. | §2, §3 |
-| **D-MODEL-ALIAS-RESIDUE** | 🟡 OPEN | One paid-era registry alias survives because a budget-named test reaches it through the docker-mode config path; the profile aliases likewise remain reachable by flag. Model-selection residue under RC-7. Clear it with the mode-drift work, not before. | RC-7 |
+| **D-TEMPLATE-DESYNC** | 🔴 **top campaign risk** | The proof is partially executed. Low-context **PASSED** (WO-TEMPLATE-PROOF-1: two 105-turn sessions, 0 desyncs each); high-context (≥100K tokens) behaviour — what the §12 probe measures — remains **unverified**. Blocks every scored cell until high-context is proven. See §12. | every scored cell |
+| **D-ENTRYPOINTS-MISSING** | 🟢 CLOSED by 09cab437 | `feat: split extraction invocation, add run --mode, unconditional reaper` makes test/smoke/wipe/bench/extract a coherent entrypoint set. | §2 |
+| **D-MODE-DRIFT** | 🟢 CLOSED by 09cab437 + 98a286b + 0141930 + e60ccc1 | The 13 drift branches are gone: the delivery-scan arm is keyed on the injection record not mode (`98a286b`), the telemetry seam on `injected_count` (`0141930`), and the scorecard is label-invariant under `e60ccc1`'s test. The only remaining mode branch is the legitimate injection call site. The arms are comparable. | every scored comparison |
+| **D-RUN-STATUS-MISSING** | 🟢 CLOSED by 1a50ba9 + e60ccc1 | Write-once run manifest + append-only status stream + scorecard landed in `1a50ba9`; `e60ccc1` adds the scorecard test. | the contract itself |
+| **D-NO-REAPER** | 🟢 CLOSED by 09cab437 | `process_reaper.py` (RC-6 unconditional reaper) wired into every exit path, with tests. | §2 TEST step 4, bench |
+| **D-PRERUN-PAIRING** | 🟢 CLOSED by fd427759 + e285ece | `fd427759` retires the prerun arm-pairing + consumer-bridge paths; `e285ece` makes it strictly serial single-consumer with no concurrency. | §2, §3 |
+| **D-MODEL-ALIAS-RESIDUE** | 🟢 CLOSED by 8bdcabc + 186d34c | `8bdcabc` removes 4 dead model-registry aliases; `186d34c` removes the dead paid-era alias. The mode-drift work that gated this is cleared. | RC-7 |
 | **D-ALIAS-RESIDUE** | 🟡 OPEN | The proxy still ships a poller alias plus bench aliases referenced by no bench code. | deletion hygiene |
 | **D-DOC-DRIFT** | 🟡 OPEN | `AGENTS.md` is always-applied and still carries a stale **org-per-arm** scheme marked BINDING, contradicting §2, plus poller-era stanzas. It must be amended, not merely left behind. | RC-8 |
 | **D-TRACE-SEMANTICS** | 🟡 OPEN | Per-consumer attribution survives only as a random trace nanoid with no role semantics. | log-based attribution |
 | **D-PROXY-UNTESTED** | 🟡 OPEN | The proxy has no git remote and no tests while sitting on the critical path for every bench call. | campaign safety |
-| **D-RECALL-EMPTY-KEYWORDS** | 🟡 OPEN | Vector-only serves with empty `matched_keywords` get 400 from the serve endpoint and are silently dropped. | ON-cell attribution |
+| **D-RECALL-EMPTY-KEYWORDS** | 🟢 CLOSED by 33fe59a (wevibe-server) | Hub-side `fix(serves): accept vector-only serves with empty matched_keywords` — the serve endpoint now accepts vector-only serves with empty `matched_keywords`; the dead 400-mapping clause is removed. | ON-cell attribution |
 | **D-STRAY-BENCH-KEY** | 🟡 OPEN — **Walter only** | A mis-configured clone once wrote a bench org master-key envelope into Walter's canonical key directory. It **may collide with his canonical org keys**. Not deleted, and **no agent may delete it** — Walter verifies and cleans deliberately. Bench now writes only to the bench keystores, so it will not recur. | nothing automated |
 | **D-KV-PEAK-UNKNOWN** | 🟢 CURIOSITY | Peak resident footprint at full context is unknown. Not a threat given headroom. | nothing |
 
@@ -629,8 +632,9 @@ target does not exercise it.
 **Gates must resolve the entrypoint from the artifact**, never assume a fixed server filename — the
 build pipeline may change it. A hardcoded filename here is what produced a whole dead campaign cell.
 
-**Verified baseline: 465 passed / 0 failed / 1 skipped / 0 errors / 474 collected** (8 slow
-deselected), on commit `8bdcabc`. Any change must return to this or account for the difference.
+**Verified baseline: 420 passed / 0 failed / 1 skipped / 0 errors / 421 collected, in 20.21s**
+on combined HEAD `350f899` (reconciled, WO-BASELINE-2; earlier `39497d5` = 411 passed). Any
+change must return to this or account for the difference.
 
 ---
 
@@ -651,7 +655,10 @@ deselected), on commit `8bdcabc`. Any change must return to this or account for 
    goes in a committed file. That is why this card is rewritten rather than annotated.
 9. **Never add a document.** Update this card. A companion report, a status file, a summary doc, a
    second runbook — each is a future reconciliation cost and a future contradiction. **Content walks
-   backwards, never forwards.**
+   backwards, never forwards.** This ban is on companion design docs, companion runbooks, and status
+   or summary documents that drift from the card — never author those. It does NOT forbid delegate
+   work reports: those ARE expected work product and belong in the normal reports location
+   (`wevibe-meta/workspace/reports/`).
 10. **For any purge: classify before deleting, delete before running, diagnose before repairing.**
     Map the irrelevant, map the needed, map the remainder, decide the remainder, delete en masse,
     then run, then diagnose case by case, then fix. Never interleave delete-versus-fix decisions
@@ -687,20 +694,21 @@ conventions in a work order. Objective and acceptance criteria only; placement i
 Ordered. Each step gates the next. One work order each.
 
 **Done.** Census · verified baseline (`41c4568`) · suite finalization, 317 dead tests removed
-(`937d893`) · source deletion, 19 files (`8bdcabc`).
+(`937d893`) · source deletion, 19 files (`8bdcabc`) · run status contract, manifest + append-only
+status stream + scorecard (`1a50ba9`) · entrypoints + unconditional reaper (`09cab437`) · mode-drift
+removal + model-alias residue cleared (`98a286b` + `0141930` + `e60ccc1` + `8bdcabc` + `186d34c`) ·
+baseline reconciled to `350f899` · template low-context proof PASSED (WO-TEMPLATE-PROOF-1).
 
 1. **Document consolidation.** This card absorbs everything binding; the remaining documents are
    deleted and `AGENTS.md` is amended to stop contradicting §2.
-2. **Run status contract** (RC-5): manifest + append-only status stream; scorecard generated from
-   those alone. This is what the sensor reads, and where served-model identity per attempt lands.
-3. **The entrypoints + an unconditional reaper** (§2, RC-6).
-4. **Mode-drift removal** — the 13 branches outside the injection call site (RC-4), with the
-   model-alias residue cleared alongside.
-5. **Stack smoke,** then **ON smoke** (§6).
-6. **The ≥100-turn template proof, then FREEZE** (§12).
-7. **Wipe once** — the full four-step procedure (§2). Then bench OFF → extract → bench ON → extract,
+2. **High-context template probe to ≥100K tokens** (§12): the low-context proof passed; the
+   high-context behaviour this probe measures is still unverified. Only after it passes does the
+   template get FREEZEd.
+3. **Stack smoke,** then **ON smoke** (§6).
+4. **FREEZE the template** (§12), only after the high-context probe passes.
+5. **Wipe once** — the full four-step procedure (§2). Then bench OFF → extract → bench ON → extract,
    continuing until performance drops or something needs Walter. A model switch is one of the things
    that needs Walter. The corpus carries across it; the wipe does not run again.
 
-**Do not skip 5.** The injection seams are null by contract on OFF cells, so no OFF cell can ever
+**Do not skip 3.** The injection seams are null by contract on OFF cells, so no OFF cell can ever
 prove them. Running ON without that smoke is exactly what voided the paid R2 campaign.
