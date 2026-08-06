@@ -38,7 +38,6 @@ def test_real_session_runner_forwards_proxy_creds_to_backgammon_runner(tmp_path:
     runner._task_dir = tmp_path / "task"
     runner._task = "backgammon"
     runner._max_attempts = 3
-    runner._bridge_state_path = None
     runner._proxy_base_url = "http://127.0.0.1:11434/v1"
     runner._proxy_token = "proxy-token-value"
     runner._runner_cls = _FakeRunner

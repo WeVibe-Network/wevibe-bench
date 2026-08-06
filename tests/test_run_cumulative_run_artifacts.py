@@ -59,7 +59,6 @@ def _build_runner(module: Any, tmp_path: Path, *, runs_dir: Path | None = None) 
     runner._task_dir = tmp_path / "task"
     runner._task = "backgammon"
     runner._max_attempts = 1
-    runner._bridge_state_path = None
     runner._proxy_base_url = "http://127.0.0.1:11434/v1"
     runner._proxy_token = "proxy-token-value"
     runner._progress = lambda message: None

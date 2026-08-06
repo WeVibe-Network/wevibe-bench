@@ -7,10 +7,7 @@ from datetime import datetime, timezone
 import enum
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any, Mapping
-
-if TYPE_CHECKING:
-    from .consumer_gate import ConsumerGateOutcome, ServedStoreReconcile
+from typing import Any, Mapping
 
 CUMULATIVE_SCHEMA_VERSION = 1
 # Telemetry seams that currently have no source in the adapter.
@@ -508,139 +505,6 @@ class ProgressVector:
 
 
 @dataclass(frozen=True)
-class ConsumerGateRecord:
-    """Consumer-gate checkpoint telemetry for one ON session.
-
-    None means telemetry is genuinely unavailable (for example, OFF sessions,
-    runner hook absent, or an unavailable downstream receipt leg) and is never
-    a stand-in for numeric zero/empty data.
-    """
-
-    policy_id: str
-    coordinator_trace: str
-    consumer_injected_count: int | None = None
-    accepted_count: int | None = None
-    denied_count: int | None = None
-    blocked_count: int | None = None
-    reported_count: int | None = None
-    serve_receipt_status: str | None = None
-    serve_receipt_ids: tuple[str, ...] | None = None
-    denial_signal_status: str | None = None
-    report_signal_status: str | None = None
-    served_store_write_confirmed: bool | None = None
-    served_store_missing_accepted: tuple[str, ...] = ()
-    served_store_nonaccept_leaked: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "policy_id": self.policy_id,
-            "coordinator_trace": self.coordinator_trace,
-            "consumer_injected_count": self.consumer_injected_count,
-            "accepted_count": self.accepted_count,
-            "denied_count": self.denied_count,
-            "blocked_count": self.blocked_count,
-            "reported_count": self.reported_count,
-            "serve_receipt_status": self.serve_receipt_status,
-            "serve_receipt_ids": (
-                list(self.serve_receipt_ids)
-                if self.serve_receipt_ids is not None
-                else None
-            ),
-            "denial_signal_status": self.denial_signal_status,
-            "report_signal_status": self.report_signal_status,
-            "served_store_write_confirmed": self.served_store_write_confirmed,
-            "served_store_missing_accepted": list(self.served_store_missing_accepted),
-            "served_store_nonaccept_leaked": list(self.served_store_nonaccept_leaked),
-        }
-
-    @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> ConsumerGateRecord:
-        return cls(
-            policy_id=str(d.get("policy_id", "")),
-            coordinator_trace=str(d.get("coordinator_trace", "")),
-            consumer_injected_count=_optional_int(d.get("consumer_injected_count")),
-            accepted_count=_optional_int(d.get("accepted_count")),
-            denied_count=_optional_int(d.get("denied_count")),
-            blocked_count=_optional_int(d.get("blocked_count")),
-            reported_count=_optional_int(d.get("reported_count")),
-            serve_receipt_status=_optional_string(d.get("serve_receipt_status")),
-            serve_receipt_ids=_optional_string_tuple(d.get("serve_receipt_ids")),
-            denial_signal_status=_optional_string(d.get("denial_signal_status")),
-            report_signal_status=_optional_string(d.get("report_signal_status")),
-            served_store_write_confirmed=_optional_bool(d.get("served_store_write_confirmed")),
-            served_store_missing_accepted=_string_tuple(d.get("served_store_missing_accepted")),
-            served_store_nonaccept_leaked=_string_tuple(d.get("served_store_nonaccept_leaked")),
-        )
-
-    @classmethod
-    def from_outcome(
-        cls,
-        outcome: ConsumerGateOutcome,
-        reconcile: ServedStoreReconcile | None = None,
-        *,
-        serve_receipt_status: str | None = None,
-        serve_receipt_ids: tuple[str, ...] | None = None,
-        denial_signal_status: str | None = None,
-        report_signal_status: str | None = None,
-        durable_accepted_count: int | None = None,
-        durable_injected_count: int | None = None,
-    ) -> ConsumerGateRecord:
-        """Build a checkpoint record from gate outcome + optional durable bridge counts.
-
-        Durable counts are sourced from the bridge daemon delivered-decision record,
-        which survives queue rewrites and reflects correlated accepted/drained truth.
-        """
-
-        accepted_count = _optional_int(getattr(outcome, "accept_count", None))
-        if durable_accepted_count is not None:
-            accepted_count = _optional_int(durable_accepted_count)
-        denied_count = _optional_int(getattr(outcome, "deny_count", None))
-        blocked_count = _optional_int(getattr(outcome, "block_count", None))
-        reported_count = _optional_int(getattr(outcome, "report_count", None))
-        consumer_injected_count = accepted_count
-        if durable_injected_count is not None:
-            consumer_injected_count = _optional_int(durable_injected_count)
-
-        served_store_write_confirmed: bool | None = None
-        served_store_missing_accepted: tuple[str, ...] = ()
-        served_store_nonaccept_leaked: tuple[str, ...] = ()
-
-        if reconcile is not None:
-            served_store_missing_accepted = _string_tuple(
-                getattr(reconcile, "missing_accepted", ())
-            )
-            served_store_nonaccept_leaked = _string_tuple(
-                getattr(reconcile, "nonaccept_leaked", ())
-            )
-            served_store_present = _optional_bool(
-                getattr(reconcile, "served_store_present", None)
-            )
-            served_store_write_confirmed = (
-                served_store_present is True
-                and not served_store_missing_accepted
-                and not served_store_nonaccept_leaked
-            )
-
-        return cls(
-            policy_id=_optional_string(getattr(outcome, "policy_id", "")) or "",
-            coordinator_trace=_optional_string(getattr(outcome, "coordinator_trace", ""))
-            or "",
-            consumer_injected_count=consumer_injected_count,
-            accepted_count=accepted_count,
-            denied_count=denied_count,
-            blocked_count=blocked_count,
-            reported_count=reported_count,
-            serve_receipt_status=_optional_string(serve_receipt_status),
-            serve_receipt_ids=_optional_string_tuple(serve_receipt_ids),
-            denial_signal_status=_optional_string(denial_signal_status),
-            report_signal_status=_optional_string(report_signal_status),
-            served_store_write_confirmed=served_store_write_confirmed,
-            served_store_missing_accepted=served_store_missing_accepted,
-            served_store_nonaccept_leaked=served_store_nonaccept_leaked,
-        )
-
-
-@dataclass(frozen=True)
 class WalkGateVerdictRecord:
     """Auditable verdict for one ordered cumulative-walk gate.
 
@@ -786,7 +650,6 @@ class SessionRecord:
     candidate_refs: list[dict[str, Any]] = field(default_factory=list)
     extraction_candidate_count: int | None = None
     progress: dict[str, Any] | None = None
-    consumer_gate: ConsumerGateRecord | None = None
     walk_gates: list[WalkGateVerdictRecord] = field(default_factory=list)
     decision_applied: bool = False
     committed_ids: list[str] = field(default_factory=list)
@@ -814,7 +677,6 @@ class SessionRecord:
             "candidate_refs": [dict(candidate) for candidate in self.candidate_refs],
             "extraction_candidate_count": self.extraction_candidate_count,
             "progress": dict(self.progress) if isinstance(self.progress, Mapping) else self.progress,
-            "consumer_gate": self.consumer_gate.to_dict() if self.consumer_gate else None,
             "walk_gates": [gate.to_dict() for gate in self.walk_gates],
             "decision_applied": self.decision_applied,
             "committed_ids": list(self.committed_ids),
@@ -830,12 +692,6 @@ class SessionRecord:
     def from_dict(cls, d: Mapping[str, Any]) -> SessionRecord:
         progress_value = d.get("progress")
         progress_dict = dict(progress_value) if isinstance(progress_value, Mapping) else None
-        consumer_gate_value = d.get("consumer_gate")
-        consumer_gate = (
-            ConsumerGateRecord.from_dict(consumer_gate_value)
-            if isinstance(consumer_gate_value, Mapping)
-            else None
-        )
         walk_gates = [
             WalkGateVerdictRecord.from_dict(gate)
             for gate in d.get("walk_gates", [])
@@ -857,7 +713,6 @@ class SessionRecord:
             candidate_refs=_dict_list(d.get("candidate_refs")),
             extraction_candidate_count=_optional_int(d.get("extraction_candidate_count")),
             progress=progress_dict,
-            consumer_gate=consumer_gate,
             walk_gates=walk_gates,
             decision_applied=bool(d.get("decision_applied", False)),
             committed_ids=_string_list(d.get("committed_ids")),
@@ -890,7 +745,6 @@ __all__ = [
     "RosterEntry",
     "ScheduledSession",
     "ProgressVector",
-    "ConsumerGateRecord",
     "WalkGateVerdictRecord",
     "SessionRecord",
 ]

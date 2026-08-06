@@ -49,8 +49,6 @@ def _build_real_session_runner(module: Any, monkeypatch: pytest.MonkeyPatch, tmp
         extract_base_url=None,
         extract_num_ctx=None,
         extract_timeout_s=900,
-        consumer_decision_manifest=None,
-        served_store_host_path=tmp_path / "served-store.json",
     )
 
 

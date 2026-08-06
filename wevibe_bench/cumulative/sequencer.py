@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
 from .catalog import PrivateReviewCard, redacted_candidate_ref
 from .convergence import build_convergence_trend
@@ -23,7 +23,6 @@ from .ordering import build_schedule
 from .progress import progress_from_cell_result
 from .run_artifacts import StatusStream, build_scorecard, default_status_stream_path
 from .types import (
-    ConsumerGateRecord,
     PhaseGroup,
     RosterEntry,
     SessionPhase,
@@ -53,6 +52,13 @@ class SessionCommitted(TypedDict):
     next_index: int
 
 
+class AwaitingExtract(TypedDict):
+    status: Literal["awaiting_extract"]
+    sequence_index: int
+    session_fp: str
+    memory_mode: str
+
+
 class DoneState(TypedDict):
     status: Literal["done"]
     convergence: dict[str, Any]
@@ -71,7 +77,7 @@ class HaltedOnGate(TypedDict):
     observed_producer_model_ids: list[str]
 
 
-StepUntilReviewResult = AwaitingCoordinatorReview | HaltedOnGate | DoneState
+StepUntilReviewResult = AwaitingExtract | AwaitingCoordinatorReview | HaltedOnGate | DoneState
 ResumeWithDecisionResult = SessionCommitted | DoneState
 
 
@@ -90,14 +96,6 @@ class SessionRunner(Protocol):
 
     def index_ready(self, session: SessionRecord) -> bool:
         """Return True once committed memories are visible/indexed for this session."""
-
-    if TYPE_CHECKING:
-
-        def consumer_gate_outcome(
-            self,
-            session: SessionRecord,
-        ) -> ConsumerGateRecord | None:
-            """Optional ON-session hook returning post-session consumer-gate outcome."""
 
 
 class CumulativeSequencer:
@@ -259,7 +257,6 @@ class CumulativeSequencer:
                 )
                 telemetry = self._runner.run_session(session)
                 session.progress = progress_from_cell_result(telemetry).to_dict()
-                self._record_consumer_gate_outcome(session)
                 halt_gate = self._first_stopping_walk_gate(session)
                 if halt_gate is not None:
                     # Extraction never ran because the session halted on gate.
@@ -282,54 +279,14 @@ class CumulativeSequencer:
                         ",".join(halted["observed_producer_model_ids"]),
                     )
                     return halted
-                session.set_phase(SessionPhase.EXTRACT_NORMAL_PIPELINE)
-                self._checkpoint()
-                continue
+                return self._extract_pending_descriptor(session)
 
             if phase == SessionPhase.EXTRACT_NORMAL_PIPELINE:
-                _LOG.info(
-                    "cumulative.sequencer.extract_start sequence_index=%d memory_mode=%s",
-                    session.sequence_index,
-                    session.memory_mode,
-                )
-                try:
-                    extraction_payload = self._runner.extract(session)
-                except Exception as exc:
-                    # Observability-only: record that extraction was invoked but
-                    # cut off (e.g. timeout), then re-raise. Behaviour is
-                    # preserved exactly — the run still aborts as before; only
-                    # an append-only extraction record is left behind.
-                    self._append_extraction_status(
-                        session,
-                        invoked=True,
-                        cut_off=True,
-                        candidate_count=session.extraction_candidate_count,
-                        error=str(exc),
-                    )
-                    raise
-                if not isinstance(extraction_payload, Mapping):
-                    raise ValueError("runner.extract must return a mapping payload")
-
-                self._populate_extraction_result(session, extraction_payload)
-                self._append_extraction_status(
-                    session,
-                    invoked=True,
-                    cut_off=False,
-                    candidate_count=session.extraction_candidate_count,
-                )
-                session.set_phase(SessionPhase.AWAIT_COORDINATOR_REVIEW)
-                self._checkpoint()
-
-                paused = self._paused_descriptor(session)
-                _LOG.info(
-                    "cumulative.sequencer.awaiting_review sequence_index=%d org_id=%s job_id=%s session_fp=%s candidate_count=%d",
-                    session.sequence_index,
-                    paused["org_id"],
-                    paused["extraction_job_id"],
-                    paused["session_fp"],
-                    paused["candidate_count"],
-                )
-                return paused
+                # Extraction is a separate invocation. step_until_review never
+                # runs extraction itself; a session checkpointed at this phase
+                # (e.g. from an interrupted prior run) surfaces as awaiting_extract
+                # so the operator drives the separate extract invocation.
+                return self._extract_pending_descriptor(session)
 
             if phase in {
                 SessionPhase.LEADER_DECISION_APPLY,
@@ -345,6 +302,104 @@ class CumulativeSequencer:
                 return self._done_state()
 
             raise ValueError(f"unsupported session phase for step_until_review: {phase.value!r}")
+
+    def extract_current(self) -> AwaitingCoordinatorReview | HaltedOnGate | DoneState:
+        """Run the normal extraction pipeline for the current session.
+
+        Extraction is a separate invocation per the card contract
+        ("EXTRACT — a separate invocation", "One cell per invocation"). This
+        method picks up where ``step_until_review`` left off:
+        - a session in RUN_SESSION (or already checkpointed at
+          EXTRACT_NORMAL_PIPELINE) runs extraction and moves to
+          AWAIT_COORDINATOR_REVIEW;
+        - a session already at AWAIT_COORDINATOR_REVIEW is idempotent;
+        - post-review states raise (extraction already done).
+        """
+        session = self.current_session()
+        if session is None:
+            return self._done_state()
+
+        phase = self._phase_of(session)
+
+        if phase == SessionPhase.AWAIT_COORDINATOR_REVIEW:
+            return self._paused_descriptor(session)
+
+        if phase == SessionPhase.HALTED_ON_GATE:
+            return self._halted_descriptor(session)
+
+        if phase == SessionPhase.RUN_SESSION:
+            session.set_phase(SessionPhase.EXTRACT_NORMAL_PIPELINE)
+            self._checkpoint()
+            phase = SessionPhase.EXTRACT_NORMAL_PIPELINE
+
+        if phase == SessionPhase.EXTRACT_NORMAL_PIPELINE:
+            _LOG.info(
+                "cumulative.sequencer.extract_start sequence_index=%d memory_mode=%s",
+                session.sequence_index,
+                session.memory_mode,
+            )
+            try:
+                extraction_payload = self._runner.extract(session)
+            except Exception as exc:
+                # Observability-only: record that extraction was invoked but
+                # cut off (e.g. timeout), then re-raise. Behaviour is
+                # preserved exactly — the run still aborts as before; only
+                # an append-only extraction record is left behind.
+                self._append_extraction_status(
+                    session,
+                    invoked=True,
+                    cut_off=True,
+                    candidate_count=session.extraction_candidate_count,
+                    error=str(exc),
+                )
+                raise
+            if not isinstance(extraction_payload, Mapping):
+                raise ValueError("runner.extract must return a mapping payload")
+
+            self._populate_extraction_result(session, extraction_payload)
+            self._append_extraction_status(
+                session,
+                invoked=True,
+                cut_off=False,
+                candidate_count=session.extraction_candidate_count,
+            )
+            session.set_phase(SessionPhase.AWAIT_COORDINATOR_REVIEW)
+            self._checkpoint()
+
+            paused = self._paused_descriptor(session)
+            _LOG.info(
+                "cumulative.sequencer.awaiting_review sequence_index=%d org_id=%s job_id=%s session_fp=%s candidate_count=%d",
+                session.sequence_index,
+                paused["org_id"],
+                paused["extraction_job_id"],
+                paused["session_fp"],
+                paused["candidate_count"],
+            )
+            return paused
+
+        if phase == SessionPhase.DONE:
+            return self._done_state()
+
+        if phase in {
+            SessionPhase.LEADER_DECISION_APPLY,
+            SessionPhase.COMMIT_INDEX_READY,
+            SessionPhase.NEXT_SESSION,
+        }:
+            raise ValueError(
+                "current session already passed coordinator review; "
+                "use resume_with_decision to continue"
+            )
+
+        raise ValueError(f"unsupported session phase for extract_current: {phase.value!r}")
+
+    def _extract_pending_descriptor(self, session: SessionRecord) -> AwaitingExtract:
+        session_fp = str(session.session_fp or "").strip()
+        return {
+            "status": "awaiting_extract",
+            "sequence_index": int(session.sequence_index),
+            "session_fp": session_fp,
+            "memory_mode": str(session.memory_mode),
+        }
 
     def resume_with_decision(
         self,
@@ -485,7 +540,7 @@ class CumulativeSequencer:
 
         raise ValueError(f"unsupported session phase for resume_with_decision: {phase.value!r}")
 
-    def resume_after_gate_halt(self) -> HaltedOnGate | AwaitingCoordinatorReview | DoneState:
+    def resume_after_gate_halt(self) -> HaltedOnGate | AwaitingExtract | AwaitingCoordinatorReview | DoneState:
         session = self.current_session()
         if session is None:
             return self._done_state()
@@ -506,32 +561,6 @@ class CumulativeSequencer:
     def _checkpoint(self) -> None:
         self._manifest.updated_at = self._utc_now_iso()
         atomic_write(self._manifest_path, self._manifest)
-
-    def _record_consumer_gate_outcome(self, session: SessionRecord) -> None:
-        consumer_gate_record: ConsumerGateRecord | None = None
-
-        if session.phase_group == PhaseGroup.ON.value:
-            consumer_gate_hook = getattr(self._runner, "consumer_gate_outcome", None)
-            if consumer_gate_hook is not None:
-                if not callable(consumer_gate_hook):
-                    raise ValueError("runner.consumer_gate_outcome must be callable when provided")
-                candidate = consumer_gate_hook(session)
-                if candidate is not None and not isinstance(candidate, ConsumerGateRecord):
-                    raise ValueError(
-                        "runner.consumer_gate_outcome must return ConsumerGateRecord or None"
-                    )
-                consumer_gate_record = candidate
-
-        session.consumer_gate = consumer_gate_record
-
-        if isinstance(session.progress, Mapping):
-            progress = dict(session.progress)
-            progress["consumer_injected_count"] = (
-                consumer_gate_record.consumer_injected_count
-                if consumer_gate_record is not None
-                else None
-            )
-            session.progress = progress
 
     @staticmethod
     def _first_stopping_walk_gate(
