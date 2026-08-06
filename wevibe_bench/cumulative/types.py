@@ -324,7 +324,7 @@ class ProgressVector:
 
     def __post_init__(self) -> None:
         excluded_seams = set(CONSTRUCTION_DEFERRED_TELEMETRY_SEAMS)
-        if self.memory_mode.strip().lower() == "off":
+        if self.injected_count is None:
             excluded_seams.update(ON_ONLY_TELEMETRY_SEAMS)
         self.missing_telemetry_seams = _normalize_missing_telemetry_seams(
             self.missing_telemetry_seams,
@@ -364,9 +364,7 @@ class ProgressVector:
 
     def to_dict(self) -> dict[str, Any]:
         excluded_seams = (
-            ON_ONLY_TELEMETRY_SEAMS
-            if self.memory_mode.strip().lower() == "off"
-            else frozenset()
+            ON_ONLY_TELEMETRY_SEAMS if self.injected_count is None else frozenset()
         )
         missing_telemetry_seams = _normalize_missing_telemetry_seams(
             self.missing_telemetry_seams,

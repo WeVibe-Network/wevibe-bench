@@ -786,7 +786,7 @@ def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_onl
         recall_returned_total=None,
         recall_returned_count_sum=None,
         no_keywords_count=None,
-        injected_count=None,
+        injected_count=0,
         served_attempted=None,
         served_failed=None,
         served_confirmed=None,
@@ -800,7 +800,7 @@ def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_onl
     assert progress.recall_returned_total is None
     assert progress.recall_returned_count_sum is None
     assert progress.no_keywords_count is None
-    assert progress.injected_count is None
+    assert progress.injected_count == 0
     assert progress.served_attempted is None
     assert progress.served_failed is None
     assert progress.served_confirmed is None
@@ -811,7 +811,7 @@ def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_onl
     assert "recall_returned_total" in progress.missing_telemetry_seams
     assert "recall_returned_count_sum" in progress.missing_telemetry_seams
     assert "no_keywords_count" in progress.missing_telemetry_seams
-    assert "injected_count" in progress.missing_telemetry_seams
+    assert "injected_count" not in progress.missing_telemetry_seams
     assert "served_attempted" in progress.missing_telemetry_seams
     assert "served_failed" in progress.missing_telemetry_seams
     assert "served_confirmed" in progress.missing_telemetry_seams
