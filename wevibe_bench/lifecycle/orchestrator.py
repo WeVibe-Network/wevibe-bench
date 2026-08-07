@@ -15,7 +15,11 @@ from .hub_client import HubClient
 from .identity import Identity
 from .lconfig import LifecycleConfig
 from .logging_util import fp, new_trace_id
-from .mcp_process import McpInstance, McpProcessManager, _require_bench_identity_store
+from .mcp_process import (
+    McpInstance,
+    McpProcessManager,
+    _resolve_role_keystore,
+)
 from .mcp_rest import McpRest
 
 
@@ -139,13 +143,14 @@ class LifecycleOrchestrator:
         return self._contributor_instance
 
     def _leader_admin_env(self) -> dict[str, str]:
-        identity_home, keystore_path = _require_bench_identity_store()
+        keystore_path, identity_seed_hex = _resolve_role_keystore(self._cfg, "leader")
         env = dict(os.environ)
         env.update(
             {
                 "WEVIBE_SEED_BACKEND": "file",
-                "WEVIBE_HOME": identity_home,
+                "WEVIBE_HOME": keystore_path,
                 "WEVIBE_KEYSTORE_PATH": keystore_path,
+                "WEVIBE_IDENTITY_SEED_HEX": identity_seed_hex,
                 "WEVIBE_HUB_URL": self._cfg.hub_url,
                 "WEVIBE_LEADER_WALLET": self._leader_wallet,
                 "WEVIBE_BENCH_ENDPOINTS": "1",

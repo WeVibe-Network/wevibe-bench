@@ -79,6 +79,12 @@ class LifecycleConfig:
             "WEVIBE_BENCH_CONTRIB_KEYSTORE", DEFAULT_CONTRIB_KEYSTORE_PATH
         )
     )
+    leader_identity_seed_hex: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_SEED_HEX", "")
+    )
+    contributor_identity_seed_hex: str = field(
+        default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_SEED_HEX", "")
+    )
     org_name: str = "wevibe-bench-lifecycle"
     domain: str = "bench.wevibe.local"
     org_description: str = field(
@@ -129,6 +135,8 @@ class LifecycleConfig:
             "contributor_mcp_url": self.contributor_mcp_url,
             "leader_keystore_path": self.leader_keystore_path,
             "contributor_keystore_path": self.contributor_keystore_path,
+            "leader_identity_seed_hex": self.leader_identity_seed_hex,
+            "contributor_identity_seed_hex": self.contributor_identity_seed_hex,
             "org_name": self.org_name,
             "domain": self.domain,
             "org_description": self.org_description,

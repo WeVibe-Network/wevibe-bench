@@ -25,21 +25,34 @@ Transport = Callable[[str, dict[str, str], dict[str, Any] | None], tuple[int, An
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-def _bench_identity_home() -> str:
-    return os.path.abspath(
-        os.path.expanduser(os.environ.get("WEVIBE_BENCH_IDENTITY_HOME", "~/.wevibe/bench"))
-    )
+def _resolve_role_keystore(cfg: LifecycleConfig, name: str) -> tuple[str, str]:
+    """Resolve the per-role bench keystore path and identity seed for a spawned MCP.
 
+    Each role (leader/contributor) gets its own bench-scoped keystore AND its own
+    per-name identity seed injected into the spawn env. This is what makes the two
+    spawned clones derive distinct identities. Unknown roles and missing seeds
+    fail closed (RuntimeError) rather than silently falling through to a shared or
+    personal keystore.
+    """
+    role_key = name.lower()
+    if role_key == "leader":
+        keystore = cfg.leader_keystore_path
+        seed_hex = cfg.leader_identity_seed_hex
+        seed_env = "WEVIBE_BENCH_LEADER_SEED_HEX"
+    elif role_key == "contributor":
+        keystore = cfg.contributor_keystore_path
+        seed_hex = cfg.contributor_identity_seed_hex
+        seed_env = "WEVIBE_BENCH_CONTRIB_SEED_HEX"
+    else:
+        raise RuntimeError(f"unrecognized bench MCP role: {name!r}")
 
-def _require_bench_identity_store() -> tuple[str, str]:
-    home = _bench_identity_home()
-    keys_dir = os.path.join(home, "keys")
-    keys_json = os.path.join(keys_dir, "keys.json")
-    if not os.path.isdir(home):
-        raise RuntimeError(f"benchmark identity home missing: {home}")
-    if not os.path.isfile(keys_json):
-        raise RuntimeError(f"benchmark identity keystore missing: {keys_json}")
-    return home, keys_dir
+    keystore_path = os.path.abspath(os.path.expanduser(keystore))
+    if not seed_hex or not seed_hex.strip():
+        raise RuntimeError(
+            f"missing per-role identity seed for role {role_key!r} "
+            f"(env {seed_env})"
+        )
+    return keystore_path, seed_hex
 
 
 def _json_value(payload: bytes) -> Any:
@@ -167,7 +180,7 @@ class McpProcessManager:
         port: int,
         leader_wallet: str | None = None,
     ) -> dict[str, str]:
-        identity_home, keystore_path = _require_bench_identity_store()
+        keystore_path, identity_seed_hex = _resolve_role_keystore(self._cfg, name)
         env = dict(os.environ)
         env.update(
             {
@@ -175,8 +188,9 @@ class McpProcessManager:
                 "WEVIBE_MCP_HTTP_PORT": str(port),
                 "WEVIBE_HTTP_HOST": "127.0.0.1",
                 "WEVIBE_SEED_BACKEND": "file",
-                "WEVIBE_HOME": identity_home,
+                "WEVIBE_HOME": keystore_path,
                 "WEVIBE_KEYSTORE_PATH": keystore_path,
+                "WEVIBE_IDENTITY_SEED_HEX": identity_seed_hex,
                 "WEVIBE_UMBRAL_SIDECAR_BIN": os.path.join(
                     self._wevibe_root,
                     "wevibe-umbral",
@@ -206,8 +220,8 @@ class McpProcessManager:
             0,
             name=name,
             port=port,
-            identity_home=identity_home,
             keystore_path=keystore_path,
+            seed_size=len(identity_seed_hex),
         )
         return env
 

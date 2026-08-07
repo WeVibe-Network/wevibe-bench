@@ -30,16 +30,17 @@ def _capture_logger(name: str) -> tuple[logging.Logger, io.StringIO]:
 
 def test_mcp_process_build_env_sets_required_keys_and_never_logs_raw_seed(tmp_path, monkeypatch) -> None:
     logger, stream = _capture_logger("test.lifecycle.mcp_env")
+
+    leader_seed = "ab" * 32
+    contrib_seed = "cd" * 32
+    leader_keystore = tmp_path / "leader-keystore"
+    contrib_keystore = tmp_path / "contrib-keystore"
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_SEED_HEX", leader_seed)
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_SEED_HEX", contrib_seed)
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_KEYSTORE", str(leader_keystore))
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_KEYSTORE", str(contrib_keystore))
     cfg = LifecycleConfig()
     manager = McpProcessManager("/workspace", cfg, logger)
-
-    seed_hex = "ab" * 32
-    identity_home = tmp_path / "identity-home"
-    keys_dir = identity_home / "keys"
-    keys_dir.mkdir(parents=True)
-    keys_json = keys_dir / "keys.json"
-    keys_json.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("WEVIBE_BENCH_IDENTITY_HOME", str(identity_home))
 
     env = manager._build_env(
         name="leader",
@@ -49,33 +50,67 @@ def test_mcp_process_build_env_sets_required_keys_and_never_logs_raw_seed(tmp_pa
     assert env["WEVIBE_MCP_HTTP_ONLY"] == "1"
     assert env["WEVIBE_MCP_HTTP_PORT"] == "4450"
     assert env["WEVIBE_SEED_BACKEND"] == "file"
-    assert "WEVIBE_IDENTITY_SEED_HEX" not in env
-    assert env["WEVIBE_HOME"] == os.path.abspath(str(identity_home))
-    assert env["WEVIBE_KEYSTORE_PATH"] == os.path.join(os.path.abspath(str(identity_home)), "keys")
+    assert env["WEVIBE_IDENTITY_SEED_HEX"] == leader_seed
+    assert env["WEVIBE_HOME"] == os.path.abspath(str(leader_keystore))
+    assert env["WEVIBE_KEYSTORE_PATH"] == os.path.abspath(str(leader_keystore))
     assert env["WEVIBE_UMBRAL_SIDECAR_BIN"] == "/workspace/wevibe-umbral/target/release/wevibe-umbral"
     assert env["WEVIBE_GUARD_BIN"] == "/workspace/wevibe-guard/target/release/wevibe-guard"
     assert env["WEVIBE_HUB_URL"] == cfg.hub_url
 
     logs = stream.getvalue()
-    assert seed_hex not in logs
+    assert leader_seed not in logs
+    assert contrib_seed not in logs
     assert "seed_fp=" not in logs
     assert "keystore_path=" in logs
 
 
-def test_mcp_process_build_env_fails_closed_when_bench_identity_store_missing(tmp_path, monkeypatch) -> None:
+def test_mcp_process_build_env_role_specific_keystore_and_seed(tmp_path, monkeypatch) -> None:
+    logger, _ = _capture_logger("test.lifecycle.mcp_env.roles")
+
+    leader_seed = "ab" * 32
+    contrib_seed = "cd" * 32
+    leader_keystore = tmp_path / "leader-keystore"
+    contrib_keystore = tmp_path / "contrib-keystore"
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_SEED_HEX", leader_seed)
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_SEED_HEX", contrib_seed)
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_KEYSTORE", str(leader_keystore))
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_KEYSTORE", str(contrib_keystore))
+    cfg = LifecycleConfig()
+    manager = McpProcessManager("/workspace", cfg, logger)
+
+    leader_env = manager._build_env(name="leader", port=4450)
+    contrib_env = manager._build_env(name="contributor", port=4451)
+
+    assert leader_env["WEVIBE_KEYSTORE_PATH"] == os.path.abspath(str(leader_keystore))
+    assert contrib_env["WEVIBE_KEYSTORE_PATH"] == os.path.abspath(str(contrib_keystore))
+    assert leader_env["WEVIBE_IDENTITY_SEED_HEX"] == leader_seed
+    assert contrib_env["WEVIBE_IDENTITY_SEED_HEX"] == contrib_seed
+    assert leader_env["WEVIBE_HOME"] == os.path.abspath(str(leader_keystore))
+    assert contrib_env["WEVIBE_HOME"] == os.path.abspath(str(contrib_keystore))
+
+    # The two roles must get distinct keystores and distinct seeds.
+    assert leader_env["WEVIBE_KEYSTORE_PATH"] != contrib_env["WEVIBE_KEYSTORE_PATH"]
+    assert leader_env["WEVIBE_IDENTITY_SEED_HEX"] != contrib_env["WEVIBE_IDENTITY_SEED_HEX"]
+    assert leader_env["WEVIBE_HOME"] == leader_env["WEVIBE_KEYSTORE_PATH"]
+    assert contrib_env["WEVIBE_HOME"] == contrib_env["WEVIBE_KEYSTORE_PATH"]
+
+
+def test_mcp_process_build_env_fails_closed_when_bench_identity_seed_missing(tmp_path, monkeypatch) -> None:
     logger, _ = _capture_logger("test.lifecycle.mcp_env.fail_closed")
+    leader_keystore = tmp_path / "leader-keystore"
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_KEYSTORE", str(leader_keystore))
+    monkeypatch.delenv("WEVIBE_BENCH_LEADER_SEED_HEX", raising=False)
+
     manager = McpProcessManager("/workspace", LifecycleConfig(), logger)
-    identity_home = tmp_path / "identity-home"
-
-    monkeypatch.setenv("WEVIBE_BENCH_IDENTITY_HOME", str(identity_home))
-    with pytest.raises(RuntimeError, match=f"benchmark identity home missing: {re.escape(str(identity_home))}"):
+    with pytest.raises(RuntimeError, match="WEVIBE_BENCH_LEADER_SEED_HEX"):
         manager._build_env(name="leader", port=4450)
 
-    keys_dir = identity_home / "keys"
-    keys_dir.mkdir(parents=True)
-    keys_json = keys_dir / "keys.json"
-    with pytest.raises(RuntimeError, match=f"benchmark identity keystore missing: {re.escape(str(keys_json))}"):
-        manager._build_env(name="leader", port=4450)
+    # With the seed present (cfg constructed under the env), no error is raised.
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_SEED_HEX", "ab" * 32)
+    cfg_ok = LifecycleConfig()
+    manager_ok = McpProcessManager("/workspace", cfg_ok, logger)
+    env = manager_ok._build_env(name="leader", port=4450)
+    assert env["WEVIBE_IDENTITY_SEED_HEX"] == "ab" * 32
 
 
 def test_mcp_process_uses_wevibe_bench_mcp_root_env(monkeypatch) -> None:
