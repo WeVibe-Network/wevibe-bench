@@ -281,6 +281,19 @@ class ServeClient:
                 f"send_prompt: expected 204, got {status}"
             )
 
+    def abort(self, session_id: str) -> None:
+        """POST /session/{sid}/abort to stop serve-side generation.
+
+        Returns None on any 2xx; raises :class:`ServeClientError` on a non-2xx
+        status or on any HTTP/URLError/OSError (wrapped by :func:`_http_status`).
+        """
+        url = self._url(
+            f"/session/{urllib.parse.quote(session_id, safe='')}/abort"
+        )
+        status = _http_status("POST", url, body=None, timeout=self.timeout)
+        if status < 200 or status >= 300:
+            raise ServeClientError(f"abort: expected 2xx, got {status}")
+
     def session_busy(self, session_id: str) -> bool:
         """GET /session/status -> parse_busy_status for ``session_id``."""
         payload = _http_json(

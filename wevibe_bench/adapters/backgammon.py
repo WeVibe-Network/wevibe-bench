@@ -1235,6 +1235,9 @@ class BackgammonRunner(AgentRunner):
                             "n_problems": len(problems),
                             "failed_gates": failed_gates,
                             "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
+                            # Scored cell whose metering awaits parity confirmation against the
+                            # first scored cell / the proxy log before it is treated as data.
+                            "parity_pending": True,
                         }
                     )
                 self._progress(
@@ -1392,7 +1395,7 @@ class BackgammonRunner(AgentRunner):
                         )
                         self._write_worker_permission_config(worktree=worktree)
                         self._mark_harness_resume(prev_run_stats)
-                        pass_run = self._run_opencode_with_zero_tool_resumes(
+                        pass_run = self._run_cell_attempt(
                             active_cell=active_cell,
                             initial_inner=feedback_inner,
                             pure=pure,
@@ -1486,7 +1489,7 @@ class BackgammonRunner(AgentRunner):
                 self._write_worker_permission_config(worktree=worktree)
 
                 self._mark_harness_resume(prev_run_stats)
-                feedback_run = self._run_opencode_with_zero_tool_resumes(
+                feedback_run = self._run_cell_attempt(
                     active_cell=active_cell,
                     initial_inner=feedback_inner,
                     pure=pure,
@@ -1832,6 +1835,74 @@ class BackgammonRunner(AgentRunner):
             unmetered_turn_wall_s=aggregate.unmetered_turn_wall_s,
         )
 
+    def _run_cell_attempt(
+        self,
+        *,
+        active_cell: DockerCell,
+        initial_inner: list[str],
+        pure: bool,
+        worktree: Path,
+        events_path: Path,
+        env: dict[str, str],
+        run_label: str,
+        phase: str,
+        fallback_session_id: str | None,
+        prior_cost_usd: float,
+        kill_hook: Callable[[], None] | None,
+        stdin_text: str,
+    ) -> _OpencodeRunStats:
+        """Run ONE cell attempt, delivered over the serve session when available.
+
+        WO-WATCH-1F transport unification: every scoring attempt (initial,
+        feedback, pass-verdict) is delivered to the founder-visible ``opencode
+        serve`` session via :meth:`_run_opencode_serve` (``prompt_async`` ->
+        ``/session/status`` idle -> persisted-transcript metering) so the founder
+        TUI and the transcript advance and truncation capture fires on EVERY
+        attempt — not just the first. When no serve session exists (hermetic fake
+        cells whose ``create_session`` fails closed, or live-view disabled) the
+        attempt falls back to the stdout subprocess path
+        (:meth:`_run_opencode_with_zero_tool_resumes`), unchanged.
+
+        Zero-tool-resume semantics: :func:`serve_client.extract_transcript_metrics`
+        does NOT compute ``zero_tool_turns``/``terminal_zero_tool_turn`` from the
+        transcript, so a serve-driven attempt cannot detect a terminal zero-tool
+        turn from the transcript alone. The resume loop therefore stays on the
+        stdout path; when a serve session is available the prompt is delivered
+        over serve exactly once (no resume nudge can fire).
+        """
+        if self._serve_client is not None and self._cell_session_id is not None:
+            try:
+                return self._run_opencode_serve(
+                    active_cell=active_cell,
+                    serve_client=self._serve_client,
+                    session_id=self._cell_session_id,
+                    prompt=stdin_text,
+                    run_label=run_label,
+                    phase=phase,
+                    prior_cost_usd=prior_cost_usd,
+                    timeout_s=self.run_timeout_s,
+                    kill_hook=kill_hook,
+                )
+            except Exception as exc:  # noqa: BLE001 - mirror the initial-attempt fallback.
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=fallback reason=exception detail={exc}"
+                )
+        return self._run_opencode_with_zero_tool_resumes(
+            active_cell=active_cell,
+            initial_inner=initial_inner,
+            pure=pure,
+            worktree=worktree,
+            events_path=events_path,
+            env=env,
+            run_label=run_label,
+            phase=phase,
+            fallback_session_id=fallback_session_id,
+            prior_cost_usd=prior_cost_usd,
+            kill_hook=kill_hook,
+            stdin_text=stdin_text,
+        )
+
     def _write_worker_permission_config(self, *, worktree: Path) -> None:
         gates_dir = str((self.task_dir / "gates").resolve())
         golden_dir = str((self.task_dir / "golden").resolve())
@@ -2107,11 +2178,14 @@ class BackgammonRunner(AgentRunner):
     ) -> _OpencodeRunStats:
         """Drive ONE scoring attempt through the persistent opencode serve.
 
-        WO-WATCH-1E serve-drive path: enqueue the prompt via
+        WO-WATCH-1F serve-drive path: enqueue the prompt via
         ``POST /session/{sid}/prompt_async``, wait for the session to go idle
         (``GET /session/status`` busy->idle), then meter from the persisted
         transcript ``GET /session/{sid}/message`` via :func:`serve_client.metrics`.
-        Never calls ``/session/{sid}/abort`` and never kills the serve (the
+        The harness's OWN timeout path MAY call ``POST /session/{sid}/abort``
+        on ITS OWN session to stop serve-side generation; the never-abort rule
+        applies ONLY to the founder's passive viewer, never to the harness's
+        own timeout path. The harness never kills the serve itself (the
         per-attempt kill hook is serve-PID-scoped and survives by design).
 
         Unlike :meth:`_run_opencode` (subprocess stdout parsing, retained as the
@@ -2166,6 +2240,20 @@ class BackgammonRunner(AgentRunner):
         if not idle:
             killed_reason = "run_timeout"
             exit_code = 1
+            # WO-WATCH-1F: genuinely stop serve-side generation before teardown.
+            # An abort failure is logged but must NOT mask the timeout outcome.
+            try:
+                serve_client.abort(session_id)
+            except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=abort_failed reason={exc}"
+                )
+            else:
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=abort_issued session_id={session_id}"
+                )
             try:
                 kill_hook()
             except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.

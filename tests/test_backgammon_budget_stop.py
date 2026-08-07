@@ -427,6 +427,8 @@ def test_hard_attempt_ceiling_sets_fail_termination_label(
     assert result.termination_reason == "attempt_ceiling_reached"
     assert result.attempts_to_green == expected_attempts_to_green
     assert result.attempt_reports[-1]["termination_reason"] == "attempt_ceiling_reached"
+    assert result.attempt_reports[-1]["parity_pending"] is True
+    assert all(ar["parity_pending"] is True for ar in result.attempt_reports)
 
 
 def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(

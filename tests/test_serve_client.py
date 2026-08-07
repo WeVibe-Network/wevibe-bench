@@ -283,6 +283,41 @@ def test_send_prompt_rejects_non_204(monkeypatch):
         ServeClient("http://127.0.0.1:4096").send_prompt("ses_1", "x")
 
 
+def test_abort_accepts_2xx(monkeypatch):
+    seen = {}
+
+    def fake(method, url, body=None, timeout=5.0):
+        seen.update(method=method, url=url, body=body)
+        return 200
+
+    monkeypatch.setattr("wevibe_bench.serve_client._http_status", fake)
+    client = ServeClient("http://127.0.0.1:4096")
+    assert client.abort("ses_1") is None
+    assert seen["method"] == "POST"
+    assert seen["body"] is None
+    assert seen["url"] == "http://127.0.0.1:4096/session/ses_1/abort"
+
+
+def test_abort_rejects_non_2xx(monkeypatch):
+    monkeypatch.setattr(
+        "wevibe_bench.serve_client._http_status",
+        lambda method, url, body=None, timeout=5.0: 500,
+    )
+    with pytest.raises(ServeClientError):
+        ServeClient("http://127.0.0.1:4096").abort("ses_1")
+
+
+def test_abort_wraps_transport_error(monkeypatch):
+    from wevibe_bench import serve_client as sc
+
+    def boom(*args, **kwargs):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", boom)
+    with pytest.raises(ServeClientError):
+        ServeClient("http://127.0.0.1:4096").abort("ses_1")
+
+
 def test_session_busy_parses(monkeypatch):
     _fake_json(monkeypatch, [{"ses_1": {"type": "busy"}}])
     assert ServeClient("http://127.0.0.1:4096").session_busy("ses_1") is True
