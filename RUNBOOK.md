@@ -40,7 +40,7 @@ required before any "models get better" statement, internal or external.
 | | |
 |---|---|
 | Subject model | **whatever is resident** — the bench never selects a model (RC-7) |
-| Org | **one org for the entire campaign**, recorded in the manifest; chain assigned `wevibe-org-3`, leader fp `f534aa02` |
+| Org | **one org for the entire campaign**, recorded in the manifest; chain assigned `wevibe-org-0`, leader fp `f534aa02` |
 | Runtime | **oMLX.** The operator manages what is loaded. Identity is read from the API response and recorded in the manifest, so this row is documentation, never a selector |
 | Transport | session production model AND session extraction model → local relay proxy `:4545` → resident oMLX model. **ONLY** the embedding/vector-dim path bypasses the proxy to the local embedding endpoint directly |
 | Harness | OpenCode in a Docker worker image + plugin. **The version is not asserted here** — the worker image fingerprint is measured at run time and recorded in the manifest (RC-5), and the stack smoke asserts it matches the commit under test (§6) |
