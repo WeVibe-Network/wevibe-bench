@@ -599,18 +599,25 @@ several hours minimum, so a paired OFF/ON difference at N=1 is not a result.
 ## 14. TEST INFRASTRUCTURE
 
 Config lives in `pyproject.toml` under `[tool.pytest.ini_options]` — there is **no `pytest.ini`**.
-Addopts: `-n auto --dist=loadfile --timeout=60 --strict-markers --tb=short -ra -m "not slow"`,
+Addopts: `-n auto --dist=load --timeout=60 --strict-markers --tb=short -ra -m "not slow"`,
 `timeout_method = "thread"`.
 
 **Targets:** `test` (full suite) · `test-fast` (skips slow) · `test-file FILE=…` · `test-name
 NAME=…` · `test-slowest` (ten slowest from the last run) · `test-all` (everything, including slow).
 
-**Markers:** `slow` — excluded by default. `serial` — must not run in parallel; **triggers
-`--dist no`**.
+**Markers:** `slow` — excluded by default. `serial` — intended for tests that must not run in
+parallel; NOTE: `tests/conftest.py` currently only WARNS on serial-marked tests and does not actually
+force serialization (doc-vs-code drift) — do not rely on `serial` to order tests under `--dist=load`
+until the conftest is fixed.
 
-**Same-file grouping.** `--dist=loadfile` keeps every test in a file on one worker, in file order.
-Without it xdist scatters tests and breaks anything sharing a fixture, a port or a temp path. The
-work-stealing alternative can steal mid-file, which is riskier for shared state.
+**`--dist=load` (work-stealing) is the default.** Tests spread across the `-n auto` workers as they
+free up. This was switched in WO-NIGHT-2 Phase 2 item 3 to cut the suite runtime from ~20s to ~10s:
+the previous `--dist=loadfile` serialized the 8 subprocess-launching truncated-turn tests on a single
+worker (the dominant cost, ~19.65s), while `--dist=load` scatters them across workers to run in
+parallel. Trade-off: work-stealing can scatter tests that share a fixture, a port or a temp path.
+Tests that must stay ordered/serialized must carry the `serial` mark (see below) or be kept in a
+shared-state-safe pattern; verify the full suite is green before relying on this mode. The truncation
+tests are safe under `--dist=load` because they use per-test `tmp_path` + read-only `TASK_DIR`.
 
 **The 120 s agent shell limit is load-bearing.**
 1. **Never pipe suite output through `tail`, `head` or `grep` alone.** They buffer until process

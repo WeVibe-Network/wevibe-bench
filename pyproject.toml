@@ -21,7 +21,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "serial: marks tests that must not run in parallel (use --dist no with serial marker)",
 ]
-addopts = "-n auto -m \"not slow\" --dist=loadfile --timeout=60 --strict-markers --tb=short -ra"
+addopts = "-n auto -m \"not slow\" --dist=load --timeout=60 --strict-markers --tb=short -ra"
 timeout = 60
 timeout_method = "thread"
 log_cli = true
