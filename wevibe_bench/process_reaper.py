@@ -31,6 +31,11 @@ _LOG = logging.getLogger("wevibe_bench.process_reaper")
 # of the current process are touched — never unrelated host processes.
 _RUN_BINARIES = frozenset({"node", "opencode", "playwright", "report.mjs"})
 
+# Bounded retries for a port probe before a persistent non-refusal OSError is
+# treated as a probe ERROR (never a false "clear"). Mirrored in the reaper's
+# "after %d attempts" error log so the number reported matches the retries run.
+_PORT_CLEAR_ATTEMPTS = 3
+
 
 @dataclass(frozen=True)
 class ReapReport:
@@ -101,13 +106,37 @@ def _default_process_provider() -> Sequence[int]:
     return candidates
 
 
-def _port_clear(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
-    """True if nothing is listening on ``port`` (a connect probe fails)."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return False
-    except OSError:
-        return True
+def _port_clear(
+    port: int,
+    host: str = "127.0.0.1",
+    timeout: float = 0.5,
+    attempts: int = _PORT_CLEAR_ATTEMPTS,
+    delay: float = 0.5,
+) -> bool:
+    """True if nothing is listening on ``port``.
+
+    Bounded retry probe. A connect success => the port is listening => False
+    (occupied). A definitive ConnectionRefusedError => nothing listening =>
+    True (clear). Any OTHER OSError (e.g. socket.timeout / TimeoutError, which
+    are OSErrors but NOT ConnectionRefusedError) is a probe ERROR, not a clear:
+    it is retried up to ``attempts`` times, sleeping ``delay`` between retries.
+    If every attempt ends in a non-refusal probe error, raise ConnectionError
+    so the caller surfaces "error" — never a false "clear".
+    """
+    last_error: OSError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return False
+        except ConnectionRefusedError:
+            return True
+        except OSError as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(delay)
+    raise ConnectionError(
+        f"port {port} probe error after {attempts} attempts: {last_error}"
+    ) from last_error
 
 
 class ProcessReaper:
@@ -238,16 +267,39 @@ class ProcessReaper:
         return ok, detail
 
     def _assert_ports(self) -> dict[int, str]:
-        """Probe each bench port; report clear/occupied. Never fails the reaper."""
+        """Probe each bench port; report clear/occupied/error. Never fails.
+
+        A persistent probe error is recorded "error" and logged at ERROR level —
+        it must NEVER masquerade as a clear. An occupied port is logged loudly
+        at ERROR level after teardown, plus one aggregated ERROR line naming all
+        occupied/errored ports.
+        """
         states: dict[int, str] = {}
         for port in self.bench_ports:
             try:
                 clear = _port_clear(port)
-            except Exception as exc:  # noqa: BLE001 - report, don't fail
-                self.log.warning("process_reaper port %d probe error: %s", port, exc)
-                states[port] = "clear"
+            except ConnectionError as exc:
+                self.log.error(
+                    "process_reaper port %d probe error after %d attempts: %s",
+                    port, _PORT_CLEAR_ATTEMPTS, exc,
+                )
+                states[port] = "error"
                 continue
-            states[port] = "clear" if clear else "occupied"
+            if clear:
+                states[port] = "clear"
+            else:
+                self.log.error(
+                    "process_reaper port %d occupied after teardown", port
+                )
+                states[port] = "occupied"
+
+        occupied = [p for p, s in states.items() if s == "occupied"]
+        errored = [p for p, s in states.items() if s == "error"]
+        if occupied or errored:
+            self.log.error(
+                "process_reaper ports NOT clear after teardown: occupied=%s error=%s",
+                occupied, errored,
+            )
         return states
 
     # -- public entrypoint ---------------------------------------------------

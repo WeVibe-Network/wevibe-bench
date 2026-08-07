@@ -8,7 +8,9 @@ they themselves spawn, and reap them again in finally as a safety net.
 
 from __future__ import annotations
 
+import logging
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -156,6 +158,83 @@ def test_ports_report():
     # No child was reaped and nothing on the host was touched.
     assert report.children_reaped == []
     assert report.killed_count == 0
+
+
+def test_occupied_port_is_loud_and_recorded(caplog):
+    """PORT assertion: a really-listening port is 'occupied' AND logged loudly.
+
+    Bind a live TCP listener on an ephemeral port and let the reaper probe it.
+    The port must be recorded 'occupied' in the report and an ERROR-level log
+    naming the occupied port must be emitted (a silent reaper is not a reaper).
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        port = srv.getsockname()[1]
+        caplog.set_level(logging.ERROR)
+        reaper = ProcessReaper(
+            run_label="test-occupied", bench_ports=[port]
+        )
+        report = _reap_quietly(reaper)
+        assert report.ports == {port: "occupied"}
+        assert report.children_reaped == []
+        assert any(
+            rec.levelno == logging.ERROR and "occupied" in rec.message
+            for rec in caplog.records
+        ), "occupied port must be logged loudly at ERROR level"
+    finally:
+        srv.close()
+
+
+def test_probe_error_is_recorded_error_not_clear(monkeypatch):
+    """PORT assertion: a persistent probe error is 'error', never 'clear'.
+
+    Force ``_port_clear`` to raise ConnectionError (the probe-error contract);
+    the reaper must surface "error" for that port and must NOT mask it as a
+    false "clear".
+    """
+    import wevibe_bench.process_reaper as pr
+
+    port = 59998
+
+    def always_error(
+        port_, host="127.0.0.1", timeout=0.5, attempts=3, delay=0.5
+    ):
+        raise ConnectionError(f"port {port_} probe error")
+
+    monkeypatch.setattr(pr, "_port_clear", always_error)
+    reaper = ProcessReaper(
+        run_label="test-probe-error", bench_ports=[port]
+    )
+    report = _reap_quietly(reaper)
+    assert report.ports == {port: "error"}
+    assert report.ports[port] != "clear"
+
+
+def test_transient_probe_error_retries_to_clear(monkeypatch):
+    """PORT assertion: a transient non-refusal probe error retries to 'clear'.
+
+    A first-N-1 socket.timeout (an OSError, but NOT ConnectionRefusedError)
+    must be retried inside ``_port_clear`` up to ``_PORT_CLEAR_ATTEMPTS``; when
+    a later attempt finally gets a definitive refusal, the port recovers to
+    clear. Proves bounded retry on a transient probe error never produces a
+    false error — it settles on the correct final state.
+    """
+    import wevibe_bench.process_reaper as pr
+
+    calls = {"n": 0}
+
+    def flaky_conn(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < pr._PORT_CLEAR_ATTEMPTS:
+            raise socket.timeout("transient probe timeout")
+        raise ConnectionRefusedError("now clear")
+
+    monkeypatch.setattr(socket, "create_connection", flaky_conn)
+    # Retried internally, then recovered to clear; tiny delay keeps it fast.
+    assert pr._port_clear(59997, delay=0.001) is True
+    assert calls["n"] == pr._PORT_CLEAR_ATTEMPTS
 
 
 def test_reap_report_fields_and_unconditional():
