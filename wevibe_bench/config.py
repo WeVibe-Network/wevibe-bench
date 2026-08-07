@@ -269,6 +269,11 @@ class RunConfig:
     mc_version: int = 1  # MC-1
     hub_url: str = field(default_factory=lambda: os.environ.get("WEVIBE_BENCH_HUB_URL") or "http://127.0.0.1:4440")  # wevibe-hub Docker container `wevibe-hub`; health GET /health (public, no auth). The ONE hub. NOT the mcp.
     mcp_recall_url: str = field(default_factory=lambda: os.environ.get("WEVIBE_BENCH_MCP_RECALL_URL") or "http://127.0.0.1:4450")  # wevibe-mcp recall CLIENT; health GET /v1/health (bearer-gated). :4450 default, :4550 = Option-C bench clone. NOT the hub.
+    # Live-view topology: ONE persistent `opencode serve` per cell, published on a fixed
+    # host port bound to the container-side serve port. The founder attaches a TUI via
+    # `opencode attach http://127.0.0.1:<serve_host_port>`. 4096 is opencode serve's default.
+    serve_host_port: int = field(default_factory=lambda: int(os.environ.get("WEVIBE_BENCH_SERVE_HOST_PORT") or "4096"))  # host-published port for the per-cell opencode serve
+    serve_container_port: int = field(default_factory=lambda: int(os.environ.get("WEVIBE_BENCH_SERVE_CONTAINER_PORT") or "4096"))  # opencode serve port inside the worker container
     session_token_path: str = "~/.wevibe/mcp-session-token"  # Bearer token source (seam)
     embedding_model: str = "nomic-embed-text:v1.5"  # 768-d local embedding (documentation only)
     harness_version: str = "0.1.0"
@@ -308,6 +313,8 @@ class RunConfig:
             "mc_version": self.mc_version,
             "hub_url": self.hub_url,
             "mcp_recall_url": self.mcp_recall_url,
+            "serve_host_port": self.serve_host_port,
+            "serve_container_port": self.serve_container_port,
             "session_token_path": self.session_token_path,
             "embedding_model": self.embedding_model,
             "harness_version": self.harness_version,

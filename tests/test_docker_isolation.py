@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import inspect
+import itertools
 import json
 import os
 import subprocess
@@ -131,6 +132,31 @@ def _unique_container_name(prefix: str = "wevibe-bench-cell") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
+# Every `_started_cell` publishes a FIXED host port for the persistent `opencode serve`
+# topology. Tests may start several cells simultaneously (dual-cell isolation, xdist
+# parallel workers), so assign a distinct host port per started cell to avoid
+# "port is already allocated" collisions. The container-side port stays 4096 for all.
+#
+# Under pytest-xdist (`-n auto`, active via pyproject addopts) each worker process is a
+# SEPARATE module instance with its own counter, so a plain per-process counter would
+# restart at 4096 in every worker and collide across workers. Instead each xdist worker
+# owns a disjoint 40-port band (worker gwN -> 4096 + N*40 .. +39); the per-process
+# counter advances cells within that band. Non-xdist runs fall back to worker band 0.
+_CELL_SERVE_HOST_PORT_ITER = itertools.count()
+
+
+def _xdist_worker_index() -> int:
+    raw = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if raw.startswith("gw") and raw[2:].isdigit():
+        return int(raw[2:])
+    return 0
+
+
+def _cell_serve_host_port() -> int:
+    cell_index = next(_CELL_SERVE_HOST_PORT_ITER) % 40
+    return 4096 + (_xdist_worker_index() * 40) + cell_index
+
+
 @contextlib.contextmanager
 def _started_cell(worktree: Path, *, memory_mode: str) -> DockerCell:
     cell = DockerCell(
@@ -140,6 +166,7 @@ def _started_cell(worktree: Path, *, memory_mode: str) -> DockerCell:
             container_name=_unique_container_name(),
             proxy_base_url=TEST_PROXY_BASE_URL,
             proxy_token=TEST_PROXY_TOKEN,
+            serve_host_port=_cell_serve_host_port(),
         )
     )
     try:

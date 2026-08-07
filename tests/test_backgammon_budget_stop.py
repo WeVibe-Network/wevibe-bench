@@ -110,6 +110,14 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         def kill_worker_processes(self) -> None:
             state["process_kill_calls"] += 1
 
+        def start_serve(self) -> None:
+            # Live-view serve is a no-op in tests: never start a real `opencode
+            # serve`. The serve-drive session is stubbed to fail closed (see the
+            # ServeClient patch below) so the stdout fallback stays authoritative
+            # — mirroring production, where a serve-drive failure is never a
+            # scored-cell abort.
+            pass
+
     monkeypatch.setattr(backgammon_mod, "DockerCellConfig", _FakeDockerCellConfig)
     monkeypatch.setattr(backgammon_mod, "DockerCell", _FakeDockerCell)
     monkeypatch.setattr(backgammon_mod, "docker_available", lambda: (True, "ok"))
@@ -131,6 +139,22 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(backgammon_mod.subprocess, "run", _run)
+
+    # Hermetic serve-drive stub: `_run_cell_impl` constructs a real ServeClient
+    # and calls create_session() against 127.0.0.1:<serve_host_port>. That call
+    # is wrapped in try/except ServeClientError (never a scored-cell abort), so
+    # we make it fail closed here to keep the tests hermetic — no real HTTP
+    # connection is ever attempted. The stdout fallback remains authoritative.
+    class _FakeServeClient:
+        def __init__(self, base_url: str, **kwargs: Any) -> None:
+            self.base_url = base_url
+
+        def create_session(self) -> str:
+            raise backgammon_mod.ServeClientError(
+                f"serve unavailable (hermetic test stub): {self.base_url}"
+            )
+
+    monkeypatch.setattr(backgammon_mod, "ServeClient", _FakeServeClient)
     return state
 
 

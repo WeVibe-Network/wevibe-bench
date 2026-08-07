@@ -28,6 +28,7 @@ import time
 from typing import Any, Callable
 import urllib.error
 import urllib.request
+import uuid
 
 from wevibe_bench.adapters._memory_format import _format_memory
 from wevibe_bench.adapters.cheat_detector import (
@@ -46,6 +47,12 @@ from .docker_worker import (
 )
 from wevibe_bench.backends.base import NeedCard, RecalledMemory
 from wevibe_bench.runner import AgentRunner, TaskOutcome
+from wevibe_bench.serve_client import (
+    ServeClient,
+    ServeClientError,
+    classify_transport_anomaly,
+    founder_attach_command,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -175,6 +182,82 @@ TURN_TERMINAL_GUARD_ABORT = "guard_abort"
 TURN_TERMINAL_TRANSPORT_ERROR = "transport_error"
 TURN_TERMINAL_STREAM_DIED_OPEN = "stream_died_open"
 TURN_TERMINAL_UNCLASSIFIED_FINISH = "unclassified_finish"
+# WO-WATCH-1E evidence file name, written next to the cell's events file under
+# the run dir (``<worktree>.events.jsonl`` -> ``<worktree>.parent/...``). Lazily
+# created: only a real truncation/transport anomaly ever opens it.
+TRUNCATION_EVIDENCE_FILENAME = "truncation-evidence.jsonl"
+
+
+def _iso_utc(epoch_ms: int) -> str:
+    """Format an epoch-ms timestamp as an RFC3339 UTC string (evidence window)."""
+    return _dt.datetime.fromtimestamp(float(epoch_ms) / 1000.0, tz=_dt.timezone.utc).isoformat()
+
+
+def _build_truncation_evidence(
+    *,
+    attempt_id: str | None,
+    run_label: str,
+    phase: str,
+    terminal: str,
+    reason: str,
+    ts_start_epoch_ms: int | None,
+    ts_end_epoch_ms: int,
+    wall_seconds: float | None,
+    session_id: Any,
+    received_bytes: int | None,
+    received_lines: int | None,
+    last_event_type: Any,
+    last_event_ts: Any,
+    finish_reason: Any,
+    output_tokens_received: int,
+    input_tokens_received: int,
+    reasoning_tokens_received: int,
+    truncations_seen: int,
+) -> dict[str, Any]:
+    """Build one WO-WATCH-1E truncation/transport evidence record (pure).
+
+    Captures, at the moment a truncation/transport-error is detected, a
+    correlation-ready snapshot that a human or future step matches against the
+    local proxy's own ``runs/{YYYY-MM-DD}.jsonl`` log by ``ts`` within the
+    recorded ``ts_window_utc``. The harness cannot see the proxy's internal
+    trace id at capture time, so it records a timestamp window + attempt id +
+    session id (READ-ONLY against the proxy — never reads the proxy log, and
+    the proxy itself is never touched).
+    """
+    ts_start = int(ts_start_epoch_ms) if ts_start_epoch_ms is not None else None
+    ts_end = int(ts_end_epoch_ms)
+    sess = str(session_id) if isinstance(session_id, str) else None
+    attempt = str(attempt_id) if attempt_id else None
+    return {
+        "attempt_id": attempt,
+        "run_label": str(run_label),
+        "phase": str(phase),
+        "terminal": str(terminal),
+        "reason": str(reason),
+        "ts_start_epoch_ms": ts_start,
+        "ts_end_epoch_ms": ts_end,
+        "wall_seconds": float(wall_seconds) if wall_seconds is not None else None,
+        "session_id": sess,
+        "received_bytes": received_bytes,
+        "received_lines": received_lines,
+        "last_event_type": last_event_type if last_event_type is not None else None,
+        "last_event_ts": last_event_ts,
+        "finish_reason": finish_reason,
+        "output_tokens_received": int(output_tokens_received or 0),
+        "input_tokens_received": int(input_tokens_received or 0),
+        "reasoning_tokens_received": int(reasoning_tokens_received or 0),
+        "truncations_seen": int(truncations_seen or 0),
+        "correlation": {
+            "proxy_log_dir": "runs",
+            "ts_window_utc": [
+                _iso_utc(ts_start) if ts_start is not None else None,
+                _iso_utc(ts_end),
+            ],
+            "match_key": f"{run_label}|{attempt or 'none'}|{sess or 'none'}",
+        },
+    }
+
+
 DEFAULT_REASONING_EFFORT = "low"  # bounded default; relay attempts cap at 600s; override via WEVIBE_BENCH_REASONING_EFFORT
 
 # Canonical budget-bounded attempt ceiling.
@@ -648,8 +731,19 @@ class BackgammonRunner(AgentRunner):
         self.reasoning_effort = resolved_reasoning_effort
         self.proxy_base_url = None if proxy_base_url is None else str(proxy_base_url)
         self.proxy_token = None if proxy_token is None else str(proxy_token)
+        # Live-view topology: fixed serve ports for the persistent per-cell opencode
+        # serve, defaulted from env consistent with config.RunConfig (mirror of the
+        # hub_url/mcp_recall_url env-override seam).
+        self.serve_host_port = int(os.environ.get("WEVIBE_BENCH_SERVE_HOST_PORT") or "4096")
+        self.serve_container_port = int(os.environ.get("WEVIBE_BENCH_SERVE_CONTAINER_PORT") or "4096")
         self.session_id = None if session_id is None else str(session_id)
         self.agent = str(agent)
+
+        # Serve-drive wiring (WO-WATCH-1E): the persistent per-cell opencode serve
+        # client and its cell-scoped session id, created at cell open when a live
+        # serve is up. None until/unless a serve session is established.
+        self._serve_client: ServeClient | None = None
+        self._cell_session_id: str | None = None
 
         self._effective_output_price_per_1m = 0.0
         self._cache_write_allowance_usd = 0.0
@@ -893,6 +987,52 @@ class BackgammonRunner(AgentRunner):
                     raise RuntimeError("docker worker context did not yield a DockerCell")
                 active_cell = managed_cell
 
+                # Live-view topology: start the persistent opencode serve for this
+                # cell immediately after the container is entered, before the first
+                # scored `opencode run`. Unconditional for both memory arms.
+                active_cell.start_serve()
+                self._progress(
+                    "PROGRESS step=live-view "
+                    f"serve=http://127.0.0.1:{self.serve_host_port} "
+                    f"attach_cmd='opencode attach http://127.0.0.1:{self.serve_host_port}'"
+                )
+
+                # WO-WATCH-1E: establish the serve-drive session and surface it so
+                # the founder can attach without hunting. A failure here only
+                # disables serve-drive for this cell (the stdout fallback remains
+                # authoritative); it is never a scored-cell abort.
+                serve_base = f"http://127.0.0.1:{self.serve_host_port}"
+                self._serve_client = ServeClient(serve_base)
+                cell_session_id: str | None = None
+                try:
+                    cell_session_id = self._serve_client.create_session()
+                except ServeClientError as exc:
+                    self._progress(
+                        f"PROGRESS step=live-view session_create_failed detail={exc}"
+                    )
+                self._cell_session_id = cell_session_id
+                self._progress(
+                    "PROGRESS step=live-view "
+                    f"session_id={cell_session_id or 'none'} serve={serve_base} "
+                    f"attach_cmd='{founder_attach_command(self.serve_host_port)}'"
+                )
+                if cell_session_id is not None:
+                    try:
+                        marker = worktree.parent / "live-view.txt"
+                        marker.write_text(
+                            f"session_id={cell_session_id}\n"
+                            f"attach_cmd=opencode attach http://127.0.0.1:{self.serve_host_port}\n"
+                            f"serve=http://127.0.0.1:{self.serve_host_port}\n",
+                            encoding="utf-8",
+                        )
+                        self._progress(
+                            f"PROGRESS step=live-view marker={marker}"
+                        )
+                    except OSError as exc:
+                        self._progress(
+                            f"PROGRESS step=live-view marker_write_failed detail={exc}"
+                        )
+
                 task_prompt = self._build_task_prompt(injected_memory=injected_memory)
                 self._progress(
                     f"PROGRESS run_label={run_label} step=worker-launch-start mode=real model={self.model} "
@@ -940,20 +1080,49 @@ class BackgammonRunner(AgentRunner):
                         text=task_prompt,
                     )
                     self._write_worker_permission_config(worktree=worktree)
-                    first_run = self._run_opencode_with_zero_tool_resumes(
-                        active_cell=active_cell,
-                        initial_inner=initial_inner,
-                        pure=pure,
-                        worktree=worktree,
-                        events_path=events_path,
-                        env=run_env,
-                        run_label=run_label,
-                        phase="initial",
-                        fallback_session_id=None,
-                        prior_cost_usd=cell_cost_usd,
-                        kill_hook=active_cell.kill_worker_processes,
-                        stdin_text=task_prompt,
-                    )
+                    first_run = None
+                    if self._serve_client is not None and self._cell_session_id is not None:
+                        try:
+                            first_run = self._run_opencode_serve(
+                                active_cell=active_cell,
+                                serve_client=self._serve_client,
+                                session_id=self._cell_session_id,
+                                prompt=task_prompt,
+                                run_label=run_label,
+                                phase="initial",
+                                prior_cost_usd=cell_cost_usd,
+                                timeout_s=self.run_timeout_s,
+                                kill_hook=active_cell.kill_worker_processes,
+                            )
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=serve-drive "
+                                f"phase=initial status=used"
+                            )
+                        except Exception as exc:  # noqa: BLE001 - fall back to stdout path.
+                            self._progress(
+                                f"PROGRESS run_label={run_label} step=serve-drive "
+                                f"phase=initial status=fallback reason=exception detail={exc}"
+                            )
+                            first_run = None
+                    if first_run is None:
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=serve-drive "
+                            f"phase=initial status=fallback reason=stdout"
+                        )
+                        first_run = self._run_opencode_with_zero_tool_resumes(
+                            active_cell=active_cell,
+                            initial_inner=initial_inner,
+                            pure=pure,
+                            worktree=worktree,
+                            events_path=events_path,
+                            env=run_env,
+                            run_label=run_label,
+                            phase="initial",
+                            fallback_session_id=None,
+                            prior_cost_usd=cell_cost_usd,
+                            kill_hook=active_cell.kill_worker_processes,
+                            stdin_text=task_prompt,
+                        )
                     attempt_costs_usd[1] = first_run.cost_usd
                     observed_attempt_costs.append(first_run.cost_usd)
                     cell_cost_usd += first_run.cost_usd
@@ -1718,6 +1887,8 @@ class BackgammonRunner(AgentRunner):
         cell_config.proxy_base_url = self.proxy_base_url
         cell_config.proxy_token = self.proxy_token
         cell_config.worker_logs_dir = worktree.parent / "worker-logs"
+        cell_config.serve_host_port = self.serve_host_port
+        cell_config.serve_container_port = self.serve_container_port
         return cell_config
 
     def _init_worktree_git(self, *, worktree: Path) -> None:
@@ -1921,6 +2092,194 @@ class BackgammonRunner(AgentRunner):
             raise RuntimeError(f"gate report must be an object: {report_path}")
         return payload
 
+    def _run_opencode_serve(
+        self,
+        *,
+        active_cell: DockerCell,
+        serve_client: ServeClient,
+        session_id: str,
+        prompt: str,
+        run_label: str,
+        phase: str,
+        prior_cost_usd: float = 0.0,
+        timeout_s: float = 5400.0,
+        kill_hook: Callable[[], None] | None = None,
+    ) -> _OpencodeRunStats:
+        """Drive ONE scoring attempt through the persistent opencode serve.
+
+        WO-WATCH-1E serve-drive path: enqueue the prompt via
+        ``POST /session/{sid}/prompt_async``, wait for the session to go idle
+        (``GET /session/status`` busy->idle), then meter from the persisted
+        transcript ``GET /session/{sid}/message`` via :func:`serve_client.metrics`.
+        Never calls ``/session/{sid}/abort`` and never kills the serve (the
+        per-attempt kill hook is serve-PID-scoped and survives by design).
+
+        Unlike :meth:`_run_opencode` (subprocess stdout parsing, retained as the
+        fallback), this path does NOT re-raise transport failures: a send error
+        returns an ``_OpencodeRunStats`` with ``exit_code=1`` so the caller's
+        budget/gating logic decides. ``session_id`` here is the serve-side session
+        id (persisted on the serve); the container-side ``opencode run`` session
+        id is NOT applicable to this path.
+        """
+        if kill_hook is None:
+            kill_hook = active_cell.kill_worker_processes
+
+        # WO-WATCH-1E per-attempt evidence correlation id + start timestamp,
+        # matching the stdout path's ``state`` fields. The evidence file path is
+        # derived from the cell's worktree when available (real DockerCell);
+        # otherwise it falls back to the system temp dir so the serve-drive
+        # path stays hermetic (the only DockerCell surface it depends on is
+        # ``kill_worker_processes``) without polluting the source tree.
+        attempt_id = f"{run_label}-{phase}-{uuid.uuid4().hex[:12]}"
+        ts_start_epoch_ms = int(time.time() * 1000)
+        try:
+            cell_worktree = Path(active_cell.config.worktree).expanduser().resolve()
+        except (AttributeError, TypeError):
+            cell_worktree = None
+        evidence_dir = cell_worktree.parent if cell_worktree is not None else Path(tempfile.gettempdir())
+        evidence_path = evidence_dir / TRUNCATION_EVIDENCE_FILENAME
+
+        # 1) Enqueue the prompt asynchronously.
+        try:
+            serve_client.send_prompt(session_id, prompt)
+        except ServeClientError as exc:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                f"status=send_error detail={exc}"
+            )
+            return _OpencodeRunStats(
+                input_tokens=0,
+                output_tokens=0,
+                reasoning_tokens=0,
+                turns=0,
+                session_id=session_id,
+                killed_reason=None,
+                exit_code=1,
+                cost_usd=0.0,
+            )
+
+        # 2) Wait for completion (busy->idle). The serve-side generation may
+        #    continue briefly after idle returns; do NOT wait further.
+        idle = serve_client.wait_idle(session_id, timeout_s=timeout_s)
+        killed_reason: str | None = None
+        exit_code = 0
+        if not idle:
+            killed_reason = "run_timeout"
+            exit_code = 1
+            try:
+                kill_hook()
+            except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=kill_hook_error detail={exc}"
+                )
+            self._progress(
+                f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                f"status=timeout timeout_s={timeout_s:.1f} session_id={session_id}"
+            )
+
+        # 3) Pull metrics from the persisted transcript.
+        try:
+            m = serve_client.metrics(session_id)
+        except ServeClientError as exc:
+            # Metering failed after completion; report a transport-style exit and
+            # let the caller decide (fall through to stdout path on retry).
+            self._progress(
+                f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                f"status=metrics_error detail={exc}"
+            )
+            m = {
+                "turns": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_usd": 0.0,
+                "truncations": 0,
+                "error_parts": 0,
+            }
+            if exit_code == 0:
+                exit_code = 1
+
+        terminal, reason = classify_transport_anomaly(m)
+        turn_anomalies: tuple[dict[str, Any], ...] = ()
+        if terminal is not None:
+            if terminal == "truncated":
+                mapped_terminal = TURN_TERMINAL_TRUNCATED
+            elif terminal == "transport_error":
+                mapped_terminal = TURN_TERMINAL_TRANSPORT_ERROR
+            else:
+                mapped_terminal = terminal
+            turn_anomalies = (
+                {
+                    "phase": str(phase),
+                    "turn_index": int(m.get("turns", 0)),
+                    "terminal": str(mapped_terminal),
+                    "reason": str(reason or ""),
+                    "tool_uses": 0,
+                    "file_writes": 0,
+                    "input_tokens": int(m.get("input_tokens", 0) or 0),
+                    "output_tokens": int(m.get("output_tokens", 0) or 0),
+                    "reasoning_tokens": int(m.get("reasoning_tokens", 0) or 0),
+                    "cost_usd": float(m.get("cost_usd", 0.0) or 0.0),
+                    "tokens_unmetered": False,
+                    "wall_seconds": None,
+                    "session_id": session_id,
+                },
+            )
+            self._write_truncation_evidence(
+                record=_build_truncation_evidence(
+                    attempt_id=attempt_id,
+                    run_label=run_label,
+                    phase=phase,
+                    terminal=mapped_terminal,
+                    reason=str(reason or ""),
+                    ts_start_epoch_ms=ts_start_epoch_ms,
+                    ts_end_epoch_ms=int(time.time() * 1000),
+                    wall_seconds=None,
+                    session_id=session_id,
+                    received_bytes=None,
+                    received_lines=None,
+                    last_event_type=None,
+                    last_event_ts=None,
+                    finish_reason=m.get("last_finish"),
+                    output_tokens_received=int(m.get("output_tokens", 0) or 0),
+                    input_tokens_received=int(m.get("input_tokens", 0) or 0),
+                    reasoning_tokens_received=int(m.get("reasoning_tokens", 0) or 0),
+                    truncations_seen=int(m.get("truncations", 0) or 0),
+                ),
+                evidence_path=evidence_path,
+            )
+
+        self._progress(
+            f"PROGRESS run_label={run_label} step=serve-drive-end phase={phase} "
+            f"turns={m.get('turns', 0)} input={m.get('input_tokens', 0)} "
+            f"output={m.get('output_tokens', 0)} reasoning={m.get('reasoning_tokens', 0)} "
+            f"session_id={session_id} cost_usd={float(m.get('cost_usd', 0.0) or 0.0):.4f} "
+            f"status={'ok' if idle else 'timeout'}"
+        )
+
+        return _OpencodeRunStats(
+            input_tokens=int(m.get("input_tokens", 0) or 0),
+            output_tokens=int(m.get("output_tokens", 0) or 0),
+            reasoning_tokens=int(m.get("reasoning_tokens", 0) or 0),
+            turns=int(m.get("turns", 0) or 0),
+            session_id=session_id,
+            killed_reason=killed_reason,
+            exit_code=exit_code,
+            cost_usd=float(m.get("cost_usd", 0.0) or 0.0),
+            budget_stop_detected=False,
+            budget_stop_signature=None,
+            truncations=int(m.get("truncations", 0) or 0),
+            zero_tool_turns=0,
+            terminal_zero_tool_turn=False,
+            zero_tool_resumes=0,
+            zero_tool_turn_honest_fail=False,
+            resume_count=0,
+            turn_anomalies=turn_anomalies,
+            unmetered_turns=0,
+            unmetered_turn_wall_s=0.0,
+        )
+
     def _run_opencode(
         self,
         *,
@@ -1963,7 +2322,20 @@ class BackgammonRunner(AgentRunner):
             "unretried_anomaly": None,
             "unmetered_turns": 0,
             "unmetered_turn_wall_s": 0.0,
+            # WO-WATCH-1E evidence capture fields: a per-attempt correlation id
+            # and stream counters the stdout reader updates so a real
+            # truncation/transport-error is self-documenting at capture time.
+            "attempt_id": None,
+            "ts_start_epoch_ms": None,
+            "bytes_read": 0,
+            "lines_read": 0,
+            "last_event_type": None,
+            "last_event_ts": None,
         }
+        if not state["attempt_id"]:
+            state["attempt_id"] = f"{run_label}-{phase}-{uuid.uuid4().hex[:12]}"
+            state["ts_start_epoch_ms"] = int(time.time() * 1000)
+        evidence_path = worktree.parent / TRUNCATION_EVIDENCE_FILENAME
         stderr_tail: collections.deque[str] = collections.deque(maxlen=120)
         reader_failures: list[str] = []
 
@@ -2054,11 +2426,17 @@ class BackgammonRunner(AgentRunner):
                             continue
 
                         sid = event.get("sessionID")
+                        event_type = event.get("type")
+                        event_ts = event.get("timestamp")
                         with state_lock:
+                            state["bytes_read"] = self._to_int(state.get("bytes_read", 0)) + len(line.encode("utf-8"))
+                            state["lines_read"] = self._to_int(state.get("lines_read", 0)) + 1
+                            state["last_event_type"] = event_type
+                            if event_ts is not None:
+                                state["last_event_ts"] = event_ts
                             if sid and not state["session_id"]:
                                 state["session_id"] = str(sid)
 
-                        event_type = event.get("type")
                         if event_type == "error":
                             signal = self._budget_stop_signature_from_event(event)
                             if signal is not None:
@@ -2100,6 +2478,16 @@ class BackgammonRunner(AgentRunner):
                                     tokens_unmetered=True,
                                     wall_seconds=wall_s,
                                     session_id=state.get("session_id"),
+                                )
+                                self._capture_truncation_evidence(
+                                    state=state,
+                                    run_label=run_label,
+                                    phase=phase,
+                                    terminal=terminal,
+                                    reason=error_reason or "error_event",
+                                    wall_seconds=wall_s,
+                                    finish_reason=None,
+                                    evidence_path=evidence_path,
                                 )
                                 state["active_step_open"] = False
                                 state["active_step_open_ts_ms"] = None
@@ -2196,6 +2584,16 @@ class BackgammonRunner(AgentRunner):
                                     tokens_unmetered=unmetered,
                                     wall_seconds=wall_s,
                                     session_id=state.get("session_id"),
+                                )
+                                self._capture_truncation_evidence(
+                                    state=state,
+                                    run_label=run_label,
+                                    phase=phase,
+                                    terminal=TURN_TERMINAL_TRUNCATED,
+                                    reason=str(reason),
+                                    wall_seconds=wall_s,
+                                    finish_reason=str(reason),
+                                    evidence_path=evidence_path,
                                 )
                                 state["terminal_zero_tool_turn"] = False
                                 self._progress(
@@ -2445,6 +2843,16 @@ class BackgammonRunner(AgentRunner):
                     tokens_unmetered=True,
                     wall_seconds=wall_s,
                     session_id=state.get("session_id"),
+                )
+                self._capture_truncation_evidence(
+                    state=state,
+                    run_label=run_label,
+                    phase=phase,
+                    terminal=TURN_TERMINAL_STREAM_DIED_OPEN,
+                    reason="no_terminal_signal",
+                    wall_seconds=wall_s,
+                    finish_reason=None,
+                    evidence_path=evidence_path,
                 )
                 state["active_step_open_ts_ms"] = None
                 state["active_tool_uses"] = 0
@@ -2931,6 +3339,65 @@ class BackgammonRunner(AgentRunner):
             anomalies[int(index)]["retried"] = True
             anomalies[int(index)]["retry_kind"] = str(retry_kind)
         state["unretried_anomaly"] = None
+
+    def _capture_truncation_evidence(
+        self,
+        *,
+        state: dict[str, Any],
+        run_label: str,
+        phase: str,
+        terminal: str,
+        reason: str,
+        wall_seconds: float | None,
+        finish_reason: Any = None,
+        evidence_path: Path,
+    ) -> None:
+        """Build + persist one WO-WATCH-1E evidence record from ``state``.
+
+        Caller must hold ``state_lock`` so the counters read a consistent
+        snapshot. Best-effort: never raises, never affects scoring or metering.
+        READ-ONLY against the proxy — records correlation fields only.
+        """
+        try:
+            record = _build_truncation_evidence(
+                attempt_id=state.get("attempt_id"),
+                run_label=run_label,
+                phase=phase,
+                terminal=terminal,
+                reason=reason,
+                ts_start_epoch_ms=state.get("ts_start_epoch_ms"),
+                ts_end_epoch_ms=int(time.time() * 1000),
+                wall_seconds=wall_seconds,
+                session_id=state.get("session_id"),
+                received_bytes=state.get("bytes_read"),
+                received_lines=state.get("lines_read"),
+                last_event_type=state.get("last_event_type"),
+                last_event_ts=state.get("last_event_ts"),
+                finish_reason=finish_reason,
+                output_tokens_received=self._to_int(state.get("sum_output", 0)),
+                input_tokens_received=self._to_int(state.get("max_input", 0)),
+                reasoning_tokens_received=self._to_int(state.get("sum_reasoning", 0)),
+                truncations_seen=self._to_int(state.get("truncations", 0)),
+            )
+            self._write_truncation_evidence(record=record, evidence_path=evidence_path)
+        except Exception as exc:  # noqa: BLE001 - evidence capture must never affect scoring.
+            _LOG.warning(
+                "truncation evidence capture failed run_label=%s phase=%s terminal=%s: %s",
+                run_label,
+                phase,
+                terminal,
+                exc,
+            )
+
+    @staticmethod
+    def _write_truncation_evidence(*, record: dict[str, Any], evidence_path: Path) -> None:
+        """Append one evidence record as a JSON line. Lazy: creates on first call."""
+        try:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            with evidence_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=str) + "\n")
+        except Exception as exc:  # noqa: BLE001 - evidence write must never affect scoring.
+            _LOG.warning("truncation evidence write failed %s: %s", evidence_path, exc)
 
     def _budget_stop_signature_from_event(self, event: dict[str, Any]) -> str | None:
         if str(event.get("type", "")).strip().lower() != "error":

@@ -1954,8 +1954,9 @@ def _print_json(payload: Any) -> None:
 def _discover_bench_ports() -> list[int]:
     """Best-effort discovery of bench service ports from config URLs.
 
-    Returns the hub and mcp-recall ports parsed from ``RunConfig``; falls back
-    to an empty list when not discoverable (the reaper then skips port asserts).
+    Returns the hub, mcp-recall, and live-view serve host ports from
+    ``RunConfig``; falls back to an empty list when not discoverable (the
+    reaper then skips port asserts).
     """
     ports: list[int] = []
     rc = config.RunConfig()
@@ -1969,6 +1970,12 @@ def _discover_bench_ports() -> list[int]:
                     ports.append(port)
         except (ValueError, AttributeError):
             continue
+    # Live-view serve host port (WO-WATCH-1E): ONE persistent `opencode serve`
+    # per cell is published on a fixed host port (RunConfig.serve_host_port,
+    # default 4096). The reaper asserts it is clear at teardown so a leaked
+    # serve is caught, not just the hub/mcp ports.
+    if rc.serve_host_port > 0:
+        ports.append(rc.serve_host_port)
     return sorted(set(ports))
 
 

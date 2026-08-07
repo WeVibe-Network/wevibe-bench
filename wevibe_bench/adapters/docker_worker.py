@@ -9,7 +9,10 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 from typing import Callable
+import urllib.error
+import urllib.request
 
 from wevibe_bench.config import RunConfig
 
@@ -185,6 +188,10 @@ class DockerCellConfig:
     output_token_max: int | None = None
     worker_logs_dir: Path | None = None
     session_db_host_path: Path | None = None
+    # Live-view topology: persistent `opencode serve` ports. Fixed publish host:4096 ->
+    # container:4096 (opencode serve default). Wired from RunConfig by the harness.
+    serve_host_port: int = 4096
+    serve_container_port: int = 4096
 
 
 class DockerCell:
@@ -199,6 +206,7 @@ class DockerCell:
         self.config = config
         self.container_name = config.container_name
         self.container_id: str | None = None
+        self.serve_pid: int | None = None  # container-side PID of the persistent opencode serve
         self._progress_cb = progress
 
     def __enter__(self) -> DockerCell:
@@ -300,8 +308,24 @@ class DockerCell:
         if not self.container_name:
             return
 
-        kill_cmd = self.exec_argv(["sh", "-lc", "pkill -9 -f '[o]pencode' || true"])
-        self._progress(f"PROGRESS worker-process-kill start name={self.container_name}")
+        if self.serve_pid is not None:
+            # Reaper A (ABORT-path kill hook): kill every opencode process EXCEPT the
+            # persistent live-view serve (container-side PID). The per-attempt
+            # `docker exec opencode run` clients are killed; the serve survives.
+            serve_pid = int(self.serve_pid)
+            kill_script = (
+                "pids=$(pgrep -f '[o]pencode' || true); "
+                f"for p in $pids; do if [ \"$p\" != \"{serve_pid}\" ]; then "
+                "kill -9 \"$p\" 2>/dev/null || true; fi; done"
+            )
+            kill_cmd = self.exec_argv(["sh", "-lc", kill_script])
+            self._progress(
+                f"PROGRESS worker-process-kill start name={self.container_name} "
+                f"preserve_serve_pid={serve_pid}"
+            )
+        else:
+            kill_cmd = self.exec_argv(["sh", "-lc", "pkill -9 -f '[o]pencode' || true"])
+            self._progress(f"PROGRESS worker-process-kill start name={self.container_name}")
 
         try:
             killed = subprocess.run(
@@ -337,9 +361,116 @@ class DockerCell:
             f"PROGRESS worker-process-kill done name={self.container_name} detail={detail or 'pkill-ok'}"
         )
 
+    def start_serve(self) -> None:
+        """Start the persistent live-view `opencode serve` inside the container.
+
+        Launches a backgrounded `opencode serve` (nohup, inside the container) and
+        records its container-side PID. Survives the per-attempt `docker exec opencode
+        run` subprocess AND the per-attempt process-group SIGKILL: the serve is a
+        sibling `docker exec` (its own PID/group), not a descendant of the killed
+        `docker exec` PID. Reachability timeout is non-fatal by design.
+        """
+        if self.serve_pid is not None:
+            self._progress(
+                f"PROGRESS serve start skip reason=already pid={self.serve_pid}"
+            )
+            return
+
+        host_port = int(self.config.serve_host_port)
+        container_port = int(self.config.serve_container_port)
+        script = (
+            f"nohup opencode serve --hostname 0.0.0.0 --port {container_port} "
+            "--print-logs >/tmp/opencode-serve.log 2>&1 & echo $!"
+        )
+        try:
+            started = subprocess.run(
+                self.exec_argv(["sh", "-lc", script]),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            self._progress(
+                f"PROGRESS serve start fail name={self.container_name} reason=docker_cli_missing"
+            )
+            raise RuntimeError("docker CLI not found in PATH") from None
+        except Exception as exc:  # noqa: BLE001 - surface full failure detail.
+            self._progress(
+                f"PROGRESS serve start fail name={self.container_name} reason=exception detail={exc}"
+            )
+            raise RuntimeError(
+                f"docker exec serve-start failed for name={self.container_name}: {exc}"
+            ) from exc
+
+        serve_pid_raw = (started.stdout or "").strip()
+        if started.returncode != 0 or not serve_pid_raw.isdigit():
+            self._progress(
+                f"PROGRESS serve start fail name={self.container_name} rc={started.returncode} "
+                f"detail={_result_detail(started)}"
+            )
+            raise RuntimeError(
+                f"docker exec serve-start failed name={self.container_name} "
+                f"rc={started.returncode} detail={_result_detail(started)}"
+            )
+
+        self.serve_pid = int(serve_pid_raw)
+
+        # Reachability wait on the host-published port. Timeout is NON-FATAL: the
+        # harness surfaces it later; we never raise on unreachable.
+        deadline = time.monotonic() + 30.0
+        reachable = False
+        while time.monotonic() < deadline:
+            if self._serve_reachable(host_port):
+                reachable = True
+                break
+            time.sleep(0.5)
+        status = "ok" if reachable else "unreachable"
+        self._progress(
+            f"PROGRESS serve start {status} host=127.0.0.1 host_port={host_port} "
+            f"container_port={container_port} pid={self.serve_pid}"
+        )
+
+    @staticmethod
+    def _serve_reachable(host_port: int) -> bool:
+        """Probe the host-published serve endpoint; True on HTTP 200, else False."""
+        url = f"http://127.0.0.1:{host_port}/session"
+        try:
+            with urllib.request.urlopen(url, timeout=1.0) as resp:
+                return resp.status == 200
+        except (urllib.error.URLError, OSError):
+            return False
+
+    def stop_serve(self) -> None:
+        """Kill ONLY the persistent serve inside the container (by recorded PID).
+
+        Guarded by serve_pid set. Never raises; teardown must remain clean.
+        """
+        if self.serve_pid is None:
+            return
+        serve_pid = int(self.serve_pid)
+        try:
+            subprocess.run(
+                self.exec_argv(["sh", "-lc", f"kill -9 {serve_pid} 2>/dev/null || true"]),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self._progress(f"PROGRESS serve stop ok name={self.container_name} pid={serve_pid}")
+        except Exception as exc:  # noqa: BLE001 - stop_serve must never raise.
+            self._progress(
+                f"PROGRESS serve stop fail name={self.container_name} pid={serve_pid} detail={exc}"
+            )
+        finally:
+            self.serve_pid = None
+
     def teardown(self) -> None:
         if not self.container_name:
             return
+
+        # Stop the persistent live-view serve BEFORE removing the container (a
+        # running serve inside the container cannot survive `docker rm -f`'s own
+        # teardown, and we must not orphan the published host port).
+        self.stop_serve()
 
         self._capture_worker_logs_pre_teardown()
 
@@ -762,6 +893,10 @@ def _build_run_argv(
             ]
         )
 
+    # Live-view topology: publish the fixed serve port unconditionally (both arms).
+    # One persistent `opencode serve` per cell binds container:serve_container_port,
+    # reached by the founder at host:serve_host_port. MUST land before the container command.
+    run_cmd.extend(["-p", f"{config.serve_host_port}:{config.serve_container_port}"])
     run_cmd.extend([config.image, "sleep", "infinity"])
     return run_cmd
 
