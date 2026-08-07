@@ -57,8 +57,8 @@ its `name` field may change.
 
 **The campaign sequence, in full:**
 
-> **test** (all green) → **smoke** (all green) → **wipe** (once) → **bench** → **extract** →
-> **bench** → **extract** → continue
+> **test** (all green) → **stack smoke** (all green) → **wipe** (once) → **OFF cell** → **extract** →
+> **ON smoke** (unscored, hard gate) → **first scored ON cell** → **extract** → continue
 
 Each stage is **its own invocation**. Nothing here is nested inside anything else. If a procedure
 cannot be expressed as one of the stages below, it is not a procedure — it is drift, and it gets
@@ -78,8 +78,20 @@ Targets and conventions: §14.
 2. Run the smoke.
 3. Check the smoke output.
 
-A **one-time preflight before the campaign**, not a per-cell step. It is re-run after a pipeline
-change (rule 5.1) — never between cells of an unchanged pipeline. Contents: §6.
+The **stack smoke** is a **one-time preflight before the campaign**, not a per-cell step. It is
+re-run after a pipeline change (rule 5.1) — never between cells of an unchanged pipeline. Contents: §6.
+
+The **ON smoke** is the delivery-verification gate and runs at a **fixed mid-campaign point**: after
+the first OFF-cell extraction (post-wipe), before the first scored ON cell — never skipped, never
+merged into that first scored ON cell. Contents: §6.
+
+**Why the ON smoke sits here and not pre-wipe.** A post-wipe corpus is empty, so an ON invocation
+immediately after the wipe recalls nothing and certifies nothing. A pre-wipe smoke proves a seam the
+wipe then destroys, because the epoch-key mismatch is specifically a post-wipe failure that surfaces
+hours later looking like a recall bug. The ON smoke must therefore run after the wipe AND after the
+first OFF-cell extraction (which builds a non-empty corpus), as an unscored hard gate before the
+first scored ON cell. It is neither skipped nor merged into the first scored ON cell — merging makes
+a broken seam indistinguishable from a null result.
 
 Gate: all green.
 
@@ -121,11 +133,15 @@ integrity gate and the smart-leader procedure are §9.
 
 ### Consequences — these follow from the sequence and are not separately negotiable
 
-- **The first bench after the wipe is necessarily OFF.** The corpus is empty by construction.
+- **The first bench after the wipe is necessarily OFF — and it is UNSCORED.** The corpus is empty
+  by construction. This first OFF cell exists to build a non-empty corpus so the ON smoke (which
+  follows its extraction) has something to recall.
 - **One org for the whole campaign.** Any scheme assigning an org per arm or per model is stale and
   wrong: it breaks corpus accumulation, which is the only thing being measured.
 - **Mode toggles exactly one thing** — whether injection runs before attempt 1 (RC-4).
-- **Smoke and wipe are not preconditions inside `bench`.** The operator runs each stage.
+- **Smoke and wipe are separate invocations, never nested inside `bench`.** The operator runs each
+  stage. The ON smoke is additionally a **hard gate** on the first scored ON cell: it is a separate
+  stage run **between** cells, not inside a bench.
 
 **Not every entrypoint above exists yet.** This section is the contract they are built to. See §11.
 
@@ -168,10 +184,10 @@ by contract on OFF cells are not a branch; anything else is. This is enforceable
 fails on any mode-conditional branch outside the injection call site, and that test closes the
 entire class of "the arms were not comparable" defects that has voided runs before.
 
-The ON delivery-verification gate (runner.py:340-350) is NOT a second branch — it runs only inside
-the one permitted injection branch (`if "on" in wave.memory_modes`, runner.py:337), and OFF has no
-equivalent by design. It changes no computed metric; it only affects which ON cells are scored
-(not_scored), so the per-arm numbers stay comparable.
+The ON delivery-verification gate (`index_ready`, scripts/run_cumulative.py:1255) is NOT a second
+branch — it runs only inside the one permitted injection branch, and OFF has no equivalent by
+design. It changes no computed metric; it only affects which ON cells are scored (not_scored), so
+the per-arm numbers stay comparable.
 
 **RC-5 · One run directory, one manifest, one status stream.** Every run writes a manifest — model
 identity as reported by the API, mode, org, commit, **worker image fingerprint**, seed, template
@@ -195,7 +211,7 @@ reasoning template referenced in §12/§17.
 operator interrupt. The reaper kills the run's process group, reaps orphaned Playwright/node
 children, brings the compose project down, asserts no listener remains on the bench ports, and
 **reports what it killed.** A silent reaper is not a reaper. The gate path spawns real
-`node report.mjs` Playwright subprocesses at `backgammon.py:1789-1795`.
+`node report.mjs` Playwright subprocesses at `backgammon.py:1877` (`_run_gate_report`).
 
 **RC-7 · The stack never selects a model.** Identity is read from the API response and recorded in
 the manifest. No model name in any bench config. No identity gate. No roster. Procedure: run an OFF
@@ -309,13 +325,16 @@ reading.
 | Extraction-attempt observability distinguishes "never invoked" from "gate cut it off" | all integrity claims |
 | Reasoning cap present in the outbound request, not deleted by the proxy | any cell that could produce the void signature above |
 
-**ON smoke** — run once per pipeline change; gates every ON cell. Asserts non-null on the actual
+**ON smoke** — the delivery-verification gate; gates every ON cell. It runs at a **fixed campaign
+point**: after the first OFF-cell extraction (post-wipe), before the first scored ON cell (matching
+§2). It is additionally re-run after any pipeline change (rule 5.1). Asserts non-null on the actual
 worker image, through the real transport: `injected_count`, `injected_block_chars`,
 `injected_block_est_tokens`, `consumer_injected_count`.
 
 These four are **null BY CONTRACT on OFF cells** (`memory_mode != "on"` ⇒ `None`). An OFF cell
 therefore proves nothing about them, and a null there is not a defect. Running ON without this smoke
-is exactly what voided the paid R2 campaign.
+is exactly what voided the paid R2 campaign. This is why the smoke sits after the wipe, matching §2:
+a pre-wipe smoke proves a seam the wipe then destroys.
 
 **The `missing_telemetry_seams` list is itself an instrument.** In R2 it named seven seams, four of
 which had real values in the same record. A list that over-reports trains the operator to ignore it.
@@ -549,7 +568,7 @@ Fixed defects are not listed. They are in git.
 | **D-PRERUN-PAIRING** | 🟢 CLOSED by fd427759 + e285ece | `fd427759` retires the prerun arm-pairing + consumer-bridge paths; `e285ece` makes it strictly serial single-consumer with no concurrency. | §2, §3 |
 | **D-MODEL-ALIAS-RESIDUE** | 🟢 CLOSED by 8bdcabc + 186d34c | `8bdcabc` removes 4 dead model-registry aliases; `186d34c` removes the dead paid-era alias. The mode-drift work that gated this is cleared. | RC-7 |
 | **D-ALIAS-RESIDUE** | 🟡 OPEN | The proxy still ships a poller alias plus bench aliases referenced by no bench code. | deletion hygiene |
-| **D-DOC-DRIFT** | 🟡 OPEN | `AGENTS.md` is always-applied and still carries a stale **org-per-arm** scheme marked BINDING, contradicting §2, plus poller-era stanzas. It must be amended, not merely left behind. | RC-8 |
+| **D-DOC-DRIFT** | 🟢 CLOSED by WO-CONSOLIDATE-1 | `AGENTS.md` no longer carries the stale **org-per-arm** scheme or poller-era stanzas; it is now a pointer to the card (§2-consistent). | RC-8 |
 | **D-TRACE-SEMANTICS** | 🟡 OPEN | Per-consumer attribution survives only as a random trace nanoid with no role semantics. | log-based attribution |
 | **D-PROXY-UNTESTED** | 🟡 OPEN | The proxy has no git remote and no tests while sitting on the critical path for every bench call. | campaign safety |
 | **D-RECALL-EMPTY-KEYWORDS** | 🟢 CLOSED by 33fe59a (wevibe-server) | Hub-side `fix(serves): accept vector-only serves with empty matched_keywords` — the serve endpoint now accepts vector-only serves with empty `matched_keywords`; the dead 400-mapping clause is removed. | ON-cell attribution |
@@ -648,8 +667,9 @@ target does not exercise it.
 **Gates must resolve the entrypoint from the artifact**, never assume a fixed server filename — the
 build pipeline may change it. A hardcoded filename here is what produced a whole dead campaign cell.
 
-**Verified baseline: 420 passed / 0 failed / 1 skipped / 0 errors / 421 collected, in 20.21s**
-on combined HEAD `350f899` (reconciled, WO-BASELINE-2; earlier `39497d5` = 411 passed). Any
+**Verified baseline: 442 passed / 0 failed / 1 skipped / 0 errors / 443 collected, in 10.09s**
+on HEAD `aba1578` (WO-CONSOLIDATE-1). collected = 443 = passed + skipped + failed + errors; the
+9 slow-marked tests are deselected by `-m "not slow"` (443/452 collected, 9 deselected). Any
 change must return to this or account for the difference.
 
 ---
@@ -720,15 +740,16 @@ baseline reconciled to `350f899` · template low-context proof PASSED (WO-TEMPLA
 2. **High-context template probe to ≥100K tokens** (§12): the low-context proof passed; the
    high-context behaviour this probe measures is still unverified. Only after it passes does the
    template get FREEZEd.
-3. **Stack smoke,** then **ON smoke** (§6).
+3. **Stack smoke** (§6) as the pre-campaign preflight; the **ON smoke** runs at its fixed point later — after the first OFF-cell extraction (post-wipe), before the first scored ON cell.
 4. **FREEZE the template** (§12), only after the high-context probe passes.
 
 > **Terminology:** §12/§17 "template" = the **agent reasoning template** (a different artifact from
 > the task prompt/scaffold). The **task-template freeze** — the backgammon scaffold hash that the
 > run path fails closed on — is recorded separately at RC-5a above.
-5. **Wipe once** — the full four-step procedure (§2). Then bench OFF → extract → bench ON → extract,
-   continuing until performance drops or something needs Walter. A model switch is one of the things
+5. **Wipe once** — the full four-step procedure (§2). Then first OFF cell (unscored) → extract →
+   ON smoke (unscored, hard gate) → first scored ON cell → extract, continuing until performance
+   drops or something needs Walter. A model switch is one of the things
    that needs Walter. The corpus carries across it; the wipe does not run again.
 
-**Do not skip 3.** The injection seams are null by contract on OFF cells, so no OFF cell can ever
+**Do not skip the ON smoke.** The injection seams are null by contract on OFF cells, so no OFF cell can ever
 prove them. Running ON without that smoke is exactly what voided the paid R2 campaign.
