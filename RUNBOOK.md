@@ -182,6 +182,15 @@ vector; token accounting with **injected-memory-block tokens counted separately 
 the injection observability values; extraction-attempt observability; and the terminal outcome with
 its reason.
 
+**RC-5a · Task-template freeze (scaffold hash).** The frozen task-template hash for the benchmark
+campaign is `a68ff9cba9470fa0ccf5fdee4604425a2ef38631c97a97498369ac2b6159d4d4`, computed as SHA-256
+over the live `tasks/backgammon/scaffold/` directory (sorted relative path + raw bytes per file) —
+the exact bytes the harness hashes at runtime (`compute_task_template_hash` / `_compute_task_template_hash`,
+scripts/run_cumulative.py). Any change to the scaffold invalidates this hash and therefore every
+previously scored cell; the run path fails closed (`verify_task_template_frozen`, wired at the start
+of `prepare_fixture`). This is the **task template** (backgammon scaffold) — distinct from the agent
+reasoning template referenced in §12/§17.
+
 **RC-6 · Teardown and reap are unconditional.** They run on success, on failure, on abort and on
 operator interrupt. The reaper kills the run's process group, reaps orphaned Playwright/node
 children, brings the compose project down, asserts no listener remains on the bench ports, and
@@ -713,6 +722,10 @@ baseline reconciled to `350f899` · template low-context proof PASSED (WO-TEMPLA
    template get FREEZEd.
 3. **Stack smoke,** then **ON smoke** (§6).
 4. **FREEZE the template** (§12), only after the high-context probe passes.
+
+> **Terminology:** §12/§17 "template" = the **agent reasoning template** (a different artifact from
+> the task prompt/scaffold). The **task-template freeze** — the backgammon scaffold hash that the
+> run path fails closed on — is recorded separately at RC-5a above.
 5. **Wipe once** — the full four-step procedure (§2). Then bench OFF → extract → bench ON → extract,
    continuing until performance drops or something needs Walter. A model switch is one of the things
    that needs Walter. The corpus carries across it; the wipe does not run again.

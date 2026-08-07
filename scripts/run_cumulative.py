@@ -83,6 +83,65 @@ DEFAULT_EXTRACT_TIMEOUT_S = 900
 DEFAULT_SEED = config.RunConfig().rng_seed
 DEFAULT_ON_BUDGET = 0
 
+# FROZEN_TASK_TEMPLATE_HASH — WO-FREEZE-1 template freeze.
+#
+# SHA-256 over the live `tasks/backgammon/scaffold/` directory using the EXACT
+# algorithm `compute_task_template_hash` applies at runtime (sorted relative
+# path + raw bytes per file). Frozen at WO-FREEZE-1 (2026-08-06). Any change to
+# the scaffold invalidates the hash and therefore every previously scored cell
+# that ran against the old bytes — the run path fails closed until the freeze is
+# re-baselined deliberately.
+FROZEN_TASK_TEMPLATE_HASH = "a68ff9cba9470fa0ccf5fdee4604425a2ef38631c97a97498369ac2b6159d4d4"
+
+
+def compute_task_template_hash(scaffold: Path) -> str | None:
+    """Stable SHA-256 over task scaffold files (sorted relative paths + bytes).
+
+    Pure function: no instance state, no model endpoints. Returns the hexdigest
+    over the concatenation of each file's utf-8-encoded relative path (sorted by
+    ``str(path)``) followed by its raw bytes. Returns ``None`` when the scaffold
+    directory is unavailable (mirrors the instance method's best-effort
+    contract) and never raises for missing/unreadable files.
+    """
+    if scaffold is None or not scaffold.is_dir():
+        return None
+    digest = hashlib.sha256()
+    files = sorted((p for p in scaffold.rglob("*") if p.is_file()), key=lambda p: str(p))
+    for path in files:
+        try:
+            rel = str(path.relative_to(scaffold))
+            digest.update(rel.encode("utf-8"))
+            digest.update(path.read_bytes())
+        except OSError:
+            continue
+    return digest.hexdigest()
+
+
+def verify_task_template_frozen() -> None:
+    """Fail-closed template-freeze guard for the benchmark run path.
+
+    Computes the live scaffold hash (via ``compute_task_template_hash`` over
+    ``tasks/backgammon/scaffold``) and raises a RuntimeError naming BOTH the
+    expected (frozen) and actual (live) hashes plus the scaffold path whenever
+    they differ OR the live hash cannot be computed. Purposely touches no model
+    endpoint/proxy. Must be called before any scaffold copy or cell scoring.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    scaffold = repo_root / "tasks" / "backgammon" / "scaffold"
+    live_hash = compute_task_template_hash(scaffold)
+    if live_hash is None:
+        raise RuntimeError(
+            "task template freeze FAILED: scaffold unavailable at "
+            f"{scaffold}; expected frozen hash {FROZEN_TASK_TEMPLATE_HASH}, "
+            "could not compute live hash"
+        )
+    if live_hash != FROZEN_TASK_TEMPLATE_HASH:
+        raise RuntimeError(
+            "task template freeze FAILED: scaffold mismatch at "
+            f"{scaffold}; expected (frozen) {FROZEN_TASK_TEMPLATE_HASH}, "
+            f"actual (live) {live_hash}"
+        )
+
 
 def _read_proxy_served_identity(proxy_runs_dir: Path | None = None) -> str | None:
     """Read the API-reported served model identity from the relay proxy run logs.
@@ -700,24 +759,13 @@ class RealSessionRunner:
         """Stable SHA-256 over task scaffold files (sorted relative paths + bytes).
 
         Best-effort; None when the scaffold directory is unavailable. Never
-        raises.
+        raises. Delegates to the pure module function ``compute_task_template_hash``.
         """
         task_dir = getattr(self, "_task_dir", None)
         if task_dir is None:
             return None
         scaffold = Path(task_dir) / "scaffold"
-        if not scaffold.is_dir():
-            return None
-        digest = hashlib.sha256()
-        files = sorted((p for p in scaffold.rglob("*") if p.is_file()), key=lambda p: str(p))
-        for path in files:
-            try:
-                rel = str(path.relative_to(scaffold))
-                digest.update(rel.encode("utf-8"))
-                digest.update(path.read_bytes())
-            except OSError:
-                continue
-        return digest.hexdigest()
+        return compute_task_template_hash(scaffold)
 
     @staticmethod
     def _serialize_worker_fingerprint(result: Any) -> dict | str | None:
@@ -1014,6 +1062,7 @@ class RealSessionRunner:
         }
 
     def prepare_fixture(self, session: SessionRecord) -> None:
+        verify_task_template_frozen()
         state = self._state_for_session(session)
         worktree = state.run_dir / "worktree"
         state.run_dir.mkdir(parents=True, exist_ok=True)
