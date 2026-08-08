@@ -188,6 +188,9 @@ class DockerCellConfig:
     output_token_max: int | None = None
     worker_logs_dir: Path | None = None
     session_db_host_path: Path | None = None
+    # Gate-answerer policy driven into the worker env per cell. None derives from
+    # memory_mode (auto-accept for "on", "off" otherwise); an explicit value wins.
+    answerer_policy: str | None = None
     # Live-view topology: persistent `opencode serve` ports. Fixed publish host:4096 ->
     # container:4096 (opencode serve default). Wired from RunConfig by the harness.
     serve_host_port: int = 4096
@@ -892,6 +895,19 @@ def _build_run_argv(
                 f"{host_plugin_state}:{config.plugin_state_container_path}:rw",
             ]
         )
+
+    # Gate-answerer policy: derived per cell unless explicitly overridden. ON cells
+    # auto-accept so the recall gate completes without a human (D3 goal); OFF cells
+    # are explicitly `off` so any future regression that fires the gate in OFF still
+    # cannot hang on a human (RC-4 comparability). Injected for BOTH arms so the
+    # worker env is deterministic regardless of memory_mode.
+    if config.answerer_policy is not None:
+        answerer_policy = config.answerer_policy
+    elif memory_mode == "on":
+        answerer_policy = "auto-accept"
+    else:
+        answerer_policy = "off"
+    run_cmd.extend(["-e", f"WEVIBE_ANSWERER_POLICY={answerer_policy}"])
 
     # Live-view topology: publish the fixed serve port unconditionally (both arms).
     # One persistent `opencode serve` per cell binds container:serve_container_port,

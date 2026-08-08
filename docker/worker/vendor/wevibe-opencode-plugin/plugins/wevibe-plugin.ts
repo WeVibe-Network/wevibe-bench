@@ -3,14 +3,31 @@ import { join, resolve, dirname, basename } from "path"
 import { homedir } from "os"
 import { fileURLToPath } from "node:url"
 import { createHash, randomUUID } from "node:crypto"
-import { SessionMetricsRecorder, assessRecallNeed, extractToolExitCode, type RecallNeedTrigger } from "./metrics"
+import { SessionMetricsRecorder, assessRecallNeed, extractToolExitCode } from "./metrics"
+import { createFunnelCountersTracker, serializeFunnelSnapshot, type FunnelCountersTracker } from "./funnel-counters"
 import { buildRecallHarvest, type RecallHarvestSignals } from "./recall-harvest"
 import { detectBinding, type BindingState } from "./binding"
 import { resolveScopedWeVibeDir, scopedLogDir, scopedRunsDir, scopedStateDir } from "./wevibe-paths"
 import { createSpool, excerpt, fp8, type Spool } from "./gstv-spool"
 import { GSTV_BOUNDARY_TIMEOUT_MS, onSessionCreated, onSessionIdle, type GstvHookDeps } from "./gstv-hooks"
-import { EpisodeTracker, type HarvestedOutcome } from "./outcome-episode"
+import {
+  EpisodeTracker,
+  computeUserVerdictEvidenceRef,
+  computeUserVerdictRef,
+  type HarvestedOutcome,
+} from "./outcome-episode"
+import { computeFailureKey } from "./failure-key"
+import { resolvePredicateAdapter, registerPredicateAdapter } from "./predicate-adapter"
+import { benchFixtureAdapter } from "./bench-fixture-adapter"
+import { resolvePredicateForRepo, clearPredicateCache, type ResolvedPredicate } from "./predicate-binding"
 import { createOutcomeSpool } from "./outcome-spool"
+
+// Register the bench-fixture predicate adapter into the global registry at
+// module load so it is discoverable via resolvePredicateAdapter(ctx) for any
+// red/green tool output carrying the WEVIBE-BENCH-REPORT v1 header. Its strict
+// `matches` (header on its own line + exitCode !== null) never collides with the
+// cascadeAdapter test's command marker or the tripwire path.
+registerPredicateAdapter(benchFixtureAdapter)
 
 interface CachedMemory {
   cid: string
@@ -45,6 +62,8 @@ interface StoredDecision {
   action: "accept" | "deny" | "block" | "report"
   reason?: string
   note?: string
+  // A human TUI / bench-cell answerer verdict is a user decision.
+  source?: "user"
   timestamp: number
 }
 
@@ -87,7 +106,7 @@ export interface SelectInjectCandidatesResult {
   budgetRemaining: number
 }
 
-export type RecallTrigger = "user_message" | "tool_failure"
+export type RecallTrigger = "repeat_failure"
 
 const memoryHeader = "## Team Memory (WeVibe Network)"
 const memoryIntro = "The following are verified technical memories from your organization."
@@ -216,7 +235,6 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   }
   const RECALL_IN_FLIGHT_AWAIT_TIMEOUT_MS = 15_000
   const INJECT_GATE_POLL_INTERVAL_MS = 250
-  const INJECT_GATE_TIMEOUT_MS = 300_000
   const SERVED_MEMORIES_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
   const readJson = <T>(filePath: string, fallback: T): T => {
@@ -370,6 +388,19 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   function getRecallMode(): "prod" | "test" {
     const mode = process.env.WEVIBE_RECALL_MODE?.trim().toLowerCase()
     return mode === "test" ? "test" : "prod"
+  }
+
+  // D3 answerer policy surface (D-RECALL-GATE-BLOCKS exception). The gate is
+  // human-blocking by default; a bench cell may opt in to a scripted answerer
+  // via WEVIBE_ANSWERER_POLICY=auto-accept|auto-deny, which auto-writes a
+  // source=user decision for every undecided cid so the gate completes without
+  // a human. Any unset/unknown value keeps the answerer OFF (strict no-op) and
+  // the gate fully human-blocking.
+  function getAnswererPolicy(): "auto-accept" | "auto-deny" | "off" {
+    const raw = process.env.WEVIBE_ANSWERER_POLICY?.trim().toLowerCase()
+    if (raw === "auto-accept") return "auto-accept"
+    if (raw === "auto-deny") return "auto-deny"
+    return "off"
   }
 
   function getRecallGovernorConfig(): RecallGovernorConfig {
@@ -532,16 +563,32 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   })
   const gstvBoundaryRan = new Set<string>()
   const toolCallStartedAt = new Map<string, number>()
-  type LatestNeedState = {
-    signature: string
-    triggers: RecallNeedTrigger[]
-    failing: { build: boolean; test: boolean }
-  }
-  const latestNeedBySession = new Map<string, LatestNeedState>()
+  const funnelCounters: FunnelCountersTracker = createFunnelCountersTracker()
+  const firedEpisodeBySession = new Map<string, { failureKey: string; episodeRef: string }>()
+  // C3b flake guard: a repeat red only arms if a file-edit occurred since the last red.
+  const editSeenBySession = new Map<string, boolean>()
 
   ensureFile(queuePath, "[]\n")
   ensureFile(decisionPath, "[]\n")
   ensureFile(statusPath, "{\n  \"accepted\": [],\n  \"denied\": [],\n  \"reported\": []\n}\n")
+
+  const FUNNEL_SNAPSHOT_FILENAME = "funnel-snapshot.json"
+  // Best-effort, synchronous, never-throwing write of the funnel snapshot. A
+  // setInterval callback and the session.idle hook call this; neither may await
+  // on file IO (NON-BLOCKING INVARIANT), so we use writeFileSync in try/catch.
+  const writeFunnelSnapshot = (): void => {
+    try {
+      mkdirSync(stateDir, { recursive: true })
+      writeFileSync(join(stateDir, FUNNEL_SNAPSHOT_FILENAME), serializeFunnelSnapshot())
+    } catch (err) {
+      logPlugin("error", `funnel-snapshot: write failed: ${String(err)}`, newTrace())
+    }
+  }
+  // Periodic best-effort write so the snapshot file is live DURING a cell.
+  // unref() so the interval never keeps the plugin process alive. There is no
+  // plugin teardown hook in this factory shape; the session.idle flush is the
+  // terminal-state write for each idle session.
+  setInterval(writeFunnelSnapshot, 1000).unref()
 
   const approvedCids = new Set<string>()
   const deniedCids = new Set<string>()
@@ -659,14 +706,22 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
     // HARD-GATE (Walter 2026-07-08): binding is decided SOLELY by the OpenCode
     // session SPAWN-ROOT worktree marker — `worktree` is that root; no subdir/parent walk.
     void detectBinding(worktree)
-      .then((s) => {
+      .then(async (s) => {
         bindingState = s
+        if (s.active) {
+          boundPredicate = await resolvePredicateForRepo(worktree)
+        } else {
+          boundPredicate = null
+          clearPredicateCache()
+        }
         logPlugin(
           "info",
           `[binding] session bind: active=${s.active} org=${s.orgId ?? "-"} fp=${fp(s.fingerprint ?? "")} src=${s.source ?? "-"} root=${worktree}`,
         )
       })
       .catch((e) => {
+        boundPredicate = null
+        clearPredicateCache()
         logPlugin("error", `[binding] detect failed: ${e instanceof Error ? e.message : String(e)}`)
       })
   }
@@ -776,6 +831,42 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
     writeJson(statusPath, snapshot)
   }
 
+  // D3 outcome bridge (source=user): a scripted gate answerer / human TUI
+  // verdict on a review candidate is a distinct USER-VERDICT event, not an
+  // episode close. Only decisions whose `source === "user"` with a verdict
+  // action (accept/deny) enqueue a HarvestedOutcome; ordinary harvested
+  // decisions (no source) flow through the cid-set mutations untouched. The
+  // refs come from the disjoint `wevibe-user-verdict-v1` namespace so the
+  // deterministic outcome nonce can never collide with a real episode ref.
+  // Best-effort and synchronous: an enqueue throw must never break the gate
+  // drain, and an unbound session just logs and continues (no fabricated org).
+  const bridgeUserVerdict = (decision: StoredDecision, action: "accept" | "deny", resolution: "worked" | "didnt_work"): void => {
+    if (decision.source !== "user") {
+      return
+    }
+    if (!bindingState.active || !bindingState.orgId) {
+      logPlugin("info", `[outcome] user verdict skipped (session unbound) cid_fp=${fp8(decision.memoryID)} action=${action}`)
+      return
+    }
+    try {
+      const orgId = bindingState.orgId
+      const sessionId = currentSessionId()
+      outcomeSpool.enqueue({
+        orgId,
+        sessionId,
+        memoryHash: decision.memoryID,
+        episodeRef: computeUserVerdictRef(orgId, sessionId, decision.memoryID, action),
+        evidenceRef: computeUserVerdictEvidenceRef(orgId, sessionId, decision.memoryID, action, decision.timestamp),
+        resolution,
+        needSignature: "user-verdict",
+        source: "user",
+      })
+      logPlugin("info", `[outcome] user verdict enqueued cid_fp=${fp8(decision.memoryID)} resolution=${resolution}`)
+    } catch (err) {
+      logPlugin("warn", `[outcome] user verdict enqueue failed reason=${excerpt(err instanceof Error ? err.message : String(err), 200)} cid_fp=${fp8(decision.memoryID)}`)
+    }
+  }
+
   const drainDecisions = async (): Promise<void> => {
     const decisions = readJson<StoredDecision[]>(decisionPath, [])
     if (decisions.length === 0) {
@@ -796,6 +887,7 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
         approvedCids.add(decision.memoryID)
         deniedCids.delete(decision.memoryID)
         reportedCids.delete(decision.memoryID)
+        bridgeUserVerdict(decision, "accept", "worked")
         continue
       }
 
@@ -803,6 +895,8 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
         approvedCids.delete(decision.memoryID)
         deniedCids.add(decision.memoryID)
         reportedCids.delete(decision.memoryID)
+
+        bridgeUserVerdict(decision, "deny", "didnt_work")
 
         const noteToken = readWeVibeMcpToken()
         if (noteToken && bindingState.active && bindingState.orgId) {
@@ -879,6 +973,41 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
 
     writeJson(decisionPath, [])
     recordStatusSnapshot()
+  }
+
+  // D3 scripted gate answerer (D-RECALL-GATE-BLOCKS exception). When the
+  // answerer policy is ON, this writes a source=user decision for every
+  // currently-undecided cid into the decisions file, so the blocking loop's
+  // next drainDecisions() picks them up and emits the user-verdict outcome.
+  // When the policy is OFF this is a strict no-op and the gate remains fully
+  // human-blocking. Best-effort and synchronous: an answerer throw must never
+  // crash the gate.
+  const answerPendingGate = (pendingCids: Set<string>): void => {
+    const policy = getAnswererPolicy()
+    if (policy === "off" || pendingCids.size === 0) {
+      return
+    }
+    const action: "accept" | "deny" = policy === "auto-accept" ? "accept" : "deny"
+    try {
+      const existing = readJson<StoredDecision[]>(decisionPath, [])
+      const queuedById = new Set(existing.map(d => d.memoryID))
+      const now = Date.now()
+      let wrote = 0
+      for (const cid of pendingCids) {
+        // Only cids still genuinely undecided (still cached, not in any verdict set).
+        if (!cachedMemories.some(m => m.cid === cid)) continue
+        if (approvedCids.has(cid) || deniedCids.has(cid) || reportedCids.has(cid)) continue
+        if (queuedById.has(cid)) continue
+        existing.push({ memoryID: cid, action, source: "user", timestamp: now })
+        wrote++
+      }
+      if (wrote > 0) {
+        writeJson(decisionPath, existing)
+        logPlugin("info", `[answerer] policy=${policy} wrote=${wrote} pending=${pendingCids.size}`)
+      }
+    } catch (err) {
+      logPlugin("warn", `[answerer] decision write failed reason=${excerpt(err instanceof Error ? err.message : String(err), 200)}`)
+    }
   }
 
   const submitReport = async (
@@ -959,9 +1088,11 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   }
 
   const cachedMemories: CachedMemory[] = []
-  let lastRecalledQuery = ""
   let wevibeAvailable = false
   let bindingState: BindingState = { active: false }
+  // Per-repo predicate resolved ONCE at bind time and reused (not re-derived per
+  // failure). null = unconfigured / not yet resolved.
+  let boundPredicate: ResolvedPredicate | null = null
   let memoryCacheKey = ""
   let memoryCacheTimestamp = 0
   const MEMORY_CACHE_TTL_MS = 5 * 60 * 1000  // 5 minutes
@@ -1469,14 +1600,15 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   }
 
   let recallInFlight: Promise<void> | null = null
-  const triggerRecall = (query: string, trigger: RecallTrigger): void => {
+  const triggerRecall = (sessionId: string, query: string, trigger: RecallTrigger): void => {
     if (!wevibeAvailable || !bindingState.active) {
       logPlugin("info", "[binding] recall suppressed: session dormant (unbound)")
       return
     }
     if (recallInFlight) return
     const trace = newTrace()
-    logPlugin("info", `recall_fired trigger=${trigger} sid=${currentSessionId() ?? "unknown"}`, trace)
+    funnelCounters.recallFired(sessionId)
+    logPlugin("info", `recall_fired trigger=${trigger} sid=${sessionId}`, trace)
     recallInFlight = loadMemories(query, trace).catch(() => undefined).finally(() => { recallInFlight = null })
   }
 
@@ -1588,31 +1720,6 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
     }
   })()
 
-  const collectTextParts = (parts: unknown): string => {
-    if (!Array.isArray(parts)) {
-      return ""
-    }
-
-    const textParts: string[] = []
-    for (const part of parts) {
-      if (!part || typeof part !== "object") {
-        continue
-      }
-
-      const candidate = part as { type?: unknown; text?: unknown }
-      if (candidate.type !== "text" || typeof candidate.text !== "string") {
-        continue
-      }
-
-      const text = candidate.text.trim()
-      if (text.length > 0) {
-        textParts.push(text)
-      }
-    }
-
-    return textParts.join("\n").trim()
-  }
-
   const spoolFromEvent = (evt: unknown): void => {
     if (!sensorsEnabled) {
       return
@@ -1653,6 +1760,8 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
           event: "session.idle",
           payload: {},
         })
+        // Terminal-state flush so the latest counters land on idle.
+        writeFunnelSnapshot()
         return
       }
       case "session.error": {
@@ -1722,28 +1831,11 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
   }
 
   return {
-    "chat.message": async (input, output) => {
+    "chat.message": async (input) => {
+      // Session tracking only. Recall never fires on user prompts
+      // (D-RECALL-TRIGGER-REPEAT): the sole trigger is a repeat failure
+      // under a stable failureKey, handled in tool.execute.after.
       if (input?.sessionID) activeSessionId = input.sessionID
-
-      // opencode's chat.message API: `input` has NO parts; `output` = { message: UserMessage, parts: Part[] }.
-      // The user's prompt text lives in output.parts (verified against @opencode-ai/plugin index.d.ts:183-195).
-      const userPromptText = collectTextParts((output as { parts?: unknown }).parts)
-      const normalizedPromptText = userPromptText.replace(/\s+/g, " ").trim()
-
-      if (normalizedPromptText.length === 0) {
-        return
-      }
-
-      if (normalizedPromptText === lastRecalledQuery) {
-        return
-      }
-
-      if (!wevibeAvailable) {
-        return
-      }
-
-      lastRecalledQuery = normalizedPromptText
-      triggerRecall(normalizedPromptText, "user_message")
     },
 
     "experimental.chat.system.transform": async (input, output) => {
@@ -1784,22 +1876,24 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
 
       let pendingUndecidedCids = getPendingUndecidedCids()
       if (isTuiLive() && pendingUndecidedCids.size > 0) {
-        const gateStartedAt = Date.now()
-
+        funnelCounters.gateShown(currentSessionId())
+        funnelCounters.beginGate(currentSessionId())
         while (pendingUndecidedCids.size > 0) {
           if (!isTuiLive()) {
             break
           }
 
-          if (Date.now() - gateStartedAt >= INJECT_GATE_TIMEOUT_MS) {
-            logDebug(`[recall] transform gate timeout pending=${pendingUndecidedCids.size}`)
-            break
-          }
-
           await new Promise(resolve => setTimeout(resolve, INJECT_GATE_POLL_INTERVAL_MS))
           await drainDecisions()
+          // D3 scripted gate answerer: when the policy is ON, fills source=user
+          // decisions for any cids still undecided so the next drain picks them
+          // up. When OFF it is a strict no-op and the loop keeps blocking on a
+          // human (D-RECALL-GATE-BLOCKS, human-blocking exception).
+          answerPendingGate(pendingUndecidedCids)
           pendingUndecidedCids = getPendingUndecidedCids()
         }
+        funnelCounters.gateDecided(currentSessionId())
+        funnelCounters.endGate(currentSessionId())
       }
 
       const tuiLiveForLog = isTuiLive()
@@ -1922,21 +2016,9 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
         injectTrace,
       )
 
-      const latestNeed = latestNeedBySession.get(sid)
-      if (!bindingState.orgId) {
-        logDebug(`[outcome] open skipped org=missing sid=${sid}`)
-      } else if (latestNeed) {
-        enqueueHarvestedOutcomes(sid, episodeTracker.openEpisode({
-          orgId: bindingState.orgId,
-          sessionId: sid,
-          needSignature: latestNeed.signature,
-          injectedCids: newlyServed.map(memory => memory.cid),
-          triggers: latestNeed.triggers,
-          failing: latestNeed.failing,
-          openedAtTurn: 0,
-        }))
-      } else {
-        logDebug(`[outcome] open skipped need=missing sid=${sid}`)
+      const firedEpisode = firedEpisodeBySession.get(sid)
+      if (firedEpisode && newlyServed.length > 0) {
+        episodeTracker.recordServe(sid, firedEpisode.failureKey, newlyServed.map(memory => memory.cid))
       }
 
       if (getRecallMode() === "test" && newlyServed.length > 0) {
@@ -1963,6 +2045,7 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
           const boundOrg = bindingState.orgId
           const serveTrace = newTrace()
           logPlugin("info", `[serve] upsert cid=${mem.cid} sid=${sid}`, serveTrace)
+          funnelCounters.serveSent(sid)
           fetch(`${WEVIBE_MCP_HTTP}/v1/serves`, {
             method: "POST",
             headers: {
@@ -1976,6 +2059,10 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
               nullifier: mem.cid,
               matched_keywords: mem.matchedKeywords ?? [],
               session_id: sid,
+              // D-RECALL-PAIRING-TOKEN: pair this serve with its firing episode
+              // on-chain. Fail-closed like MCP intake: an episode-less serve omits
+              // episode_ref (MCP 400-rejects it — intentionally not paired).
+              ...(firedEpisode?.episodeRef ? { episode_ref: firedEpisode.episodeRef } : {}),
             }),
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           })
@@ -1991,6 +2078,48 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
               logPlugin("warn", `[serve] receipt failed reason=${excerpt(err instanceof Error ? err.message : String(err), 200)} cid_fp=${fp8(mem.cid)}`, serveTrace)
             })
         }
+      }
+
+      // Confirmed-on-chain serve receipts (WO-TRIGGER-BUILD A8): best-effort read
+      // of the relay confirm proxy for the firing episode. Fire-and-forget so it
+      // never blocks the hook (non-blocking invariant); fail-closed on any error
+      // leaves confirmed_on_chain unchanged (unconfirmed) and never throws.
+      if (firedEpisode?.episodeRef && bindingState.active && bindingState.orgId) {
+        const boundOrg = bindingState.orgId
+        const episodeRef = firedEpisode.episodeRef
+        const confirmTrace = newTrace()
+        void (async () => {
+          try {
+            const token = readWeVibeMcpToken()
+            if (!token) {
+              logPlugin("warn", `[confirm] skipped: no mcp token episode_fp=${fp8(episodeRef)}`, confirmTrace)
+              return
+            }
+            const res = await fetch(
+              `${WEVIBE_MCP_HTTP}/v1/orgs/${encodeURIComponent(boundOrg)}/serves/confirm?episode_ref=${encodeURIComponent(episodeRef)}`,
+              {
+                method: "GET",
+                headers: {
+                  "Authorization": `Bearer ${token}`,
+                  "X-WeVibe-Trace-Id": confirmTrace,
+                },
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+              },
+            )
+            if (!res.ok) {
+              logPlugin("warn", `[confirm] read failed status=${res.status} episode_fp=${fp8(episodeRef)}`, confirmTrace)
+              return
+            }
+            const body = (await res.json()) as {
+              serves?: Array<{ status?: string; tx_hash?: string | null }>
+            }
+            const confirmed = (body.serves ?? []).filter(s => s.status === "submitted" && Boolean(s.tx_hash)).length
+            funnelCounters.recordConfirmed(sid, confirmed)
+            logPlugin("info", `[confirm] episode_fp=${fp8(episodeRef)} confirmed=${confirmed}`, confirmTrace)
+          } catch (err) {
+            logPlugin("warn", `[confirm] read failed reason=${excerpt(err instanceof Error ? err.message : String(err), 200)} episode_fp=${fp8(episodeRef)}`, confirmTrace)
+          }
+        })()
       }
       upsertServedMemories(newlyServed.map(m => ({ cid: m.cid, text: m.text })), sid)
     },
@@ -2017,6 +2146,19 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
 
     event: async (input) => {
       metricsRecorder.handleEvent(input.event)
+
+      // C3b flake guard: track file edits per session so a repeat red can arm
+      // only when the agent actually edited something between reds. This runs
+      // regardless of WEVIBE_GSTV_SENSORS (the recall path is sensor-independent).
+      const rawEvt = input.event as { type?: unknown; properties?: Record<string, unknown> } | undefined
+      if (rawEvt?.type === "file.edited") {
+        const props = rawEvt.properties ?? {}
+        const info = props.info && typeof props.info === "object" ? props.info as Record<string, unknown> : undefined
+        const sidRaw = props.sessionID ?? info?.id
+        const sid = typeof sidRaw === "string" && sidRaw.length > 0 ? sidRaw : currentSessionId()
+        editSeenBySession.set(sid, true)
+      }
+
       const eventType = (input.event as { type?: unknown } | undefined)?.type
       if (eventType === "session.created") {
         refreshBindingState()
@@ -2092,44 +2234,110 @@ export const WeVibeMemoryPlugin: Plugin = async ({ directory, worktree, client, 
       const command = typeof argsRecord?.command === "string" ? argsRecord.command : ""
       const exitCode = extractToolExitCode(output?.metadata)
 
-      // Need-gated recall firing: failure signals only; dedup via recallInFlight + lastRecalledQuery.
-      if (wevibeAvailable && bindingState.active && !recallInFlight) {
-        const need = assessRecallNeed({
-          tool: input.tool,
-          command: command || undefined,
+      // Repeat-gated recall firing (D-RECALL-TRIGGER-REPEAT): the first red
+      // under a stable failureKey opens an episode; recall fires on the SECOND
+      // red under the same key, once per key per session.
+      const need = assessRecallNeed({
+        tool: input.tool,
+        command: command || undefined,
+        exitCode,
+        pre: preNeedSignals,
+        post: postNeedSignals,
+        recentErrors: metricsRecorder.getRecentErrors(needSessionId),
+        lastFiredSignature: "",
+      })
+      const buildTransition = postNeedSignals.buildFailing === true && preNeedSignals.buildFailing !== true
+      const testTransition = postNeedSignals.testFailing === true && preNeedSignals.testFailing !== true
+      const redObserved = (exitCode !== null && exitCode !== 0) || buildTransition || testTransition
+      // Repeat-gated recall firing. Two guards shape the arm:
+      //  - C3a cascade: when a predicate reporter names several failing ids,
+      //    only the FIRST in deterministic (sorted) order may arm recall for the
+      //    wave; the rest are marked fired so they never fire later. One arm per
+      //    red wave, never one per failing id.
+      //  - C3b flake guard: a repeat red arms only if a file-edit occurred since
+      //    the last red for the session (editSeenBySession). A repeated failure
+      //    with no edit in between is flake/noise, not a real regressing episode.
+      if (redObserved && need.needed && bindingState.orgId) {
+        const commandFp8 = fp8(command || "")
+        const tripwirePredicateId = `cmd:${commandFp8}`
+        const ctx = {
+          command,
+          output: typeof output?.output === "string" ? output.output : "",
+          metadata: (output?.metadata ?? {}) as Record<string, unknown>,
           exitCode,
-          pre: preNeedSignals,
-          post: postNeedSignals,
-          recentErrors: metricsRecorder.getRecentErrors(needSessionId),
-          lastFiredSignature: lastRecalledQuery,
-        })
-        if (need.needed && need.signature !== lastRecalledQuery) {
-          latestNeedBySession.set(needSessionId, {
-            signature: need.signature,
-            triggers: need.triggers,
-            failing: {
-              build: postNeedSignals.buildFailing === true,
-              test: postNeedSignals.testFailing === true,
-            },
+        }
+        const adapter = (boundPredicate && boundPredicate.adapter.matches(ctx))
+          ? boundPredicate.adapter
+          : resolvePredicateAdapter(ctx)
+        const failingIds = adapter.extractFailingTestIds(ctx)
+        const predicateId = adapter.predicateId !== "" ? adapter.predicateId : tripwirePredicateId
+
+        // C3b flake guard: a repeat arms only if a file-edit occurred between reds.
+        const editSeen = editSeenBySession.get(needSessionId) ?? false
+        editSeenBySession.set(needSessionId, false)
+
+        const baseOpenInput = {
+          orgId: bindingState.orgId,
+          sessionId: needSessionId,
+          needSignature: need.signature,
+          triggers: need.triggers,
+          failing: { build: postNeedSignals.buildFailing === true, test: postNeedSignals.testFailing === true },
+          tool: input.tool,
+          commandFp8,
+          exitCode,
+          openedAtTurn: 0,
+        }
+
+        if (failingIds.length === 0) {
+          // TRIPWIRE (unchanged): cmd fp predicate, failingTest null, ONE key.
+          const failureKey = computeFailureKey({ repoBinding: bindingState.fingerprint ?? "", predicateId: tripwirePredicateId, failingTest: null, commandFp8 })
+          const episode = episodeTracker.openOrTouch({ ...baseOpenInput, failureKey, predicateId: tripwirePredicateId, testId: null })
+          enqueueHarvestedOutcomes(needSessionId, episode.expired)
+          if (episode.opened) funnelCounters.episodeOpened(needSessionId)
+          if (!episode.opened && !episode.fired && editSeen && wevibeAvailable && bindingState.active && !recallInFlight) {
+            episodeTracker.markFired(needSessionId, failureKey)
+            firedEpisodeBySession.set(needSessionId, { failureKey, episodeRef: episode.episodeRef })
+            funnelCounters.episodeArmed(needSessionId)
+            triggerRecall(needSessionId, need.query, "repeat_failure")
+          }
+        } else {
+          const sortedIds = [...failingIds].sort()
+          sortedIds.forEach((testId, index) => {
+            const failureKey = computeFailureKey({ repoBinding: bindingState.fingerprint ?? "", predicateId, failingTest: testId, commandFp8 })
+            const episode = episodeTracker.openOrTouch({ ...baseOpenInput, failureKey, predicateId, testId })
+            enqueueHarvestedOutcomes(needSessionId, episode.expired)
+            if (episode.opened) funnelCounters.episodeOpened(needSessionId)
+            if (index === 0) {
+              // C3a cascade: only the FIRST failing id in deterministic order arms.
+              if (!episode.opened && !episode.fired && editSeen && wevibeAvailable && bindingState.active && !recallInFlight) {
+                episodeTracker.markFired(needSessionId, failureKey)
+                firedEpisodeBySession.set(needSessionId, { failureKey, episodeRef: episode.episodeRef })
+                funnelCounters.episodeArmed(needSessionId)
+                triggerRecall(needSessionId, need.query, "repeat_failure")
+              }
+            } else {
+              // non-first failing ids: marked fired so they never fire later.
+              episodeTracker.markFired(needSessionId, failureKey)
+            }
           })
-          lastRecalledQuery = need.signature
-          triggerRecall(need.query, "tool_failure")
         }
       }
 
+      const greenCtx = { command, output: typeof output?.output === "string" ? output.output : "", metadata: (output?.metadata ?? {}) as Record<string, unknown>, exitCode }
+      const greenAdapter = (boundPredicate && boundPredicate.adapter.matches(greenCtx))
+        ? boundPredicate.adapter
+        : resolvePredicateAdapter(greenCtx)
+      const passingIds = greenAdapter.extractPassingTestIds(greenCtx)
+      const greenPredicateId = greenAdapter.predicateId !== "" ? greenAdapter.predicateId : `cmd:${fp8(command || "")}`
       enqueueHarvestedOutcomes(needSessionId, episodeTracker.observeToolResult({
         sessionId: needSessionId,
         tool: input.tool,
+        predicateId: greenPredicateId,
         commandFp8: fp8(command || ""),
         exitCode,
-        pre: {
-          buildFailing: preNeedSignals.buildFailing === true,
-          testFailing: preNeedSignals.testFailing === true,
-        },
-        post: {
-          buildFailing: postNeedSignals.buildFailing === true,
-          testFailing: postNeedSignals.testFailing === true,
-        },
+        pre: { buildFailing: preNeedSignals.buildFailing === true, testFailing: preNeedSignals.testFailing === true },
+        post: { buildFailing: postNeedSignals.buildFailing === true, testFailing: postNeedSignals.testFailing === true },
+        ...(passingIds.length > 0 ? { passingTestIds: passingIds } : {}),
       }))
 
       if (!sensorsEnabled) {

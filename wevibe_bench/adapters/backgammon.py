@@ -377,6 +377,39 @@ def _scan_recall_funnel(worktree: Path) -> RecallFunnelScan | None:
     )
 
 
+def _scan_funnel_snapshot(worktree: Path) -> dict[str, dict[str, int | None]] | None:
+    """Read the plugin's per-session funnel counters from funnel-snapshot.json.
+
+    The plugin writes this file into its state dir (``{worktree}/.wevibe/state``)
+    periodically and on ``session.idle``. Content is a flat JSON object mapping
+    sessionId -> counter dict (all numeric; ``gate_decision_ms`` is int|null).
+
+    Mirrors the tolerant style of ``_scan_recall_funnel``: an absent or
+    unreadable/corrupt file yields None (never a raise); a file that exists but
+    carries no sessions yields ``{}``.
+    """
+    snapshot_path = worktree / ".wevibe" / "state" / "funnel-snapshot.json"
+    try:
+        payload = snapshot_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
+
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    sessions: dict[str, dict[str, int | None]] = {}
+    for session_id, counters in parsed.items():
+        if not isinstance(counters, dict):
+            continue
+        sessions[str(session_id)] = dict(counters)
+    return sessions
+
+
 @dataclass(frozen=True)
 class _OpencodeRunStats:
     input_tokens: int
@@ -569,6 +602,7 @@ class BackgammonCellResult:
     served_attempted: int | None = None
     served_failed: int | None = None
     served_confirmed: int | None = None
+    funnel_snapshot: dict[str, dict[str, int | None]] | None = None
     truncations: int = 0
     zero_tool_turns: int = 0
     zero_tool_resumes: int = 0
@@ -1626,6 +1660,7 @@ class BackgammonRunner(AgentRunner):
                 else None
             )
             funnel = _scan_recall_funnel(worktree)
+            funnel_snapshot = _scan_funnel_snapshot(worktree)
             recall_fired_total = funnel.recall_fired_total if funnel is not None else None
             recall_fired_user_message = (
                 funnel.recall_fired_user_message if funnel is not None else None
@@ -1646,6 +1681,7 @@ class BackgammonRunner(AgentRunner):
             delivery = "N/A"
             injected_block_chars = None
             injected_block_est_tokens = None
+            funnel_snapshot = None
             recall_fired_total = None
             recall_fired_user_message = None
             recall_fired_tool_failure = None
@@ -1697,6 +1733,7 @@ class BackgammonRunner(AgentRunner):
             served_attempted=served_attempted,
             served_failed=served_failed,
             served_confirmed=served_confirmed,
+            funnel_snapshot=funnel_snapshot,
             truncations=truncations_total,
             zero_tool_turns=zero_tool_turns_total,
             zero_tool_resumes=zero_tool_resumes_total,
