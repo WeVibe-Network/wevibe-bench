@@ -118,13 +118,21 @@ silently ruins a campaign.
 4. **Start the recall clone** (§7). Finalising org setup regenerates a fresh matching `K_master`
    into the leader keystore.
 
-**The wipe runs exactly ONCE, at campaign start, before the first bench.** A mid-campaign wipe
-destroys the accumulated corpus the ON arm exists to measure. It does not fail loudly — it silently
-converts every subsequent ON cell into an OFF cell with extra steps, and the campaign reports no
-lift.
+**The wipe is sanctioned only BEFORE THE FIRST CELL — a wipe AFTER THE FIRST CELL is barred.** The
+boundary is the first cell, not "exactly once, ever": a genesis wipe at campaign start, when zero
+cells have run and the corpus is empty, destroys nothing measurable and is the sanctioned wipe. A
+wipe after even one cell has run destroys the accumulated corpus the ON arm exists to measure. It
+does not fail loudly — it silently converts every subsequent ON cell into an OFF cell with extra
+steps, and the campaign reports no lift. That silent-corruption protection is exactly why the
+boundary is the first cell: the rule protects against a wipe once cells exist, and protects nothing
+when the corpus is empty. **Reasoning (recorded, 2026-08-07, WO-ATTRIB-3):** the older "exactly
+once, ever" phrasing forbade a legitimate second genesis wipe that occurs before the first cell;
+the hazard the rule guards against — silently corrupting ON measurement — cannot arise until a cell
+has run, so the bar is correctly placed at the first cell, not at "ever."
 
 **The one exception (rule 5.13):** only a **true regression or total benchmark failure** justifies
 re-baselining. That is a deliberate, declared act — never a casual re-wipe, never a "let's try it".
+A re-baseline wipes the corpus and so is a walk-back (rule 18) — declared, never hidden.
 
 **BENCH `MODE=on|off`** — one cell. See §3.
 
@@ -281,7 +289,11 @@ run has none of the isolation guarantees in §8 and would be scored as though it
 11. **Never infer a pass from the absence of a violation flag.** A clean `invariant_violation:
     false` cannot distinguish "extraction never invoked" from "invoked and cut off by the gate."
 12. **A safety mechanism firing is not automatically a pass.** Ask what evidence it destroyed.
-13. **Wipe once, at campaign start. Never again** — full procedure and the single exception at §2.
+13. **Wipe only BEFORE THE FIRST CELL; a wipe after the first cell is barred** — full procedure and
+    the single re-baseline exception at §2. The boundary is the first cell, not "exactly once ever":
+    a genesis wipe at campaign start (no cells run, corpus empty) is sanctioned; a wipe after any
+    cell has run is barred. Reasoning: the protection the wipe rule exists for (a wipe silently
+    corrupting ON measurement by destroying the corpus) cannot arise until a cell exists.
 14. **Local runs are unmetered by construction.** Disclose that. Never synthesize a cost figure.
     There are no budget kills and no cost gates anywhere in the system.
 15. **A run ends only on:** natural completion, variance-policy completion, extraction-integrity
@@ -746,10 +758,10 @@ baseline reconciled to `350f899` · template low-context proof PASSED (WO-TEMPLA
 > **Terminology:** §12/§17 "template" = the **agent reasoning template** (a different artifact from
 > the task prompt/scaffold). The **task-template freeze** — the backgammon scaffold hash that the
 > run path fails closed on — is recorded separately at RC-5a above.
-5. **Wipe once** — the full four-step procedure (§2). Then first OFF cell (unscored) → extract →
-   ON smoke (unscored, hard gate) → first scored ON cell → extract, continuing until performance
-   drops or something needs Walter. A model switch is one of the things
-   that needs Walter. The corpus carries across it; the wipe does not run again.
+5. **Wipe before the first cell** — the full four-step procedure (§2). Then first OFF cell (unscored)
+   → extract → ON smoke (unscored, hard gate) → first scored ON cell → extract, continuing until
+   performance drops or something needs Walter. A model switch is one of the things
+   that needs Walter. The corpus carries across it; the wipe does not run again after the first cell.
 
 **Do not skip the ON smoke.** The injection seams are null by contract on OFF cells, so no OFF cell can ever
 prove them. Running ON without that smoke is exactly what voided the paid R2 campaign.
