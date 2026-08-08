@@ -1,5 +1,5 @@
 # RUNBOOK.md — the operative run card
-**Version:** 6 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v5 (2026-08-04)
+**Version:** 6 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v5 (2026-08-04) · **Amended:** 2026-08-07 session rulings (WO-CANON-1): §1 honest limit · §2 pairing-token deadline + one-org reasoning · rule 5.18 walk-back/rerun · D-EMISSIONS-INERT-KEEPERS
 
 > **This is the only operative document. Read it and nothing else to operate the benchmark.**
 > Every other document in this repository is history with no authority over what runs. Their binding
@@ -37,6 +37,15 @@ same model resolve more of the same problem set, in fewer attempts, on a later r
 problems**. A compiled-solutions system. **NOT** a capability-lift claim. Held-out variants are
 required before any "models get better" statement, internal or external.
 
+**The honest limit (Walter, 2026-08-07):** this campaign cannot measure the human gate, restraint
+under the real governor, stranger-contributed memory, real outcome lag, production coverage, corpus
+scale, adversarial behaviour, or portability across people and machines. It proves that an
+accumulated corpus makes the same model resolve more of the same problem in fewer attempts, under
+ideal conditions with the human removed. **That is not a claim about the product.** (Also recorded
+where the claim is stated in `BENCHMARK-DIARY.md` §2.4 — deliberate dual carriage, an exception to
+the anti-bloat rule (Walter, 2026-08-07): a claim appearing anywhere without its limit is the failure
+this fixes.)
+
 | | |
 |---|---|
 | Subject model | **whatever is resident** — the bench never selects a model (RC-7) |
@@ -73,6 +82,14 @@ deleted rather than documented.
 Gate: all green. Nothing proceeds on a red suite, and nothing proceeds on an *unverified* one.
 Targets and conventions: §14.
 
+**Scope (Walter, 2026-08-07):** TEST means the bench pytest suite (§14). The wevibe-meta integration
+suite is **not** part of the pre-campaign stage: its suites POST `/v1/test/reset` — a route the hub
+build does not register (`cmd/wevibe-hub/main.go:390-397` vs `wevibe-meta/tests/lib/hub-client.ts:95`)
+— and its mutating tests would create orgs and memories on the live campaign's hub and chain, the
+same hazard class as a second wipe. The reset route must NOT be registered to accommodate it. The
+suite is restored behind a guard after the campaign, not before. Recorded as
+D-INTEGRATION-SUITE-QUARANTINE (§11).
+
 **SMOKE**
 1. Start the docker stack.
 2. Run the smoke.
@@ -92,6 +109,9 @@ hours later looking like a recall bug. The ON smoke must therefore run after the
 first OFF-cell extraction (which builds a non-empty corpus), as an unscored hard gate before the
 first scored ON cell. It is neither skipped nor merged into the first scored ON cell — merging makes
 a broken seam indistinguishable from a null result.
+
+**Session ruling (2026-08-07): the pairing token's real deadline was never the wipe.** An OFF cell
+emits no serve and no outcome events, so the boundary is the first serve — the ON smoke.
 
 Gate: all green.
 
@@ -145,7 +165,9 @@ integrity gate and the smart-leader procedure are §9.
   by construction. This first OFF cell exists to build a non-empty corpus so the ON smoke (which
   follows its extraction) has something to recall.
 - **One org for the whole campaign.** Any scheme assigning an org per arm or per model is stale and
-  wrong: it breaks corpus accumulation, which is the only thing being measured.
+  wrong: it breaks corpus accumulation, which is the only thing being measured. Walter's 2026-08-07
+  reasoning, transcribed: someone must be responsible for a corpus, and the org focuses context for
+  retrieval and extraction alike.
 - **Mode toggles exactly one thing** — whether injection runs before attempt 1 (RC-4).
 - **Smoke and wipe are separate invocations, never nested inside `bench`.** The operator runs each
   stage. The ON smoke is additionally a **hard gate** on the first scored ON cell: it is a separate
@@ -307,6 +329,14 @@ run has none of the isolation guarantees in §8 and would be scored as though it
 16. **Never emit literal thinking tags.** See the notation rule at the head of this file.
 17. **Walter decides; agents do the work.** He does not run commands, paste files, or perform worker
     tasks. Escalate decisions, never chores.
+18. **Walk-back versus rerun (Walter, 2026-08-07).** A **walk-back** is forced by: a serve that never
+    reaches chain · an outcome that never pairs · standing moving with no human signal and no observed
+    transition · the arms differing in anything but injection (RC-4) · a second org or manifest (§1,
+    §2) · extraction from a session that resolved nothing (the §9 abort class) · injected-block tokens
+    null on an ON cell (the §6 ON-smoke class) · a wipe after the first cell (rule 13, §2). A break
+    confined to
+    **one cell** is a **rerun** (§10 — a new disclosed run, never a merge). The distinction: anything
+    breaking a pairing is a walk-back; anything breaking one cell is a rerun.
 
 ---
 
@@ -350,6 +380,14 @@ a pre-wipe smoke proves a seam the wipe then destroys.
 
 **The `missing_telemetry_seams` list is itself an instrument.** In R2 it named seven seams, four of
 which had real values in the same record. A list that over-reports trains the operator to ignore it.
+
+**Latency is a hard, measured seam (recorded 2026-08-08, WO-RT-O6).** Latency on the critical path is
+a **hard blocker, not a budget with an escape hatch** — the gate blocks with **no timeout and no
+fallthrough**, and a serve that exceeds the latency bound is a defect, not a degraded-but-acceptable
+run. Latency is a **standing objective** and IS one of the seams the bench's seam scanners scan and
+that production measures. Treat it as part of the seam set alongside `missing_telemetry_seams`, and
+apply the same VOID-INSTRUMENT rule here: a run launched with an unproven — unmeasured, assumed —
+latency seam is VOID-INSTRUMENT by construction. **Latency must be measured, never assumed.**
 
 ---
 
@@ -454,6 +492,16 @@ host-side logs and is stripped before the worker sees anything. A failure points
 **Option-A invariant:** no gate may require a constant, formula, string, count or mechanism that is
 not published in the worktree contract artifact. Publishing requirements is orthogonal to all three
 layers above and weakens none of them (rule 5.7).
+
+**Observability-funnel identity (recorded 2026-08-08, WO-RT-O6).** The PRODUCTION observability funnel
+and the bench's T8 seam scanners read the SAME counter set. The recall-trigger path is instrumented at
+every seam, and every counter is readable per session — production observability and the bench's seam
+scanners are **two readers of one counter set**, not two separate instrumentations. This ties the
+bench's T8 instrumentation to the recall-trigger funnel: what a T8 seam scanner proves on a bench run
+is the same signal production reads in the field. Corollary, cross-referenced only (already recorded
+in RECALL-PIVOT-SPEC's funnel, not re-ratified here): the normalizer is the sensitivity dial with a
+silent failure mode, detectable only as a ratio between two seams (episodes opened vs repeats
+detected); its counter is not optional instrumentation.
 
 ---
 
@@ -586,6 +634,9 @@ Fixed defects are not listed. They are in git.
 | **D-RECALL-EMPTY-KEYWORDS** | 🟢 CLOSED by 33fe59a (wevibe-server) | Hub-side `fix(serves): accept vector-only serves with empty matched_keywords` — the serve endpoint now accepts vector-only serves with empty `matched_keywords`; the dead 400-mapping clause is removed. | ON-cell attribution |
 | **D-STRAY-BENCH-KEY** | 🟡 OPEN — **Walter only** | A mis-configured clone once wrote a bench org master-key envelope into Walter's canonical key directory. It **may collide with his canonical org keys**. Not deleted, and **no agent may delete it** — Walter verifies and cleans deliberately. Bench now writes only to the bench keystores, so it will not recur. | nothing automated |
 | **D-KV-PEAK-UNKNOWN** | 🟢 CURIOSITY | Peak resident footprint at full context is unknown. Not a threat given headroom. | nothing |
+| **D-EMISSIONS-INERT-KEEPERS** | 🟡 OPEN | The emissions module carries an injected serve keeper and reputation keeper (`wevibe-chain/x/emissions/types/expected_keepers.go`, wired at `keeper/keeper.go:35-47`) whose methods are never invoked outside tests — inert today, and exactly the seam an accidental change would activate. Serve credit touches no economics: emissions qualify contributors on approvals only (`x/emissions/keeper/keeper.go:233`). Recorded 2026-08-07 (WO-CANON-1); cross-posted to RECALL-PIVOT-SPEC §8.7 F5. | nothing today — silent-economics drift if activated unnoticed |
+| **D-INTEGRATION-SUITE-QUARANTINE** | 🟡 OPEN — post-campaign | The wevibe-meta integration suite is scoped out of the pre-campaign TEST stage (§2): it POSTs `/v1/test/reset`, a route the hub build does not register (`cmd/wevibe-hub/main.go:390-397` vs `wevibe-meta/tests/lib/hub-client.ts:95`), and its mutating e2e tests would write orgs and memories to the live campaign hub and chain — the same hazard class as a second wipe. The reset route must not be registered to accommodate it. Restored behind a guard after the campaign (Walter, 2026-08-07). | nothing while quarantined — pre-campaign TEST is the bench pytest suite |
+| **D-RECALL-SELECTION-BIAS** | 🟡 OPEN — known, stated limitation | Recall fires only after a repeat — the second failure under the same stable `failureKey` while still red — so every serve is conditioned on an already-hard problem. Standing therefore measures **"works on stuck problems," not "works."** Defensible, and arguably the population that matters, but a further departure from the sim's uniform-serving assumption (recorded 2026-08-08, WO-RT-O6; claim and limit travel together — the §1/BENCHMARK-DIARY §2.4 dual-carriage principle). | every standing/recall conclusion — disclosed, not blocking |
 
 **Memory is not a constraint — CLOSED, do not re-investigate.** Zero swap, ~211 GB wired headroom.
 The trap that misled two sessions is `top`'s "unused" line, which excludes inactive pages macOS
