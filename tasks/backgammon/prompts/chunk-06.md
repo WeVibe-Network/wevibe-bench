@@ -12,4 +12,6 @@ Verification steps (do them all, for real, with tools):
 6. **Frontend smoke.** Load `http://localhost:8002/` and check the page renders the board, all the `data-testid` hooks exist (24 points, 30 checkers, hints on selection, dice, cube, pips), checker/hint animations are present in the CSS, and there is no horizontal overflow at 1280×800.
 7. **Clean up.** Kill any server processes you started. Leave the repo in a state where `npm start` alone runs the product.
 
+**Write in chunks:** never emit more than ~150 lines in a single write/edit tool call — build large files up in ~150-line chunks across several calls, never one giant call.
+
 Fix every defect you find before finishing. When you are finished with this task print CHUNK FINISHED at the end.

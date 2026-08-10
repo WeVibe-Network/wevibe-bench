@@ -63,4 +63,6 @@ Rules (all mandatory):
 
 Also required by the full product (keep these in mind so your engine shapes support them): full turn flow — doubles give 4 moves, dice are consumed as used, turns alternate white → black → white, and a player with no legal move auto-passes (`turnOver === true`, `legalMoves === []`, message mentions "no legal move"/"pass"). The turn driver itself is wired up in chunk 4.
 
+**Write in chunks:** never emit more than ~150 lines in a single write/edit tool call — build large files up in ~150-line chunks across several calls, never one giant call.
+
 When you are finished with this task print CHUNK FINISHED at the end, then call the self_compact tool as the last action of your turn.

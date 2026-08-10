@@ -41,4 +41,6 @@ Requirements:
   - The AI only offers when it may double (cube centered or owned by the AI); it never offers when the opponent owns the cube.
   - Both cube functions return a human-readable `reasoning` string explaining the decision.
 
+**Write in chunks:** never emit more than ~150 lines in a single write/edit tool call — build large files up in ~150-line chunks across several calls, never one giant call.
+
 When you are finished with this task print CHUNK FINISHED at the end, then call the self_compact tool as the last action of your turn.

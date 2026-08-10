@@ -170,17 +170,32 @@ _HOLD_UI_HEARTBEAT_S = 30.0
 # for a loop kill, the same prompt into the same context is the loop's fuel.
 # Applies to every serve-driven phase (chunked building leg AND repair leg
 # alike — RC-4: no mode branch). The proxy guard itself is never reconfigured.
+# The chunking reminder (Walter 2026-08-10): the finalize kills that day were
+# oversized single generations (one 32000-token write; ~4900-token writes) —
+# the model tried to emit whole files in one call. Both nudges carry the
+# write-in-chunks directive so a re-driven turn retries at safe granularity
+# (~150 lines ≈ 1.5K output tokens; every observed sub-1K-token generation
+# finalized cleanly, the killed ones were ~4.9K+).
+_WRITE_CHUNKING_DIRECTIVE = (
+    "Remember to write in chunks of at most ~150 lines per tool call — build "
+    "large files up in ~150-line chunks across several write/edit calls, never "
+    "one giant call."
+)
 _LOOP_RECOVERY_NUDGE = (
     "Transport notice: your previous response was cut off by a loop detector "
     "(repeated content). Do NOT repeat or restate anything already written. "
     "Continue the task from exactly where it stopped — pick up the next "
-    "unfinished step and keep moving. No preamble, no recap."
+    "unfinished step and keep moving. "
+    + _WRITE_CHUNKING_DIRECTIVE
+    + " No preamble, no recap."
 )
 _FINALIZE_RECOVERY_NUDGE = (
     "Transport notice: the end of your previous response was lost to a "
     "transport failure after the model finished generating. Continue the task "
     "from exactly where it stopped — do not restart steps that already "
-    "completed. No preamble, no recap."
+    "completed. "
+    + _WRITE_CHUNKING_DIRECTIVE
+    + " No preamble, no recap."
 )
 
 # Turn-terminal taxonomy (WO-TRUNC-1). A turn is one model generation step,

@@ -1118,6 +1118,17 @@ def test_serve_drive_zero_delta_phase_is_loud_not_clean_zero(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 # WO-LOOPREC-1: loop-guard recovery on the serve path
 # ---------------------------------------------------------------------------
+def test_chunk_prompts_carry_the_write_chunking_directive() -> None:
+    """Walter 2026-08-10: the finalize kills were oversized single generations
+    (whole-file writes); every chunk prompt must carry the write-in-chunks
+    directive AND the marker instruction — a prompt edit that drops either
+    re-opens the stream_finalize_exhausted cell death."""
+    for index in range(1, 7):
+        text = (TASK_DIR / "prompts" / f"chunk-0{index}.md").read_text(encoding="utf-8")
+        assert "~150 lines" in text, f"chunk-0{index}.md lost the chunking directive"
+        assert "CHUNK FINISHED" in text, f"chunk-0{index}.md lost the marker instruction"
+
+
 _LOOP_SIG = "relay: generation loop detected (<request-id>)"
 _FIN_SIG = (
     "relay: upstream completed but the stream did not finalize "

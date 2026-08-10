@@ -49,4 +49,6 @@ pip, legalMoves, canDouble
 
 Turn flow the server must drive: doubles yield 4 moves; dice are consumed as used; when the human has no legal move the turn auto-passes (`turnOver === true`, `legalMoves === []`, `message` mentions "no legal move"/"pass"); after the human turn ends, `/api/ai` advances the AI using `chooseMoves`; win/gammon/backgammon ends the game with `winner`, `winType`, `pointsWon` (cube value × win multiplier) and a clear `message`; `/api/new` starts a fresh game without any reload and keeps `score`/`gamesPlayed`.
 
+**Write in chunks:** never emit more than ~150 lines in a single write/edit tool call — build large files up in ~150-line chunks across several calls, never one giant call.
+
 When you are finished with this task print CHUNK FINISHED at the end, then call the self_compact tool as the last action of your turn.
