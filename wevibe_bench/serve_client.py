@@ -462,9 +462,21 @@ class ServeClient:
             time.sleep(self.poll_interval)
         return False
 
-    def metrics(self, session_id: str) -> dict:
-        """Return :func:`extract_transcript_metrics` for the session messages."""
-        return extract_transcript_metrics(self.get_messages(session_id))
+    def metrics(self, session_id: str, *, since: int | None = None) -> dict:
+        """Return :func:`extract_transcript_metrics` for the session messages.
+
+        ``since`` windows the scan to messages at index >= ``since`` (the same
+        watermark discipline as :meth:`assistant_texts_since`). A killed turn's
+        ``info.error`` persists in the transcript FOREVER, so a caller that
+        classifies transport anomalies must scan only what the current drive
+        produced — a cumulative read re-matches the same kill on every later
+        phase (the 2026-08-10 chunk-2 defect: a recovered, CHUNK FINISHED-
+        landing drive was reclassified guard_abort until the budget exhausted).
+        """
+        messages = self.get_messages(session_id)
+        if since is not None:
+            messages = messages[since:]
+        return extract_transcript_metrics(messages)
 
     def last_assistant_text(self, session_id: str) -> str:
         """Return the concatenated text parts of the newest assistant message.

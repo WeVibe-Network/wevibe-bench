@@ -2504,6 +2504,22 @@ class BackgammonRunner(AgentRunner):
                 "status=baseline_metrics_error detail=deltas degrade to cumulative"
             )
 
+        # Classification watermark (2026-08-10 live-cell defect): a guard- or
+        # finalize-killed message keeps its info.error in the transcript
+        # FOREVER, and extract_transcript_metrics surfaces it in error_texts on
+        # every cumulative read. Classifying on the cumulative read re-trips
+        # the SAME kill after a successful recovery — the live chunk-2 drive
+        # recovered, landed CHUNK FINISHED, and was still classified
+        # guard_abort twice more (loop_guard_exhausted, void cell). The
+        # classification surface is therefore WINDOWED to messages at/after
+        # this watermark, and the watermark advances past each classified kill
+        # before the recovery nudge re-drives. Metering deltas above are
+        # unaffected (they diff cumulative reads).
+        try:
+            class_watermark = len(serve_client.get_messages(session_id))
+        except ServeClientError:
+            class_watermark = 0
+
         # WO-LOOPREC-1/FINALIZE-REC-1 transport recovery: a guard-killed or
         # finalize-killed turn is metered (its tokens burned) but must NOT read
         # as completed work. When the terminal classification is recoverable
@@ -2628,6 +2644,7 @@ class BackgammonRunner(AgentRunner):
             # 3) Pull metrics from the persisted transcript.
             try:
                 m = serve_client.metrics(session_id)
+                m_window = serve_client.metrics(session_id, since=class_watermark)
             except ServeClientError as exc:
                 # Metering failed after completion; report a transport-style exit and
                 # let the caller decide (fall through to stdout path on retry).
@@ -2648,10 +2665,11 @@ class BackgammonRunner(AgentRunner):
                         "error_parts": 0,
                     }
                 )
+                m_window = {}
                 if exit_code == 0:
                     exit_code = 1
 
-            terminal, reason = classify_transport_anomaly(m)
+            terminal, reason = classify_transport_anomaly(m_window)
             if terminal is not None:
                 if terminal == "truncated":
                     mapped_terminal = TURN_TERMINAL_TRUNCATED
@@ -2727,6 +2745,17 @@ class BackgammonRunner(AgentRunner):
                             if mapped_terminal == TURN_TERMINAL_GUARD_ABORT
                             else _FINALIZE_RECOVERY_NUDGE
                         )
+                        # Advance the classification window PAST the kill just
+                        # classified: the persisted error never leaves the
+                        # transcript, so without this the post-nudge read
+                        # re-classifies the same kill (see the watermark note
+                        # at phase baseline). A failed probe keeps the old
+                        # watermark — a stuck window re-trips LOUD, never
+                        # silently clean.
+                        try:
+                            class_watermark = len(serve_client.get_messages(session_id))
+                        except ServeClientError:
+                            pass
                         continue
                     exit_code = 1
                     killed_reason = (

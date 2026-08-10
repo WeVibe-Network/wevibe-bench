@@ -274,6 +274,15 @@ the one serve session. Per chunk: drive → marker scan → compaction → next 
   fail-open backstop summarize (`auto:false`) when the worker never armed. Compaction is an
   optimization, never a gate; `WEVIBE_BENCH_CHUNK_COMPACT=0` disables it. No compaction after
   chunk 6 — no chunk follows.
+- **Relay-killed turns are recovered, never scored.** A relay loop-guard kill (`guard_abort`) or
+  stream-finalize-watchdog kill is metered (tokens burned; guard kills excluded from scoring
+  turns), then re-driven with a bounded nudge (`WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET`, default 2;
+  anti-repetition for a loop kill, resume for a finalize kill); exhaustion is a loud exit 1
+  (`loop_guard_exhausted` / `stream_finalize_exhausted`). The anomaly classification is
+  **watermark-windowed** like the marker scan: a killed message's `info.error` persists in the
+  transcript forever, so each drive classifies only the messages produced since the last
+  classification point — a stale kill can never re-trip a recovered, completed drive
+  (2026-08-10 chunk-2 defect).
 
 Attempts 2+ remain the error-only feedback loop.
 Chunk content is arm-identical (mode toggles only injection, RC-4). Editing any chunk changes the

@@ -24,7 +24,7 @@ from wevibe_bench.adapters.backgammon import (
     TURN_TERMINAL_TRANSPORT_ERROR,
     TURN_TERMINAL_TRUNCATED,
 )
-from wevibe_bench.serve_client import ServeClientError
+from wevibe_bench.serve_client import ServeClientError, extract_transcript_metrics
 
 
 TASK_DIR = (Path(__file__).resolve().parents[1] / "tasks" / "backgammon").resolve()
@@ -54,6 +54,18 @@ class _FakeServeClient:
         self.metrics_baseline: dict[str, Any] = {}
         self._baseline_served: bool = False
         self.assistant_texts: list[str | list[str]] = []
+        # Per-drive terminal shapes (popped one per send_prompt, default None):
+        # {"info_error": ...}  -> a relay-killed turn as opencode 1.18.x
+        #                         persists it (bare step-start, no text, the
+        #                         signature in info.error.data.message);
+        # {"step_finish": r}   -> the appended assistant message also carries a
+        #                         step-finish part with reason r (truncation);
+        # {"error_part": ...}  -> the appended assistant message also carries
+        #                         an error part (transport error_event).
+        # The canned metrics_script drives the CUMULATIVE reads; the windowed
+        # classification read (metrics(since=...)) is derived from _messages
+        # through the REAL extractor, so anomaly surfaces must exist here.
+        self.assistant_terminal_script: list[dict[str, str] | None] = []
         self.send_error: Exception | None = None
         self.metrics_error: Exception | None = None
         # Watermark-windowed marker scan support: a growable message list the
@@ -81,13 +93,39 @@ class _FakeServeClient:
                 "parts": [{"type": "text", "text": prompt}],
             }
         )
+        terminal = (
+            self.assistant_terminal_script.pop(0)
+            if self.assistant_terminal_script
+            else None
+        )
+        if terminal and terminal.get("info_error"):
+            # Killed turn: no scripted text is consumed — a real kill persists
+            # no assistant text (opencode 1.18.x writes the error, not a part).
+            self._messages.append(
+                {
+                    "info": {
+                        "role": "assistant",
+                        "error": {
+                            "name": "UnknownError",
+                            "data": {"message": terminal["info_error"]},
+                        },
+                    },
+                    "parts": [{"type": "step-start"}],
+                }
+            )
+            return
         scripted = self.assistant_texts.pop(0) if self.assistant_texts else "CHUNK FINISHED"
         batch = scripted if isinstance(scripted, list) else [scripted]
         for text in batch:
+            parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+            if terminal and terminal.get("step_finish"):
+                parts.append({"type": "step-finish", "reason": terminal["step_finish"]})
+            if terminal and terminal.get("error_part"):
+                parts.append({"type": "error", "message": terminal["error_part"]})
             self._messages.append(
                 {
                     "info": {"role": "assistant"},
-                    "parts": [{"type": "text", "text": text}],
+                    "parts": parts,
                 }
             )
 
@@ -151,7 +189,13 @@ class _FakeServeClient:
         self.busy_grace_s = timeout_s
         return self.busy_result
 
-    def metrics(self, session_id: str) -> dict[str, Any]:
+    def metrics(self, session_id: str, *, since: int | None = None) -> dict[str, Any]:
+        if since is not None:
+            # The windowed classification read NEVER consults the canned
+            # script: it is derived from the fake transcript through the real
+            # extractor, so a persisted kill stays visible (and windowed-out)
+            # exactly as the opencode serve transcript behaves.
+            return extract_transcript_metrics(self._messages[since:])
         if self.metrics_error is not None:
             raise self.metrics_error
         if self.metrics_script:
@@ -395,6 +439,7 @@ def test_serve_drive_busy_window_raced_turn_is_metered_not_voided(tmp_path: Path
 def test_serve_drive_truncation_produces_anomaly(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"step_finish": "stream-incomplete"}]
     client.metrics_result = {
         "turns": 3,
         "input_tokens": 90,
@@ -430,6 +475,7 @@ def test_serve_drive_truncation_produces_anomaly(tmp_path: Path) -> None:
 def test_serve_drive_transport_error_produces_anomaly(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"error_part": "relay: stream boom"}]
     client.metrics_result = {
         "turns": 1,
         "input_tokens": 10,
@@ -706,6 +752,7 @@ def test_run_cell_attempt_serve_driven_resume_truncation_writes_evidence(
     the system temp dir."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"step_finish": "stream-incomplete"}]
     client.metrics_result = {
         "turns": 3,
         "input_tokens": 90,
@@ -1071,6 +1118,12 @@ def test_serve_drive_zero_delta_phase_is_loud_not_clean_zero(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 # WO-LOOPREC-1: loop-guard recovery on the serve path
 # ---------------------------------------------------------------------------
+_LOOP_SIG = "relay: generation loop detected (<request-id>)"
+_FIN_SIG = (
+    "relay: upstream completed but the stream did not finalize "
+    "within 30000ms (<request-id>)"
+)
+
 _LOOP_METRICS = {
     # The guard-killed read as the persisted transcript reports it: the relay
     # loop signature survives in info.error text (opencode 1.18.x writes NO
@@ -1087,7 +1140,7 @@ _LOOP_METRICS = {
     "finalize_timeouts": 0,
     "error_texts": [
         # Live-observed shape (2026-08-10 runs); per-request trace id elided.
-        "relay: generation loop detected (<request-id>)"
+        _LOOP_SIG
     ],
 }
 
@@ -1106,8 +1159,7 @@ _FINALIZE_METRICS = {
     "guard_aborted_turns": 0,
     "finalize_timeouts": 1,
     "error_texts": [
-        "relay: upstream completed but the stream did not finalize "
-        "within 30000ms (<request-id>)"
+        _FIN_SIG
     ],
 }
 
@@ -1121,6 +1173,7 @@ def test_serve_drive_loop_guard_kill_recovers_with_anti_repetition_nudge(
     """
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
     client.metrics_script = [
         dict(_ZERO_METRICS),   # phase baseline
         dict(_LOOP_METRICS),   # loop-killed read
@@ -1158,6 +1211,103 @@ def test_serve_drive_loop_guard_kill_recovers_with_anti_repetition_nudge(
     assert cell.kill_calls == 0
 
 
+def test_serve_drive_recovered_loop_kill_stale_error_not_reclassified(
+    tmp_path: Path,
+) -> None:
+    """The 2026-08-10 live-cell defect: a guard-killed message's info.error
+    persists in the transcript FOREVER, so every cumulative read after the
+    kill still carries the signature (error_texts, info_errors,
+    guard_aborted_turns). After a successful recovery nudge the phase MUST
+    classify only the window produced since the nudge — re-reading the stale
+    kill nudged a completed, CHUNK FINISHED-landing drive again and again
+    until loop_guard_exhausted killed the cell."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
+    stale_post_nudge = _metrics(8, 160, 70, guard_aborted=1)
+    # The real post-recovery cumulative read: the kill's error text is STILL
+    # there (the transcript never forgets), alongside the recovered work.
+    stale_post_nudge.update(info_errors=1, error_texts=[_LOOP_SIG])
+    client.metrics_script = [
+        dict(_ZERO_METRICS),   # phase baseline
+        dict(_LOOP_METRICS),   # loop-killed read
+        stale_post_nudge,      # post-nudge read (stale error carried forward)
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_loop_stale",
+        prompt="fix the gates",
+        run_label="cell-loop-stale",
+        phase="feedback-1",
+    )
+
+    sent = [text for _, text in client.sent_prompts]
+    assert sent == ["fix the gates", _LOOP_RECOVERY_NUDGE]  # never a 3rd prompt
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.recovery_nudges == 1
+    assert stats.turns == 7
+    assert stats.guard_aborted_turns == 1
+    assert len(stats.turn_anomalies) == 1
+    assert stats.turn_anomalies[0]["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert cell.kill_calls == 0
+
+
+def test_serve_drive_stale_loop_error_from_prior_phase_not_reclassified(
+    tmp_path: Path,
+) -> None:
+    """Cross-phase staleness: a kill classified and recovered in an earlier
+    phase is still in the transcript when a LATER phase runs. The later
+    phase's window starts at its own baseline, so the old kill cannot poison
+    its classification."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
+    stale_end = _metrics(8, 160, 70, guard_aborted=1)
+    stale_end.update(info_errors=1, error_texts=[_LOOP_SIG])
+    client.metrics_script = [
+        dict(_ZERO_METRICS),   # phase-1 baseline
+        dict(_LOOP_METRICS),   # phase-1 loop-killed read
+        stale_end,             # phase-1 post-nudge read
+        stale_end,             # phase-2 baseline (cumulative: unchanged)
+        _metrics(11, 200, 95, guard_aborted=1),  # phase-2 end (stale too, via window)
+    ]
+    cell = _FakeCell()
+
+    first = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_stale_phase",
+        prompt="chunk one",
+        run_label="cell-stale-phase",
+        phase="initial-chunk-1",
+    )
+    second = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_stale_phase",
+        prompt="chunk two",
+        run_label="cell-stale-phase",
+        phase="initial-chunk-2",
+    )
+
+    assert first.exit_code == 0 and first.recovery_nudges == 1
+    assert second.exit_code == 0
+    assert second.killed_reason is None
+    assert second.recovery_nudges == 0
+    assert second.turn_anomalies == ()
+    assert second.turns == 3
+    assert [text for _, text in client.sent_prompts] == [
+        "chunk one",
+        _LOOP_RECOVERY_NUDGE,
+        "chunk two",
+    ]
+    assert cell.kill_calls == 0
+
+
 def test_serve_drive_loop_guard_exhaustion_is_loud_exit1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1167,6 +1317,10 @@ def test_serve_drive_loop_guard_exhaustion_is_loud_exit1(
     monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "1")
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [
+        {"info_error": _LOOP_SIG},
+        {"info_error": _LOOP_SIG},
+    ]
     client.metrics_script = [
         dict(_ZERO_METRICS),   # baseline
         dict(_LOOP_METRICS),   # loop kill -> nudge fired (budget spent)
@@ -1208,6 +1362,7 @@ def test_serve_drive_loop_guard_budget_zero_disables_recovery(
     monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "0")
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
     client.metrics_script = [dict(_ZERO_METRICS), dict(_LOOP_METRICS)]
     cell = _FakeCell()
 
@@ -1234,6 +1389,7 @@ def test_run_cell_attempt_loop_guard_recovery_on_repair_leg(tmp_path: Path) -> N
     drive is arm-identical regardless of phase."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
     client.metrics_script = [
         dict(_ZERO_METRICS),   # baseline
         dict(_LOOP_METRICS),   # loop kill
@@ -1267,6 +1423,9 @@ def test_serve_drive_loop_recovery_zero_delta_stays_loud(tmp_path: Path) -> None
     into looking healthy."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [
+        {"info_error": "relay_loop_detected n=40 limit=3"}
+    ]
     loop_zero = dict(_ZERO_METRICS)
     loop_zero.update(
         info_errors=1,
@@ -1299,18 +1458,30 @@ def test_serve_drive_loop_recovery_zero_delta_stays_loud(tmp_path: Path) -> None
 def test_chunked_pass_loop_guard_recovery_inside_chunk(tmp_path: Path) -> None:
     """The building leg recovers in-chunk: the loop kill is nudged, the
     recovered drive lands the marker, the chunk plan advances, and the chunk
-    report carries the recovery-nudge + guard-excluded counts."""
+    report carries the recovery-nudge + guard-excluded counts.
+
+    This is also the 2026-08-10 live-cell incident replay: every cumulative
+    read after the kill STILL carries the kill's error text (a persisted
+    info.error never leaves the transcript). The post-nudge classification
+    must read only the window produced since the nudge — never re-classify
+    the stale kill (that misread nudged a CHUNK FINISHED drive twice more and
+    killed the cell loop_guard_exhausted)."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
+    stale_post_nudge = _metrics(6, 120, 50, guard_aborted=1)
+    stale_post_nudge.update(info_errors=1, error_texts=[_LOOP_SIG])
+    stale_chunk2_end = _metrics(9, 200, 90, guard_aborted=1)
+    stale_chunk2_end.update(info_errors=1, error_texts=[_LOOP_SIG])
     client.metrics_script = [
         dict(_ZERO_METRICS),     # chunk-1 baseline
         dict(_LOOP_METRICS),     # chunk-1 loop-killed read
-        _metrics(6, 120, 50, guard_aborted=1),    # chunk-1 post-nudge read
+        stale_post_nudge,        # chunk-1 post-nudge read (stale error carried)
         _metrics(6, 120, 50, guard_aborted=1),    # chunk-2 baseline
-        _metrics(9, 200, 90, guard_aborted=1),    # chunk-2 end read
+        stale_chunk2_end,        # chunk-2 end read (stale error carried)
     ]
     client.assistant_texts = [
-        "looped repeated repeated",           # chunk-1 drive
+        # The killed chunk-1 drive persists no text (info_error shape above).
         "recovered work. CHUNK FINISHED",     # loop-recovery nudge
         "chunk two done. CHUNK FINISHED",     # chunk-2 drive
     ]
@@ -1351,6 +1522,7 @@ def test_serve_drive_finalize_timeout_recovers_with_resume_nudge(tmp_path: Path)
     scoring turns (only guard kills are excluded)."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [{"info_error": _FIN_SIG}]
     client.metrics_script = [
         dict(_ZERO_METRICS),      # phase baseline
         dict(_FINALIZE_METRICS),  # finalize-killed read
@@ -1392,6 +1564,10 @@ def test_serve_drive_finalize_timeout_exhaustion_is_loud_exit1(
     monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "1")
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
+    client.assistant_terminal_script = [
+        {"info_error": _FIN_SIG},
+        {"info_error": _FIN_SIG},
+    ]
     client.metrics_script = [
         dict(_ZERO_METRICS),      # baseline
         dict(_FINALIZE_METRICS),  # finalize kill -> nudge fired (budget spent)

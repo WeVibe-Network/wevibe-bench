@@ -506,6 +506,44 @@ def test_compaction_since_detects_compaction_part_in_window_only():
     assert client.compaction_since("ses_x", 1) is False
 
 
+def test_metrics_since_windows_the_classification_surface():
+    """A killed turn's info.error persists in the transcript FOREVER: the
+    cumulative read keeps matching it (metering never forgets), while the
+    windowed read — the anomaly-classification surface — excludes it. This is
+    the 2026-08-10 chunk-2 fix: a recovered, marker-landing drive must not be
+    reclassified by the stale kill."""
+    client = ServeClient(base_url="http://127.0.0.1:1", timeout=0.1, poll_interval=0.01)
+    messages = [
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "chunk one"}]},
+        {
+            "info": {
+                "role": "assistant",
+                "error": {
+                    "name": "UnknownError",
+                    "data": {"message": "relay: generation loop detected (req-1)"},
+                },
+            },
+            "parts": [{"type": "step-start"}],
+        },
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "nudge"}]},
+        {
+            "info": {
+                "role": "assistant",
+                "tokens": {"input": 10, "output": 5, "reasoning": 0},
+            },
+            "parts": [{"type": "text", "text": "recovered work. CHUNK FINISHED"}],
+        },
+    ]
+    client.get_messages = lambda session_id: messages  # type: ignore[method-assign]
+    cumulative = client.metrics("ses_x")
+    assert cumulative["info_errors"] == 1
+    assert classify_transport_anomaly(cumulative) == ("guard_abort", "loop_guard")
+    windowed = client.metrics("ses_x", since=2)
+    assert windowed["info_errors"] == 0
+    assert windowed["output_tokens"] == 5
+    assert classify_transport_anomaly(windowed) == (None, None)
+
+
 def test_session_model_skips_compaction_parents():
     client = ServeClient(base_url="http://127.0.0.1:1", timeout=0.1, poll_interval=0.01)
     messages = [
