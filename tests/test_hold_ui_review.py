@@ -152,7 +152,7 @@ def test_hold_survives_unresolvable_entrypoint(
 
 
 def test_resolve_entrypoint_prefers_package_start(tmp_path: Path) -> None:
-    worktree = _mk_worktree(tmp_path)
+    worktree = _mk_worktree(tmp_path, _BOOT_TEST_PORT)
     assert _resolve_hold_ui_entrypoint(worktree) == (worktree / "server.js").resolve()
 
 
