@@ -341,7 +341,53 @@ def _provider_pin_from_model(model: str) -> str:
     return parts[0]
 
 
-def _build_roster(*, roster_model: str | None = None) -> tuple[list[RosterEntry], str]:
+def _apply_model_override(
+    slugs: list[str],
+    *,
+    model_override: str | None,
+) -> list[str]:
+    """Apply the operator's --model selection to the roster slug list.
+
+    The override names a proxy bench alias present in WORKER_MODEL_REGISTRY
+    (e.g. ``qwen3.6-35b-a3b-bench``); the resulting roster slug is
+    ``local-llm-proxy/<alias>``. The proxy makes that exact model resident on
+    the first request (exclusive load on call). Valid only against the
+    single-subject roster — a multi-rung roster has no defined override
+    semantics, so it errors rather than guessing. Identity is still observed
+    from API responses and recorded (RC-7); this flag selects, it does not
+    gate. Changing the model changes the roster hash, which invalidates an
+    existing manifest by design (archive + rerun, RUNBOOK §0).
+    """
+    override = str(model_override or "").strip()
+    if not override:
+        return slugs
+    alias = override
+    if alias.startswith("local-llm-proxy/"):
+        alias = alias[len("local-llm-proxy/"):]
+    registry = getattr(config, "WORKER_MODEL_REGISTRY", {})
+    if alias not in registry:
+        available = ", ".join(sorted(str(key) for key in registry)) or "none"
+        print(
+            f"error: --model {model_override!r} is not a known worker model alias. "
+            f"available aliases: {available}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if len(slugs) != 1:
+        print(
+            "error: --model override requires a single-subject roster "
+            f"(resolved {len(slugs)} slugs: {', '.join(slugs)})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return [f"local-llm-proxy/{alias}"]
+
+
+def _build_roster(
+    *,
+    roster_model: str | None = None,
+    model_override: str | None = None,
+) -> tuple[list[RosterEntry], str]:
     roster: list[RosterEntry] = []
     for rung in config.backgammon_scored_ladder_roster():
         model = str(rung.model)
@@ -377,6 +423,24 @@ def _build_roster(*, roster_model: str | None = None) -> tuple[list[RosterEntry]
         )
     if not roster:
         raise RuntimeError("backgammon_scored_ladder_roster resolved empty")
+    override_slugs = _apply_model_override(
+        [entry.model for entry in roster],
+        model_override=model_override,
+    )
+    if override_slugs != [entry.model for entry in roster]:
+        roster = [
+            RosterEntry(
+                model=slug,
+                role=entry.role,
+                provider_pin=_provider_pin_from_model(slug),
+                config_identity=entry.config_identity,
+            )
+            for entry, slug in zip(roster, override_slugs)
+        ]
+        _LOG.info(
+            "run_cumulative.model_override models=%s",
+            ",".join(entry.model for entry in roster),
+        )
     return roster, cumulative_roster_hash(roster)
 
 
@@ -1489,6 +1553,10 @@ def _build_real_runner_and_leader_client(
             continue
         seen_models.add(slug)
         accepted_models.append(slug)
+    accepted_models = _apply_model_override(
+        accepted_models,
+        model_override=str(getattr(args, "model", "") or "").strip() or None,
+    )
     verify_worker_model_acceptance(models=accepted_models, logger=_LOG)
     extract_prompt = _load_required_text(repo_root / "scaffold" / "sxe-candidate" / "E-assembled.txt")
 
@@ -1571,7 +1639,8 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
     review_card = PrivateReviewCard(str(layout.review_card_path))
 
     roster_model_filter = str(getattr(args, "roster_model", "") or "").strip() or None
-    roster, _ = _build_roster(roster_model=roster_model_filter)
+    model_override = str(getattr(args, "model", "") or "").strip() or None
+    roster, _ = _build_roster(roster_model=roster_model_filter, model_override=model_override)
     config_fingerprint = config.backgammon_ladder_roster_fingerprint()
 
     if require_runtime:
@@ -1958,6 +2027,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Optional case-insensitive model substring filter for roster selection "
             "(smoke/diagnostic aid; canonical benchmark runs unfiltered)."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Pin the run's subject to a named proxy bench alias present in "
+            "WORKER_MODEL_REGISTRY (e.g. qwen3.6-35b-a3b-bench). The proxy makes "
+            "that exact model resident on the first request (exclusive load on "
+            "call); identity is still observed from API responses and recorded "
+            "(RC-7). Omit to keep the neutral auto-resident slug. Changing the "
+            "model changes the roster hash, which invalidates an existing "
+            "manifest by design: archive runs/cumulative and rerun (RUNBOOK §0)."
         ),
     )
 

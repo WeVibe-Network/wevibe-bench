@@ -1,5 +1,5 @@
 # RUNBOOK.md — the operative run card
-**Version:** 6 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v5 (2026-08-04) · **Amended:** 2026-08-07 session rulings (WO-CANON-1): §1 honest limit · §2 pairing-token deadline + one-org reasoning · rule 5.18 walk-back/rerun · D-EMISSIONS-INERT-KEEPERS
+**Version:** 7 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v6 (2026-08-07) · **Amended:** 2026-08-10 (WO-MODEL-FLAG): §0/§2 `--model` subject selection + CLI syntax correction (main-parser flags precede the subcommand) · §1/RC-7 operator-selects-model amendment · §6 reasoning posture rewritten self-explanatory — frozen at MAX, with the defensible-claim reasoning
 
 > **This is the only operative document. Read it and nothing else to operate the benchmark.**
 > Every other document in this repository is history with no authority over what runs. Their binding
@@ -45,9 +45,22 @@ docker image inspect wevibe-bench-worker:v1 --format '{{.Created}}'
 #    vs the newest mtime under docker/worker/. Rebuild:
 docker build -t wevibe-bench-worker:v1 docker/worker
 
-# 3. Run one cell (OFF; ON cells add `--mode on --org <org>`, §2):
-nohup .venv/bin/python scripts/run_cumulative.py run --until-review --mode off \
+# 3. Run one cell (OFF; ON cells add `--mode on --org <org>`, §2).
+#    `--model <alias>` pins the subject: the proxy makes that exact model
+#    resident on the first request (exclusive load on call — no manual load
+#    step). Flags before the subcommand are main-parser flags — argparse
+#    rejects them after `run` (verified 2026-08-10: exit 2).
+#    Omit --model and the run uses the neutral auto-resident slug.
+nohup .venv/bin/python scripts/run_cumulative.py --model qwen3.6-35b-a3b-bench \
+  run --until-review --mode off \
   > runs/off-cell-$(date +%Y%m%dT%H%M%S).log 2>&1 &
+
+# 3a. Model switch mid-campaign: --model changes the roster hash, so the
+#     existing manifest rejects the run ("roster hash drift detected").
+#     This is BY DESIGN — one manifest = one subject model, so OFF/ON pairing
+#     inside a manifest is always same-model. Archive (never delete) and rerun:
+mv runs/cumulative runs/cumulative.<why>-<date>
+#     The server corpus is untouched (§2 wipe rules still govern that).
 
 # 4. Watch + attach. The runner logs the session id and attach command itself:
 grep -E 'attach_cmd|session_id' runs/off-cell-<ts>.log | tail -5
@@ -97,9 +110,9 @@ this fixes.)
 
 | | |
 |---|---|
-| Subject model | **whatever is resident** — the bench never selects a model (RC-7) |
+| Subject model | **operator-selected via `--model <alias>`** (WO-MODEL-FLAG, 2026-08-10): the flag names a pinned proxy bench alias; the proxy makes that exact model resident on the first request. Omitting it keeps the neutral auto-resident slug. Identity is always read from the API response and recorded (RC-7) |
 | Org | **one org for the entire campaign**, recorded in the manifest; chain assigned `wevibe-org-0`, leader fp `f534aa02` |
-| Runtime | **oMLX.** The operator manages what is loaded. Identity is read from the API response and recorded in the manifest, so this row is documentation, never a selector |
+| Runtime | **oMLX.** The `--model` alias pins which checkpoint the proxy loads. Identity is read from the API response and recorded in the manifest, so this row is documentation, never a gate |
 | Transport | session production model AND session extraction model → local relay proxy `:4545` → resident oMLX model. **ONLY** the embedding/vector-dim path bypasses the proxy to the local embedding endpoint directly |
 | Harness | OpenCode in a Docker worker image + plugin. **The version is not asserted here** — the worker image fingerprint is measured at run time and recorded in the manifest (RC-5), and the stack smoke asserts it matches the commit under test (§6) |
 | Task | the LOCKED backgammon prompt — unstructured, no requirements checklist |
@@ -206,7 +219,11 @@ A re-baseline wipes the corpus and so is a walk-back (rule 18) — declared, nev
 **BENCH `MODE=on|off`** — one cell. See §3.
 
 **`--org`** — a first-class input to the run command, with mode-dependent requirement.
-- **ON cells: REQUIRED.** `run_cumulative.py run --until-review --mode on --org <org>` — omitting
+**CLI syntax:** `--org`, `--model`, `--roster-model`, `--task`, `--seed`, `--manifest` are
+MAIN-parser flags and must precede the subcommand
+(`run_cumulative.py --org <org> run --until-review --mode on`). argparse rejects them after `run`
+with exit 2 (verified 2026-08-10).
+- **ON cells: REQUIRED.** `run_cumulative.py --org <org> run --until-review --mode on` — omitting
   `--org` with `--mode on` errors before any run begins ("`--mode on requires --org <org>`").
 - **OFF cells: OPTIONAL.** Omit `--org` and the run falls back to `wevibe-org-0`.
 - **When `--org` is passed**, the run idempotently ensures the org exists first: it reuses the
@@ -328,12 +345,15 @@ children, brings the compose project down, asserts no listener remains on the be
 **reports what it killed.** A silent reaper is not a reaper. The gate path spawns real
 `node report.mjs` Playwright subprocesses at `backgammon.py:1877` (`_run_gate_report`).
 
-**RC-7 · The stack never selects a model.** Identity is read from the API response and recorded in
-the manifest. No model name in any bench config. No identity gate. No roster. Procedure: run an OFF
-cell → run an ON cell → **STOP and ask Walter to switch the model.**
-
-A served-model change is **observed and recorded, never aborted on**. It appears in the status
-stream per attempt (RC-5); reading it is the scorecard's job.
+**RC-7 · The harness never selects a model; the operator does, by flag.** Amended 2026-08-10
+(WO-MODEL-FLAG): the subject is chosen per run by the operator's `--model <alias>` flag, which names
+a pinned proxy bench alias — the proxy then makes that exact model resident on the first request
+(exclusive load on call; the swap is refused with retryable 409 while another stream is in flight).
+The harness still never decides anything about identity: it is read from the API response and
+recorded in the manifest and per-attempt status stream. No identity gate. A served-model change is
+**observed and recorded, never aborted on**. Because the flag changes the roster hash, switching
+models invalidates the manifest (§0 archive-and-rerun) — one manifest = one subject model, so
+OFF/ON pairing inside a manifest is always same-model.
 
 **The corpus is model-agnostic and switching models is expected.** It accumulates knowledge
 regardless of which model produced an entry, which model consumes it, in what order, or how often.
@@ -465,11 +485,65 @@ What each knob ACTUALLY does on this stack, measured — not assumed:
 | thinking on/off + `preserve_thinking` defaults | oMLX admin per-model settings | Native, apply at load. `preserve_thinking_default: true` is set for both Qwen3.6 models (2026-08-10) — the BENCH aliases override per-request with `preserve_thinking: false` (§12 remediation item 1) |
 | `thinking_budget_enabled` | oMLX admin per-model settings | Exists in the schema; UNVERIFIED — do not enable mid-campaign |
 
-**Frozen for the campaign.** The bench posture is: `max_reasoning_tokens: 8192` present,
-`preserve_thinking: false`, `reasoning_effort` stripped, thinking otherwise uncapped. Changing ANY
-of these mid-campaign is a template-configuration change — the arms then differ in something other
-than injection (RC-4) and the paired arm breaks (rule 5.18 walk-back class). Set once, freeze, touch
-only between campaigns.
+**Frozen for the campaign: MAX reasoning — what that means, and why (Walter, 2026-08-10,
+WO-MODEL-FLAG).**
+
+*What "reasoning" is, plainly.* These models can think before they answer: they generate a
+chain-of-thought that costs output tokens but is not part of the visible reply (it streams as
+`reasoning_content` and is metered separately as `reasoning_tokens` in the status stream). The one
+budget that matters mechanically is `max_tokens`: thinking and the visible answer **share** it. If
+thinking eats the whole budget the turn ends `finish_reason: length`, possibly with severed
+tool-call JSON — the VOID-INSTRUMENT class of rule 5.10.
+
+*Why MAX is the posture.* "Max" on this stack means: **thinking ON, and no client reasoning
+parameters at all** — the model thinks as long as it natively wants, bounded only by the output
+budget. This is not a vibes choice; it is the only setting that survives scrutiny:
+
+1. **There is no enforceable middle.** `max_reasoning_tokens` is accepted but NOT enforced by oMLX
+   0.5.7 (probe: cap 50 → full reasoning flowed anyway). A token "cap" we cannot enforce is an
+   assumption, not a control.
+2. **`reasoning_effort` is an unverified dial.** Accepted (no 400), qualitative (low/medium/high),
+   and its behavioural effect has never been measured on this stack. Pinning it would put an
+   unproven knob inside the instrument — indefensible.
+3. **The claim only needs frozen, not tuned.** The campaign's claim is a *within-model* OFF-vs-ON
+   delta. Reasoning depth is identical in both arms by construction (RC-4: arms differ only in
+   injection), so it cancels out of the comparison. What would break the claim is the two arms
+   thinking *differently* — which is why the posture is frozen, not why it is large.
+4. **Max gives each attempt its best shot** on a multi-hour agentic build task; the cost is bounded
+   by the attempt ceiling and the 900 s rule, not by reasoning length.
+
+*Why MAX does not endanger the instrument.* Its one failure mode — reasoning eating the shared
+budget — is defended structurally, not by hope: bench aliases carry **output 32768** (2× the
+interactive 16384, the R2 clamp-guillotine fix: thinking cannot starve the visible answer),
+`failOnFinishReasonLength: true` so any truncation is flagged loud, and `truncated_turns` /
+`truncated_turns_retried` are first-class manifest fields (rule 5.10). A tripped guard voids the
+cell — it never scores as a capability FAIL, so the claim stays clean even when the posture bites.
+
+*The mechanics.* The bench aliases own every reasoning-adjacent parameter
+(`max_reasoning_tokens: 8192` as a presence-marker, `preserve_thinking: false`,
+`reasoning_effort` client-stripped via `forbiddenRequestParams`). The worker sends none. Keep it
+that way: the bench's request shape is byte-identical across cells, arms, and models.
+
+*The change rule.* Frozen for the campaign. Touch only between campaigns, and declare it when you
+do — a mid-campaign change makes the arms differ in something other than injection (rule 5.18
+walk-back class).
+
+*Benching a new model — the two-block pattern.* One proxy alias + one registry entry, nothing else:
+
+1. **Proxy** (`Local LLM Proxy/config/models.yaml`): copy the `qwen3.6-35b-a3b-bench` block, set
+   `upstreamModel` to the model's exact oMLX id and the card samplers in `requestDefaults`
+   (oMLX cannot store `top_k` per-model — the proxy must fill it). Keep the bench contract
+   untouched: `limits.output: 32768`, `preserve_thinking: false`, the `forbiddenRequestParams`
+   pair, `concurrency.queueDepth: 0`, `streamHeartbeatMs: 0`, `loopPolicy.failOnFinishReasonLength:
+   true`. **The proxy reads this file once at boot — adding an alias requires a proxy restart
+   (operator step).** Never point the bench at an interactive alias: it inherits the 15 s SSE
+   heartbeat the bench's undici worker hangs on, clamps output to 16384, and queues behind
+   interactive traffic.
+2. **Bench** (`wevibe_bench/config.py` `WORKER_MODEL_REGISTRY`): mirror Walter's daily
+   `opencode.json` model block, with the ONE deliberate difference `limit.output: 32768` (the bench
+   budget; opencode clamps `max_tokens` to the declared limit, and the alias default is fill-only —
+   a 16384 declaration silently halves the cell's budget).
+3. Run with `--model <alias>`. Roster hash changes → archive `runs/cumulative`, rerun (§0).
 
 **Walter's personal opencode sessions are deliberately UNCAPPED** (OMLX-REASON-1, proxy
 `config/models.yaml`): the interactive aliases send no reasoning parameters at all, so thinking runs

@@ -400,6 +400,25 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             "output": 16_384,
         },
     },
+    # Pinned bench alias (2026-08-10, WO model-flag): selecting this model via
+    # `run_cumulative.py run --model qwen3.6-35b-a3b-bench` makes the proxy
+    # load exactly Qwen3.6-35B-A3B-MLX-8bit (exclusive load on call). The block
+    # mirrors Walter's daily opencode.json `qwen3.6-35b-a3b (Local LLM Proxy -
+    # oMLX)` entry; the ONE deliberate difference is limit.output 32768 (the
+    # bench-alias output budget — reasoning must never be able to eat the
+    # whole completion, RUNBOOK §6), where the daily block declares 16384.
+    "qwen3.6-35b-a3b-bench": {
+        "name": "Qwen3.6 35B-A3B 8bit via Proxy (bench)",
+        "reasoning": True,
+        "tool_call": True,
+        "temperature": True,
+        "attachment": False,
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+    },
 }
 
 # Schema version for the frozen ladder run manifest. Bump whenever the manifest
