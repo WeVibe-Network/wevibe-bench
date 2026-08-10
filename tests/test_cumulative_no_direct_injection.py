@@ -6,10 +6,8 @@ import pytest
 
 import wevibe_bench.adapters.backgammon as backgammon_mod
 from wevibe_bench.adapters.backgammon import (
-    BACKGAMMON_PROMPT,
     BackgammonCellResult,
     BackgammonRunner,
-    WORKER_WORKING_STYLE_PREAMBLE,
 )
 from wevibe_bench.backends.base import RecalledMemory
 
@@ -55,12 +53,11 @@ def test_cumulative_on_prompt_is_base_prompt_without_memory_blob(
 
     monkeypatch.setattr(backgammon_mod, "_format_memory", _unexpected_format)
 
-    prompt = runner._build_task_prompt(injected_memory=_sample_injected_memory())
+    chunks = runner._load_chunk_prompts(injected_memory=_sample_injected_memory())
 
-    assert prompt.startswith(WORKER_WORKING_STYLE_PREAMBLE)
-    assert BACKGAMMON_PROMPT in prompt
-    assert "DIRECT_INJECTION_MEMORY_MARKER" not in prompt
-    assert "# WEVIBE MEMORY CONTEXT" not in prompt
+    assert chunks
+    assert all("DIRECT_INJECTION_MEMORY_MARKER" not in c for c in chunks)
+    assert all("# WEVIBE MEMORY CONTEXT" not in c for c in chunks)
     assert format_called["value"] is False
 
 
@@ -112,7 +109,7 @@ def test_run_cell_scored_path_passes_empty_injected_memory(
 
 
 def test_backgammon_on_path_has_no_wevibe_memory_file_write_logic() -> None:
-    prompt_source = inspect.getsource(BackgammonRunner._build_task_prompt)
+    prompt_source = inspect.getsource(BackgammonRunner._load_chunk_prompts)
     run_cell_source = inspect.getsource(BackgammonRunner.run_cell)
 
     assert "WEVIBE_MEMORY.md" not in prompt_source

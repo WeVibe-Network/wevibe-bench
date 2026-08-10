@@ -11,7 +11,7 @@ from wevibe_bench.spend_key import (
     SpendKeyError,
     _read_dotenv,
     key_fingerprint,
-    resolve_orcarouter_api_key,
+    resolve_local_llm_proxy_api_key,
     resolve_spend_db_dsn,
     resolve_spend_proxy_base_url,
     resolve_worker_spend_proxy_base_url,
@@ -106,8 +106,8 @@ def test_dotenv_parser_returns_empty_dict_for_missing_file(tmp_path: Path) -> No
 
 def test_dotenv_setdefault_semantics_first_wins(tmp_path: Path) -> None:
     dotenv = tmp_path / ".env"
-    dotenv.write_text("ORCAROUTER_API_KEY=first\nORCAROUTER_API_KEY=second\n", encoding="utf-8")
-    token, source = resolve_orcarouter_api_key(
+    dotenv.write_text("LOCAL_LLM_PROXY_API_KEY=first\nLOCAL_LLM_PROXY_API_KEY=second\n", encoding="utf-8")
+    token, source = resolve_local_llm_proxy_api_key(
         env={},
         dotenv_path=dotenv,
         opencode_config_path=tmp_path / "missing-opencode.json",

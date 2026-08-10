@@ -348,51 +348,57 @@ class LadderRung:
 # CURRENT (2026-08-03, D4): SINGLE SUBJECT. The bench never selects a model —
 # it tests whatever is loaded and learns which via API-response observation
 # (identity handled separately by the observed-extraction invariant; see D2).
-# There is ONE subject = whichever model is resident in LM Studio at run time,
-# with two self-lift arms off/on. The `orcarouter/wevibe-bench-worker` slug is a
-# neutral marker for "whatever is loaded" — the worker→proxy opencode provider
-# selector (already the default) — NOT a specific model identity.
+# There is ONE subject = whichever model is resident behind the Local LLM Proxy
+# (:4545) at run time, with two self-lift arms off/on. The
+# `local-llm-proxy/wevibe-bench-worker` slug is a neutral marker for "whatever
+# is loaded" — the worker→proxy opencode provider selector (already the
+# default) — NOT a specific model identity.
 #
 # SUPERSEDED history: paid OrcaRouter era 2026-07-24 (kimi-k3 source /
 # kimi-k2.7-code BRACKET / tencent-hy3 measure; GLM-5.2 deselected 2026-07-27;
-# xiaomi/mimo-v2.5-pro dropped), and the local-model pivot 2026-07-31 that
-# enumerated THREE LM Studio aliases (qwen3.6-35b-a3b/40b-deckard/27b-fable).
-# Both eras named models; under the one-subject design the roster names none.
+# xiaomi/mimo-v2.5-pro dropped), the local-model pivot 2026-07-31 that
+# enumerated THREE LM Studio aliases (qwen3.6-35b-a3b/40b-deckard/27b-fable),
+# and the 2026-08-09 provider rename orcarouter -> local-llm-proxy (the paid
+# provider was long gone; the slug had become misleading). Both earlier eras
+# named models; under the one-subject design the roster names none.
 BACKGAMMON_SCORED_LADDER_ROSTER: tuple[LadderRung, ...] = (
     LadderRung(
-        model="orcarouter/wevibe-bench-worker",
+        model="local-llm-proxy/wevibe-bench-worker",
         role="measure",
         memory_modes=("off", "on"),
         recorded_class=None,
     ),
 )
 
-# Worker opencode model declarations mirror manager session provider.orcarouter
-# model blocks exactly (name/reasoning/tool_call/limit shape). Any worker-only
-# additions (interleaved + optional headers) are layered by
+# Worker opencode model declarations mirror manager session provider blocks
+# (name/reasoning/tool_call/limit shape). Any worker-only additions
+# (interleaved + optional headers) are layered by
 # adapters.backgammon.build_worker_opencode_config.
 WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
-    # Local LM Studio declarations. These are opencode MODEL BLOCKS used by
+    # Local proxy declarations. These are opencode MODEL BLOCKS used by
     # build_worker_opencode_config — NOT scored-roster rungs (the roster is now a
-    # single subject under D4). Model ids are the bench aliases served by the LOCAL
-    # llm proxy (config/models.yaml, "Bench aliases"); the worker reaches it
-    # via WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL=http://host.docker.internal:4545/v1
-    # (or --proxy-base-url). Full native context 262144 per Walter's
-    # full-context order; output 32768 so reasoning can never eat the whole
-    # completion budget (R2 clamp-guillotine pattern, applied to local
-    # thinking models that take no separate reasoning budget).
+    # single subject under D4). Model ids are the bench aliases served by the
+    # Local LLM Proxy (its config/models.yaml, bench aliases); the worker reaches
+    # it via WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL=http://host.docker.internal:4545/v1
+    # (or --proxy-base-url). Shape mirrors Walter's daily opencode model block
+    # for the oMLX alias (2026-08-09 directive): no options block (no
+    # temperature pin, no reasoning effort) so the worker puts the same
+    # request shape on the wire as the daily driver that never stalls.
+    # Context is 262144 (256K, 2026-08-10 directive) matching the proxy bench
+    # alias's contextLength; output 16384 mirrors the daily block.
     "wevibe-bench-worker": {
-        "name": "Qwen3.6 35B A3B (local)",
+        # Display name only — deliberately NOT a model identity (RC-7): the
+        # alias serves whichever model is resident behind the proxy.
+        "name": "Local LLM Proxy (auto-resident)",
         "reasoning": True,
         "tool_call": True,
+        "temperature": True,
+        "attachment": False,
+        "modalities": {"input": ["text"], "output": ["text"]},
         "limit": {
             "context": 262_144,
-            "output": 32_768,
+            "output": 16_384,
         },
-        # Pinned so opencode's provider-default temperature (0.55 for Qwen)
-        # can never leak into a scored cell invisibly; matches the local
-        # proxy's bench-profile default.
-        "options": {"temperature": 0.6},
     },
 }
 

@@ -528,7 +528,7 @@ def _run_main_capture_extract_call(
         "WEVIBE_BENCH_EXTRACT_NUM_CTX",
         "WEVIBE_BENCH_API_KEY",
         "OPENROUTER_API_KEY",
-        "ORCAROUTER_API_KEY",
+        "LOCAL_LLM_PROXY_API_KEY",
         "WEVIBE_BENCH_SPEND_PROXY_BASE_URL",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -547,7 +547,7 @@ def _run_main_capture_extract_call(
         run_label=run_label,
         source_mode=source_mode,
         org_id="wevibe-org-2",  # D5a: no DEFAULT_ORG_ID; extraction must pin an explicit (non-org-0) arm target.
-        session_model="orcarouter/opencode/big-pickle",
+        session_model="local-llm-proxy/opencode/big-pickle",
         extract_model=None,
         extract_timeout=60,
         runs_dir=str(runs_dir),

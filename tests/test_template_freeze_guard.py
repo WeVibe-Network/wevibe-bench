@@ -113,7 +113,7 @@ def _session() -> Any:
 
     return SessionRecord(
         sequence_index=1,
-        model="orcarouter/x",
+        model="local-llm-proxy/x",
         provider_pin="local",
         memory_mode="off",
         phase_group=PhaseGroup.OFF_BASELINE.value,

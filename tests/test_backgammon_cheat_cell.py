@@ -186,3 +186,45 @@ def test_planted_reference_on_run_cell_wrapper_also_flags(
     assert result.verdict == "CHEAT"
     assert result.termination_reason == "cheat_detected"
     assert (run_dir / "CHEAT.json").exists()
+
+
+def test_worker_agents_md_carries_anti_cheat_rule_without_verdict_threat(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """WO-ANTICHEAT-1: the worker is told the rule, once, in the one file that
+    survives per-chunk compaction (the worktree AGENTS.md opencode auto-loads).
+
+    Walter 2026-08-10: rule ONLY — no verdict threat. A cheat ATTEMPT is
+    ignored; the operator monitors the live session; PASS/FAIL is never gated
+    on this text. The stanza must never name exact oracle paths (deny errors
+    leak enough already)."""
+    from wevibe_bench.adapters.backgammon import _WORKER_AGENTS_MD
+
+    text = _WORKER_AGENTS_MD.lower()
+    assert "do not cheat" in text
+    assert "answer sheet" in text
+    assert "denied" in text  # the denial-IS-the-boundary rule
+    # No consequence/verdict language.
+    assert "cheat verdict" not in text
+    assert "invalidat" not in text
+    assert "forces" not in text
+    # No exact oracle paths named.
+    assert "report.mjs" not in text
+    assert "/gates" not in text
+    assert "golden" not in text
+
+    # And it actually lands in the seeded worktree the worker reads.
+    run_dir = tmp_path / "stanza-cell"
+    _plant_events(run_dir, _clean_events())
+    runner = _make_runner(tmp_path / "work-root")
+    _patch_gate_pass(monkeypatch, runner)
+    result = runner._run_cell_impl(
+        run_label="stanza-cell",
+        run_dir=run_dir,
+        task_id="backgammon",
+        injected_memory=[],
+    )
+    assert result.verdict == "PASS"
+    seeded = (run_dir / "worktree" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Do NOT cheat" in seeded
+    assert "answer sheet" in seeded

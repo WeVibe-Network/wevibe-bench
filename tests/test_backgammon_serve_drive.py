@@ -17,7 +17,10 @@ from typing import Any
 import pytest
 
 from wevibe_bench.adapters.backgammon import (
+    _FINALIZE_RECOVERY_NUDGE,
+    _LOOP_RECOVERY_NUDGE,
     BackgammonRunner,
+    TURN_TERMINAL_GUARD_ABORT,
     TURN_TERMINAL_TRANSPORT_ERROR,
     TURN_TERMINAL_TRUNCATED,
 )
@@ -44,14 +47,96 @@ class _FakeServeClient:
         self.abort_error: Exception | None = None
         self.wait_result: bool = True
         self.wait_timeout_s: float | None = None
+        self.busy_result: bool = True
+        self.busy_grace_s: float | None = None
         self.metrics_result: dict[str, Any] | None = None
+        self.metrics_script: list[dict[str, Any]] = []
+        self.metrics_baseline: dict[str, Any] = {}
+        self._baseline_served: bool = False
+        self.assistant_texts: list[str | list[str]] = []
         self.send_error: Exception | None = None
         self.metrics_error: Exception | None = None
+        # Watermark-windowed marker scan support: a growable message list the
+        # chunked loop reads via get_messages/assistant_texts_since. Each
+        # send_prompt appends a user message plus one (or a batch of)
+        # assistant messages, mirroring the real serve session.
+        self._messages: list[dict[str, Any]] = []
+        self.poll_interval: float = 0.0
+        self.compaction_ready: bool = False
+        self.summarize_calls: list[tuple[str, str, str, bool]] = []
 
     def send_prompt(self, session_id: str, prompt: str) -> None:
         self.sent_prompts.append((session_id, prompt))
         if self.send_error is not None:
             raise self.send_error
+        self._messages.append(
+            {
+                "info": {
+                    "role": "user",
+                    "model": {
+                        "providerID": "local-llm-proxy",
+                        "modelID": "kimi/kimi-k3",
+                    },
+                },
+                "parts": [{"type": "text", "text": prompt}],
+            }
+        )
+        scripted = self.assistant_texts.pop(0) if self.assistant_texts else "CHUNK FINISHED"
+        batch = scripted if isinstance(scripted, list) else [scripted]
+        for text in batch:
+            self._messages.append(
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+
+    def get_messages(self, session_id: str) -> list[dict[str, Any]]:
+        return list(self._messages)
+
+    def assistant_texts_since(self, session_id: str, watermark: int) -> list[str]:
+        return [
+            "".join(
+                str(part.get("text") or "")
+                for part in msg.get("parts", [])
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            for msg in self._messages[watermark:]
+            if isinstance(msg, dict) and msg.get("info", {}).get("role") == "assistant"
+        ]
+
+    def compaction_since(self, session_id: str, watermark: int) -> bool:
+        if self.compaction_ready:
+            return True
+        return any(
+            isinstance(part, dict) and part.get("type") == "compaction"
+            for msg in self._messages[watermark:]
+            if isinstance(msg, dict)
+            for part in msg.get("parts", [])
+        )
+
+    def session_busy(self, session_id: str) -> bool:
+        return False
+
+    def session_model(self, session_id: str) -> tuple[str, str] | None:
+        return ("local-llm-proxy", "kimi/kimi-k3")
+
+    def summarize(
+        self,
+        session_id: str,
+        *,
+        provider_id: str,
+        model_id: str,
+        auto: bool = False,
+        timeout_s: float = 1800.0,
+    ) -> None:
+        self.summarize_calls.append((session_id, provider_id, model_id, auto))
+        self._messages.append(
+            {
+                "info": {"role": "user"},
+                "parts": [{"type": "compaction"}],
+            }
+        )
 
     def abort(self, session_id: str) -> None:
         self.aborted_sessions.append(session_id)
@@ -62,17 +147,34 @@ class _FakeServeClient:
         self.wait_timeout_s = timeout_s
         return self.wait_result
 
+    def wait_busy(self, session_id: str, *, timeout_s: float) -> bool:
+        self.busy_grace_s = timeout_s
+        return self.busy_result
+
     def metrics(self, session_id: str) -> dict[str, Any]:
         if self.metrics_error is not None:
             raise self.metrics_error
+        if self.metrics_script:
+            return self.metrics_script.pop(0)
+        # The serve-drive captures a baseline BEFORE sending the prompt and
+        # meters deltas against it; the default baseline is an empty session
+        # (all zeros), so single-phase tests keep absolute-value assertions.
+        if not self._baseline_served:
+            self._baseline_served = True
+            return self.metrics_baseline
         return self.metrics_result
+
+    def last_assistant_text(self, session_id: str) -> str:
+        if self.assistant_texts:
+            return self.assistant_texts.pop(0)
+        return "CHUNK FINISHED"
 
 
 def _make_runner(tmp_path: Path) -> BackgammonRunner:
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
-        model="orcarouter/kimi/kimi-k3",
+        model="local-llm-proxy/kimi/kimi-k3",
         memory_mode="off",
         run_timeout_s=30,
         completion_grace_s=2,
@@ -209,6 +311,84 @@ def test_serve_drive_send_error_returns_exit1_no_raise(tmp_path: Path) -> None:
     assert stats.input_tokens == 0
     assert stats.output_tokens == 0
     assert stats.cost_usd == 0.0
+    assert cell.kill_calls == 0
+
+
+def test_serve_drive_never_busy_is_loud_exit1_not_clean_zero(tmp_path: Path) -> None:
+    """A prompt the serve never picks up must NOT meter as a clean 0-turn ok.
+
+    Regression guard for the 2026-08-09 void: prompt_async is fire-and-forget
+    and a bare wait_idle raced the serve's busy flag, returning a false idle
+    in milliseconds — turns=0/input=0/output=0 while gates ran against a
+    worktree the model was still writing. The drive must first confirm busy
+    (wait_busy) and treat never-busy-with-empty-transcript as a loud exit 1.
+    """
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.busy_result = False
+    client.metrics_result = {
+        "turns": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+        "truncations": 0,
+        "error_parts": 0,
+    }
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_neverbusy",
+        prompt="p",
+        run_label="cell-nb",
+        phase="initial",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.killed_reason is None
+    assert stats.turns == 0
+    # Never went busy => the idle wait and the abort/kill path never ran.
+    assert client.wait_timeout_s is None
+    assert client.aborted_sessions == []
+    assert cell.kill_calls == 0
+
+
+def test_serve_drive_busy_window_raced_turn_is_metered_not_voided(tmp_path: Path) -> None:
+    """A turn that completes entirely inside the busy-grace window is metered.
+
+    If wait_busy never observes busy but the transcript already carries turns,
+    the work is real — meter it, never void it.
+    """
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.busy_result = False
+    client.metrics_result = {
+        "turns": 2,
+        "input_tokens": 40,
+        "output_tokens": 20,
+        "reasoning_tokens": 5,
+        "cost_usd": 0.0,
+        "truncations": 0,
+        "error_parts": 0,
+    }
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_raced",
+        prompt="p",
+        run_label="cell-race",
+        phase="initial",
+    )
+
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.turns == 2
+    assert stats.input_tokens == 40
+    assert stats.output_tokens == 20
     assert cell.kill_calls == 0
 
 
@@ -596,3 +776,644 @@ def test_run_cell_attempt_serve_driven_resume_truncation_writes_evidence(
     assert "cell-resume-trunc" in corr["match_key"]
     assert corr["match_key"].endswith(f"|{cell_session_id}")
     assert cell.kill_calls == 0
+
+@pytest.fixture(autouse=True)
+def _no_compaction_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chunked-loop tests never wait out the real self-compaction grace window."""
+    monkeypatch.setenv("WEVIBE_BENCH_COMPACT_GRACE_S", "0")
+
+
+_ZERO_METRICS = {
+    "turns": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "cost_usd": 0.0,
+    "truncations": 0,
+    "error_parts": 0,
+}
+
+
+def _metrics(
+    turns: int,
+    inp: int,
+    out: int,
+    guard_aborted: int = 0,
+    finalize: int = 0,
+) -> dict[str, Any]:
+    # Session-CUMULATIVE read: the kill counts persist in the transcript, so a
+    # post-recovery read carries them forward (a real session never forgets).
+    return {
+        "turns": turns,
+        "input_tokens": inp,
+        "output_tokens": out,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+        "truncations": 0,
+        "error_parts": 0,
+        "guard_aborted_turns": guard_aborted,
+        "finalize_timeouts": finalize,
+    }
+
+
+def test_chunked_pass_sends_all_chunks_in_order_and_meters_deltas(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    # Per chunk: baseline (pre-send) then end-of-phase metrics. Baseline for
+    # chunk 2 is the cumulative after chunk 1 (session metrics are cumulative).
+    client.metrics_script = [
+        dict(_ZERO_METRICS),          # chunk-1 baseline
+        _metrics(2, 10, 5),           # chunk-1 end
+        _metrics(2, 10, 5),           # chunk-2 baseline
+        _metrics(5, 40, 15),          # chunk-2 end
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_chunks",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-chunks",
+    )
+
+    assert [text for _, text in client.sent_prompts] == ["CHUNK ONE", "CHUNK TWO"]
+    assert stats.exit_code == 0
+    assert stats.turns == 5            # 2 + 3, deltas summed across chunks
+    assert stats.input_tokens == 40    # 10 + 30
+    assert stats.output_tokens == 15   # 5 + 10
+    assert len(stats.chunk_reports) == 2
+    assert all(r["marker"] for r in stats.chunk_reports)
+    assert all(not r["nudged"] for r in stats.chunk_reports)
+    # Inter-chunk compaction: backstop fired once (after chunk 1 only — there
+    # is no chunk to protect after the last), with the session's own model.
+    assert client.summarize_calls == [
+        ("ses_chunks", "local-llm-proxy", "kimi/kimi-k3", False)
+    ]
+    assert stats.chunk_reports[0]["compaction"] == "backstop"
+    assert stats.chunk_reports[1]["compaction"] is None
+
+
+def test_chunked_pass_marker_missing_nudges_to_budget_then_fails(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS), _metrics(1, 5, 2),   # chunk-1 baseline + end
+        _metrics(1, 5, 2), _metrics(2, 6, 3),     # nudge-1 baseline + end
+        _metrics(2, 6, 3), _metrics(3, 7, 4),     # nudge-2 baseline + end
+        _metrics(3, 7, 4), _metrics(4, 8, 5),     # nudge-3 baseline + end
+    ]
+    client.assistant_texts = [
+        "done but no marker",
+        "still no marker",
+        "no marker again",
+        "refuses to mark",
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_nomarker",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-nomarker",
+    )
+
+    # Chunk 2 never sent; chunk 1 + three nudges (the default budget); loud
+    # marker failure.
+    sent = [text for _, text in client.sent_prompts]
+    assert sent[0] == "CHUNK ONE"
+    assert len(sent) == 4
+    assert "CHUNK TWO" not in sent
+    assert stats.exit_code == 1
+    assert stats.killed_reason == "chunk_marker_missing"
+    assert stats.chunk_reports[-1]["nudges"] == 3
+    assert client.summarize_calls == []
+
+
+def test_chunked_pass_marker_detected_before_or_after_discovery_block(
+    tmp_path: Path,
+) -> None:
+    """The durability fix: the worker may emit CHUNK FINISHED and its
+    WEVIBE_DISCOVERY block in either order across SEPARATE assistant
+    messages. The watermark-windowed scan must catch both orders without
+    nudging."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS), _metrics(1, 5, 2),   # chunk-1 baseline + end
+        _metrics(1, 5, 2), _metrics(2, 9, 4),     # chunk-2 baseline + end
+    ]
+    client.assistant_texts = [
+        ["CHUNK FINISHED", "WEVIBE_DISCOVERY: scorer maps to pure functions"],
+        ["WEVIBE_DISCOVERY: redis pub/sub fan-out", "done. CHUNK FINISHED"],
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_discovery",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-discovery",
+    )
+
+    assert stats.exit_code == 0
+    assert [text for _, text in client.sent_prompts] == ["CHUNK ONE", "CHUNK TWO"]
+    assert all(r["marker"] for r in stats.chunk_reports)
+    assert all(r["nudges"] == 0 for r in stats.chunk_reports)
+
+
+def test_chunked_pass_prior_chunk_marker_never_satisfies_later_chunk(
+    tmp_path: Path,
+) -> None:
+    """The watermark isolates each chunk: chunk 1's marker is in the
+    transcript forever, but chunk 2 must produce its OWN marker."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS), _metrics(1, 5, 2),   # chunk-1 baseline + end
+        _metrics(1, 5, 2), _metrics(2, 7, 3),     # chunk-2 baseline + end
+        _metrics(2, 7, 3), _metrics(3, 9, 4),     # nudge-1 baseline + end
+        _metrics(3, 9, 4), _metrics(4, 11, 5),    # nudge-2 baseline + end
+        _metrics(4, 11, 5), _metrics(5, 13, 6),   # nudge-3 baseline + end
+    ]
+    client.assistant_texts = [
+        "scaffold done. CHUNK FINISHED",
+        "no marker from chunk two",
+        "still no marker",
+        "no marker again",
+        "refuses to mark",
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_prior",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-prior",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.killed_reason == "chunk_marker_missing"
+    assert stats.chunk_reports[0]["marker"] is True
+    assert stats.chunk_reports[1]["nudges"] == 3
+
+
+def test_chunked_pass_self_fired_compaction_skips_backstop(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS), _metrics(1, 5, 2),   # chunk-1 baseline + end
+        _metrics(1, 5, 2), _metrics(2, 9, 4),     # chunk-2 baseline + end
+    ]
+    client.compaction_ready = True   # the worker's armed self_compact fired
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_selfcompact",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-selfcompact",
+    )
+
+    assert stats.exit_code == 0
+    assert client.summarize_calls == []
+    assert stats.chunk_reports[0]["compaction"] == "self"
+    assert stats.chunk_reports[1]["compaction"] is None
+
+
+def test_chunked_pass_compaction_disabled_via_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEVIBE_BENCH_CHUNK_COMPACT", "0")
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS), _metrics(1, 5, 2),   # chunk-1 baseline + end
+        _metrics(1, 5, 2), _metrics(2, 9, 4),     # chunk-2 baseline + end
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_nocompact",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-nocompact",
+    )
+
+    assert stats.exit_code == 0
+    assert client.summarize_calls == []
+    assert all(r["compaction"] is None for r in stats.chunk_reports)
+
+
+def test_chunked_pass_nudge_recovers_and_advances(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS), _metrics(1, 5, 2),   # chunk-1 baseline + end
+        _metrics(1, 5, 2), _metrics(1, 6, 2),     # nudge baseline + end
+        _metrics(1, 6, 2), _metrics(3, 9, 6),     # chunk-2 baseline + end
+    ]
+    client.assistant_texts = ["no marker here"]   # nudge + chunk-2 use default marker text
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_recover",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-recover",
+    )
+
+    assert [text for _, text in client.sent_prompts][:1] == ["CHUNK ONE"]
+    assert [text for _, text in client.sent_prompts][-1] == "CHUNK TWO"
+    assert len(client.sent_prompts) == 3          # chunk1 + nudge + chunk2
+    assert stats.exit_code == 0
+    assert stats.chunk_reports[0]["nudged"] is True
+    assert stats.chunk_reports[0]["nudges"] == 1
+    assert stats.chunk_reports[0]["marker"] is True
+    assert stats.chunk_reports[0]["compaction"] == "backstop"
+    assert stats.chunk_reports[1]["nudged"] is False
+
+
+def test_serve_drive_zero_delta_phase_is_loud_not_clean_zero(tmp_path: Path) -> None:
+    """A phase that ends with the SAME cumulative metrics as its baseline
+    produced nothing (discarded message / dead stream) — loud exit 1 with a
+    silent_phase anomaly, never a clean zero-turn ok (2026-08-09 feedback void).
+    """
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    stale = _metrics(6, 23354, 24822)
+    client.metrics_baseline = dict(stale)
+    client.metrics_result = dict(stale)
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_stale",
+        prompt="fix the 47 problems",
+        run_label="cell-stale",
+        phase="feedback-1",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.turns == 0
+    assert stats.input_tokens == 0
+    assert any(a["terminal"] == "silent_phase" for a in stats.turn_anomalies)
+    assert cell.kill_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# WO-LOOPREC-1: loop-guard recovery on the serve path
+# ---------------------------------------------------------------------------
+_LOOP_METRICS = {
+    # The guard-killed read as the persisted transcript reports it: the relay
+    # loop signature survives in info.error text (opencode 1.18.x writes NO
+    # error part), and the looped turn's tokens are metered.
+    "turns": 5,
+    "input_tokens": 100,
+    "output_tokens": 40,
+    "reasoning_tokens": 10,
+    "cost_usd": 0.0,
+    "truncations": 0,
+    "error_parts": 0,
+    "info_errors": 1,
+    "guard_aborted_turns": 1,
+    "finalize_timeouts": 0,
+    "error_texts": [
+        # Live-observed shape (2026-08-10 runs); per-request trace id elided.
+        "relay: generation loop detected (<request-id>)"
+    ],
+}
+
+_FINALIZE_METRICS = {
+    # The relay 30s stream-finalize watchdog kill (WO-FINALIZE-REC-1): the
+    # turn's tokens burned, the kill text lands in info.error, and the turn
+    # STILL counts toward scoring turns (only guard kills are excluded).
+    "turns": 5,
+    "input_tokens": 100,
+    "output_tokens": 40,
+    "reasoning_tokens": 10,
+    "cost_usd": 0.0,
+    "truncations": 0,
+    "error_parts": 0,
+    "info_errors": 1,
+    "guard_aborted_turns": 0,
+    "finalize_timeouts": 1,
+    "error_texts": [
+        "relay: upstream completed but the stream did not finalize "
+        "within 30000ms (<request-id>)"
+    ],
+}
+
+
+def test_serve_drive_loop_guard_kill_recovers_with_anti_repetition_nudge(
+    tmp_path: Path,
+) -> None:
+    """The 2026-08-10 defect, fixed: a loop kill on the serve path is classified
+    guard_abort/loop_guard and re-driven with the anti-repetition nudge (never
+    the original prompt) instead of counting the looped turn as completed work.
+    """
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS),   # phase baseline
+        dict(_LOOP_METRICS),   # loop-killed read
+        _metrics(8, 160, 70, guard_aborted=1),  # post-nudge read (session-cumulative)
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_loop",
+        prompt="fix the gates",
+        run_label="cell-loop",
+        phase="feedback-1",
+    )
+
+    sent = [text for _, text in client.sent_prompts]
+    assert sent == ["fix the gates", _LOOP_RECOVERY_NUDGE]
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.recovery_nudges == 1
+    # Looped turn + recovery turn both metered (delta vs baseline)…
+    assert stats.output_tokens == 70
+    # …but the guard-killed turn is EXCLUDED from scoring turns (WO-TURNACCT-1:
+    # 8 metered - 1 guard-aborted), and the exclusion is carried, never silent.
+    assert stats.turns == 7
+    assert stats.guard_aborted_turns == 1
+    assert len(stats.turn_anomalies) == 1
+    anomaly = stats.turn_anomalies[0]
+    assert anomaly["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert anomaly["reason"] == "loop_guard"
+    # A harness-fired recovery is retry-linked — never retried:false.
+    assert anomaly["retried"] is True
+    assert anomaly["retry_kind"] == "harness_resume"
+    assert cell.kill_calls == 0
+
+
+def test_serve_drive_loop_guard_exhaustion_is_loud_exit1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Budget exhausted with the guard still tripping: loud exit 1 with a
+    distinct killed_reason — the phase must not read as completed work (gates
+    on an unrepaired worktree was the 2026-08-10 failure shape)."""
+    monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "1")
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS),   # baseline
+        dict(_LOOP_METRICS),   # loop kill -> nudge fired (budget spent)
+        dict(_LOOP_METRICS),   # nudge re-loops -> exhausted
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_loop_x",
+        prompt="fix the gates",
+        run_label="cell-loop-x",
+        phase="feedback-1",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.killed_reason == "loop_guard_exhausted"
+    assert stats.recovery_nudges == 1
+    # The looped turns' tokens stay metered even on the loud exit; the two
+    # guard-killed turns are excluded from scoring (5 metered - 1 aborted).
+    assert stats.turns == 4
+    assert stats.guard_aborted_turns == 1
+    assert len(stats.turn_anomalies) == 2
+    first, second = stats.turn_anomalies
+    assert first["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert first["retried"] is True
+    assert first["retry_kind"] == "harness_resume"
+    assert second["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert second["retried"] is False
+    assert second["retry_kind"] is None
+
+
+def test_serve_drive_loop_guard_budget_zero_disables_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Budget "0" = pre-fix posture: anomaly recorded (unretried), no nudge,
+    exit 0 — the A/B off-switch, not the default."""
+    monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "0")
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [dict(_ZERO_METRICS), dict(_LOOP_METRICS)]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_loop_off",
+        prompt="fix the gates",
+        run_label="cell-loop-off",
+        phase="feedback-1",
+    )
+
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.recovery_nudges == 0
+    assert [text for _, text in client.sent_prompts] == ["fix the gates"]
+    assert len(stats.turn_anomalies) == 1
+    assert stats.turn_anomalies[0]["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert stats.turn_anomalies[0]["retried"] is False
+
+
+def test_run_cell_attempt_loop_guard_recovery_on_repair_leg(tmp_path: Path) -> None:
+    """The repair leg (feedback attempt) gets the same recovery — RC-4: the
+    drive is arm-identical regardless of phase."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS),   # baseline
+        dict(_LOOP_METRICS),   # loop kill
+        _metrics(7, 150, 60, guard_aborted=1),  # post-nudge
+    ]
+    cell = _FakeCell()
+    runner._serve_client = client
+    runner._cell_session_id = "ses_repair_loop"
+    events_path = tmp_path / "fb-loop.events.jsonl"
+
+    feedback = "These are still failing — fix the implementation so they pass."
+    kwargs = _make_feedback_attempt_kwargs(
+        feedback_text=feedback,
+        phase="feedback-1",
+        events_path=events_path,
+        kill_hook=cell.kill_worker_processes,
+    )
+    stats = runner._run_cell_attempt(**kwargs)
+
+    assert [text for _, text in client.sent_prompts] == [feedback, _LOOP_RECOVERY_NUDGE]
+    assert stats.exit_code == 0
+    assert stats.recovery_nudges == 1
+    assert stats.turn_anomalies[0]["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert stats.turn_anomalies[0]["retried"] is True
+    assert cell.kill_calls == 0
+
+
+def test_serve_drive_loop_recovery_zero_delta_stays_loud(tmp_path: Path) -> None:
+    """A loop kill that produced nothing is recovered, but if the recovered
+    phase STILL produced nothing the silent-phase guard fires — never nudged
+    into looking healthy."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    loop_zero = dict(_ZERO_METRICS)
+    loop_zero.update(
+        info_errors=1,
+        error_texts=["relay_loop_detected n=40 limit=3"],
+    )
+    client.metrics_script = [
+        dict(_ZERO_METRICS),  # baseline
+        loop_zero,            # loop kill, zero deltas
+        dict(_ZERO_METRICS),  # post-nudge: clean, still zero
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_loop_silent",
+        prompt="fix the gates",
+        run_label="cell-loop-silent",
+        phase="feedback-1",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.recovery_nudges == 1
+    terminals = [a["terminal"] for a in stats.turn_anomalies]
+    assert TURN_TERMINAL_GUARD_ABORT in terminals
+    assert "silent_phase" in terminals
+    assert cell.kill_calls == 0
+
+
+def test_chunked_pass_loop_guard_recovery_inside_chunk(tmp_path: Path) -> None:
+    """The building leg recovers in-chunk: the loop kill is nudged, the
+    recovered drive lands the marker, the chunk plan advances, and the chunk
+    report carries the recovery-nudge + guard-excluded counts."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS),     # chunk-1 baseline
+        dict(_LOOP_METRICS),     # chunk-1 loop-killed read
+        _metrics(6, 120, 50, guard_aborted=1),    # chunk-1 post-nudge read
+        _metrics(6, 120, 50, guard_aborted=1),    # chunk-2 baseline
+        _metrics(9, 200, 90, guard_aborted=1),    # chunk-2 end read
+    ]
+    client.assistant_texts = [
+        "looped repeated repeated",           # chunk-1 drive
+        "recovered work. CHUNK FINISHED",     # loop-recovery nudge
+        "chunk two done. CHUNK FINISHED",     # chunk-2 drive
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve_chunked(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_chunk_loop",
+        prompts=["CHUNK ONE", "CHUNK TWO"],
+        run_label="cell-chunk-loop",
+    )
+
+    sent = [text for _, text in client.sent_prompts]
+    assert sent == ["CHUNK ONE", _LOOP_RECOVERY_NUDGE, "CHUNK TWO"]
+    assert stats.exit_code == 0
+    assert stats.recovery_nudges == 1
+    # Chunk 1: 6 metered - 1 guard-aborted = 5 scoring; chunk 2: 3 scoring.
+    assert stats.turns == 8
+    assert stats.guard_aborted_turns == 1
+    assert stats.chunk_reports[0]["recovery_nudges"] == 1
+    assert stats.chunk_reports[0]["guard_aborted_turns"] == 1
+    assert stats.chunk_reports[0]["marker"] is True
+    assert stats.chunk_reports[0]["nudged"] is False
+    assert stats.chunk_reports[1]["recovery_nudges"] == 0
+    assert stats.chunk_reports[1]["marker"] is True
+
+
+# ---------------------------------------------------------------------------
+# WO-FINALIZE-REC-1 (Walter 2026-08-10): finalize-watchdog kills get bounded
+# recovery too — with the RESUME nudge, never the anti-repetition nudge.
+# ---------------------------------------------------------------------------
+def test_serve_drive_finalize_timeout_recovers_with_resume_nudge(tmp_path: Path) -> None:
+    """A relay finalize-watchdog kill is classified
+    transport_error/stream_finalize_timeout and re-driven with the resume
+    nudge (the turn was cut off, NOT looping — the anti-repetition nudge
+    would be the wrong instruction). The killed turn still counts toward
+    scoring turns (only guard kills are excluded)."""
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS),      # phase baseline
+        dict(_FINALIZE_METRICS),  # finalize-killed read
+        _metrics(8, 160, 70, finalize=1),  # post-nudge read (session-cumulative)
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_fin",
+        prompt="fix the gates",
+        run_label="cell-fin",
+        phase="feedback-1",
+    )
+
+    sent = [text for _, text in client.sent_prompts]
+    assert sent == ["fix the gates", _FINALIZE_RECOVERY_NUDGE]
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.recovery_nudges == 1
+    # No turn exclusion: finalize-killed turns still count (8 scoring).
+    assert stats.turns == 8
+    assert stats.guard_aborted_turns == 0
+    assert len(stats.turn_anomalies) == 1
+    anomaly = stats.turn_anomalies[0]
+    assert anomaly["terminal"] == TURN_TERMINAL_TRANSPORT_ERROR
+    assert anomaly["reason"] == "stream_finalize_timeout"
+    assert anomaly["retried"] is True
+    assert anomaly["retry_kind"] == "harness_resume"
+    assert cell.kill_calls == 0
+
+
+def test_serve_drive_finalize_timeout_exhaustion_is_loud_exit1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shared budget exhausted on repeated finalize kills: loud exit 1 with
+    its own killed_reason — never reads as completed work."""
+    monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "1")
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_script = [
+        dict(_ZERO_METRICS),      # baseline
+        dict(_FINALIZE_METRICS),  # finalize kill -> nudge fired (budget spent)
+        dict(_FINALIZE_METRICS),  # nudge dies the same way -> exhausted
+    ]
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_fin_x",
+        prompt="fix the gates",
+        run_label="cell-fin-x",
+        phase="feedback-1",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.killed_reason == "stream_finalize_exhausted"
+    assert stats.recovery_nudges == 1
+    assert len(stats.turn_anomalies) == 2
+    first, second = stats.turn_anomalies
+    assert first["reason"] == "stream_finalize_timeout"
+    assert first["retried"] is True
+    assert second["retried"] is False
+    assert second["retry_kind"] is None

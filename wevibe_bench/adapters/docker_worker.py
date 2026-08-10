@@ -260,7 +260,7 @@ class DockerCell:
             )
 
         run_env = os.environ.copy()
-        run_env["ORCAROUTER_API_KEY"] = proxy_token
+        run_env["LOCAL_LLM_PROXY_API_KEY"] = proxy_token
 
         self._progress(
             "PROGRESS docker-run start "
@@ -382,7 +382,8 @@ class DockerCell:
         host_port = int(self.config.serve_host_port)
         container_port = int(self.config.serve_container_port)
         script = (
-            f"nohup opencode serve --hostname 0.0.0.0 --port {container_port} "
+            f"OPENCODE_CONFIG=/work/opencode.json nohup opencode serve "
+            f"--hostname 0.0.0.0 --port {container_port} "
             "--print-logs >/tmp/opencode-serve.log 2>&1 & echo $!"
         )
         try:
@@ -806,7 +807,7 @@ def _build_run_argv(
         "-e",
         "OPENCODE_CONFIG=/etc/xdg/opencode/opencode.json",
         "-e",
-        "ORCAROUTER_API_KEY",
+        "LOCAL_LLM_PROXY_API_KEY",
         "-v",
         mount,
     ]

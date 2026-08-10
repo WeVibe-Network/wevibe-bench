@@ -48,6 +48,9 @@ from .docker_worker import (
 from wevibe_bench.backends.base import NeedCard, RecalledMemory
 from wevibe_bench.runner import AgentRunner, TaskOutcome
 from wevibe_bench.serve_client import (
+    LOOP_GUARD_SIGNATURES,
+    REASON_STREAM_FINALIZE_TIMEOUT,
+    TERMINAL_GUARD_ABORT,
     ServeClient,
     ServeClientError,
     classify_transport_anomaly,
@@ -58,36 +61,17 @@ from wevibe_bench.serve_client import (
 _LOG = logging.getLogger(__name__)
 
 
-WORKER_WORKING_STYLE_PREAMBLE = (
-    "WORKING STYLE (READ FIRST, HIGHEST PRIORITY): You are an autonomous coding agent that ACTS with tools. "
-    "Do NOT deliberate, plan out the whole system, or think through architecture before acting. "
-    "Do NOT produce long internal reasoning. Start using tools IMMEDIATELY: within your FIRST action, create or edit a source file. "
-    "Build incrementally, one small concrete file-edit at a time, verifying as you go. "
-    "Every turn MUST contain at least one tool call that makes progress (write/edit/bash) — never spend a turn only thinking. "
-    "Keep any reasoning to a few words. Your output is working code produced via tool calls, not deliberation."
-)
-
-
-BACKGAMMON_PROMPT = (
-    "Build me a fully functioning backgammon game that runs on localhost. "
-    "When the server is started I should be able to navigate to the URL, start "
-    "a game, and play against AI. The game should have all of the makings of a "
-    "complete product, with 0 errors and a fully functioning backend. Build it "
-    "in Node + TypeScript."
-)
-
-BACKGAMMON_REQUIREMENTS: tuple[str, ...] = (
-    "Include a doubling cube with AI accept/decline reasoning.",
-    "Keep the viewport compact.",
-    "Support easy, medium, and hard AI.",
-    "Show pip count.",
-    "Use standard board orientation.",
-    "Provide smooth checker movement and dice animation.",
-    "Allow only legal moves, show legal destinations and die attribution, and show a no-legal-move pass notice.",
-    "Implement full turn flow including doubles -> 4 moves, use-both-dice, hitting -> bar, bar re-entry before other moves, and bear-off.",
-    "Detect and show win/gammon/backgammon, and allow starting a new game without reload.",
-    "Run on PORT 8002 and fail with a clear message if the port is taken.",
-)
+# WO-77: the first pass is a sequence of chunk prompts (tasks/backgammon/prompts/
+# chunk-NN.md). Each chunk instructs the worker to end with this marker; the
+# harness advances to the next chunk only when the marker appears in the
+# messages produced by THAT chunk (watermark-windowed scan — the worker emits
+# the marker and its WEVIBE_DISCOVERY block in either order, sometimes across
+# separate assistant messages). A missing marker is a stall: the harness
+# nudges up to WEVIBE_BENCH_CHUNK_NUDGE_BUDGET times (default 3), then fails
+# the attempt loudly (killed_reason=chunk_marker_missing). Between chunks the
+# worker self-compacts (self_compact tool); the harness watches for the
+# compaction evidence and fires a backstop summarize when none materializes.
+CHUNK_MARKER = "CHUNK FINISHED"
 
 # Harness-declared verification/test commands for the backgammon task.
 # Gate runner = `node report.mjs` (tasks/backgammon/gates/). Worker-invoked
@@ -157,6 +141,48 @@ MAX_ZERO_TOOL_RESUMES = 2
 ZERO_TOOL_RESUME_NUDGE = "Continue. Edit files with tools — do not explain."
 _FILE_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch", "multi_edit"})
 
+# WO-HOLD-UI-1: opt-in post-cell observation window. When WEVIBE_BENCH_HOLD_UI=1,
+# the cell's stack (container + worktree) is NOT torn down at benchmark end; the
+# artifact's UI server is booted host-side from the bind-mounted worktree on
+# :8002 — the exact bytes the model wrote, the same boot the gates perform
+# (tasks/backgammon/gates/lib/harness.ts). The port MUST equal PORT there.
+# Release is operator-explicit: `touch <run_dir>/RELEASE_HOLD`. Teardown then
+# proceeds through the normal unconditional path (RC-6 is preserved — the hold
+# sits INSIDE the cell context, so every abort/interrupt still tears down).
+_HOLD_UI_ENV = "WEVIBE_BENCH_HOLD_UI"
+_HOLD_UI_PORT = 8002
+_HOLD_UI_RELEASE_FILE = "RELEASE_HOLD"
+_HOLD_UI_STATE_FILE = "hold-ui.json"
+_HOLD_UI_SERVER_LOG = "hold-ui-server.log"
+_HOLD_UI_HEALTH_TIMEOUT_S = 15.0
+_HOLD_UI_POLL_S = 2.0
+_HOLD_UI_HEARTBEAT_S = 30.0
+
+# WO-LOOPREC-1: when the relay's StreamLoopGuard kills a serve-driven turn, the
+# harness re-drives the phase with an anti-repetition nudge instead of counting
+# the looped turn as completed work (2026-08-10 live cell: a loop kill on the
+# repair leg metered as a turn, no recovery, gates ran on an unrepaired
+# worktree). WO-FINALIZE-REC-1 (Walter 2026-08-10): the relay's 30s
+# stream-finalize watchdog kill gets the same bounded recovery, with a
+# resume-style nudge (the turn was cut off, not looping). One shared per-phase
+# budget: WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET (default 2); "0" disables
+# recovery (pre-fix behavior). Neither nudge restates the original prompt —
+# for a loop kill, the same prompt into the same context is the loop's fuel.
+# Applies to every serve-driven phase (chunked building leg AND repair leg
+# alike — RC-4: no mode branch). The proxy guard itself is never reconfigured.
+_LOOP_RECOVERY_NUDGE = (
+    "Transport notice: your previous response was cut off by a loop detector "
+    "(repeated content). Do NOT repeat or restate anything already written. "
+    "Continue the task from exactly where it stopped — pick up the next "
+    "unfinished step and keep moving. No preamble, no recap."
+)
+_FINALIZE_RECOVERY_NUDGE = (
+    "Transport notice: the end of your previous response was lost to a "
+    "transport failure after the model finished generating. Continue the task "
+    "from exactly where it stopped — do not restart steps that already "
+    "completed. No preamble, no recap."
+)
+
 # Turn-terminal taxonomy (WO-TRUNC-1). A turn is one model generation step,
 # delimited by step_start/step_finish on the worker's JSON event stream.
 # step_finish reasons that mean "the provider stream ended without a finish
@@ -168,8 +194,11 @@ _NORMAL_STEP_FINISH_REASONS = frozenset({"stop", "tool-calls", "tool_calls", "le
 # by transport/guard rather than by the model. Guard trips and upstream drops
 # both surface to the client as terminal error events (see the loopguard
 # diagnostic report); the open step they interrupt never gets a step_finish.
-_LOOP_GUARD_SIGNATURE = "relay_loop_detected"
+# The loop-guard shapes (live + legacy) live in serve_client.LOOP_GUARD_SIGNATURES.
+# The relay finalize-watchdog shape leads this list so the stdout event path
+# names it exactly as the serve path does (RC-4 taxonomy parity).
 _TRANSPORT_ERROR_SIGNATURES = (
+    ("stream_finalize_timeout", "did not finalize"),
     ("stream_incomplete", "stream incomplete"),
     ("idle_timeout", "idle timeout"),
     ("provider_error", "provider returned error"),
@@ -257,8 +286,6 @@ def _build_truncation_evidence(
         },
     }
 
-
-DEFAULT_REASONING_EFFORT = "low"  # bounded default; relay attempts cap at 600s; override via WEVIBE_BENCH_REASONING_EFFORT
 
 # Canonical budget-bounded attempt ceiling.
 # Fixture evidence (runs/backgammon/*.scorecard.json):
@@ -433,11 +460,22 @@ class _OpencodeRunStats:
     # aggregate-only. Each dict is a turn_terminal payload ready for the
     # append-only status stream.
     turn_anomalies: tuple[dict[str, Any], ...] = ()
+    # WO-77 chunked first pass: one record per chunk (index, delta tokens,
+    # marker seen, nudged). Empty for single-prompt phases.
+    chunk_reports: tuple[dict[str, Any], ...] = ()
     # Turns whose usage frame never survived the stream drop: their true
     # upstream token burn is unmetered client-side (never synthesized), but
     # their measured wall-clock is real cost and lands here.
     unmetered_turns: int = 0
     unmetered_turn_wall_s: float = 0.0
+    # WO-LOOPREC-1/FINALIZE-REC-1: bounded recovery nudges this invocation
+    # fired after relay loop-guard kills or finalize-watchdog kills (serve
+    # path only; see _LOOP_RECOVERY_NUDGE/_FINALIZE_RECOVERY_NUDGE).
+    recovery_nudges: int = 0
+    # WO-TURNACCT-1 (Walter 2026-08-10): guard-killed turns NEVER count toward
+    # scoring turns. ``turns`` already excludes them; their count is carried
+    # here so the exclusion is reported, never silent. Tokens stay metered.
+    guard_aborted_turns: int = 0
 
 
 @dataclass(frozen=True)
@@ -448,121 +486,6 @@ class _ProxyBudgetSnapshot:
     committed_unproven_usd: float
     remaining_usd: float
     checkpoint_path: str
-
-
-def fetch_orcarouter_billing_usage_cents(*, api_key: str, timeout: float = 10.0) -> float:
-    """Fetch OrcaRouter cumulative billing counter (total_usage, in cents)."""
-
-    key = str(api_key or "").strip()
-    if not key:
-        raise RuntimeError("orcarouter billing usage fetch failed: empty api key")
-
-    request = urllib.request.Request(
-        "https://www.orcarouter.ai/v1/dashboard/billing/usage",
-        method="GET",
-    )
-    request.add_header("Authorization", f"Bearer {key}")
-    request.add_header("Accept", "application/json")
-
-    try:
-        with urllib.request.urlopen(request, timeout=float(timeout)) as response:
-            status = int(response.getcode() or 0)
-            payload_bytes = response.read()
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(
-            "orcarouter billing usage fetch failed: "
-            f"status={int(getattr(exc, 'code', 0))} error_class={exc.__class__.__name__}"
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise RuntimeError(
-            "orcarouter billing usage fetch failed: "
-            f"status=transport error_class={exc.__class__.__name__}"
-        ) from exc
-
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8")) if payload_bytes else {}
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "orcarouter billing usage fetch failed: "
-            f"status={status} error_class={exc.__class__.__name__}"
-        ) from exc
-
-    if status != 200:
-        raise RuntimeError(
-            "orcarouter billing usage fetch failed: "
-            f"status={status} error_class=unexpected_http_status"
-        )
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            "orcarouter billing usage fetch failed: "
-            "status=200 error_class=invalid_payload_type"
-        )
-
-    try:
-        return float(payload["total_usage"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(
-            "orcarouter billing usage fetch failed: "
-            f"status=200 error_class={exc.__class__.__name__}"
-        ) from exc
-
-
-def reconcile_derived_vs_billing(
-    *,
-    settled_usd: float,
-    baseline_cents: float | None,
-    final_cents: float | None,
-    tolerance: float = 0.05,
-) -> dict[str, Any]:
-    """Compare settled USD against OrcaRouter cumulative billing-counter delta."""
-
-    confound_note = (
-        "counter is workspace-aggregate; any concurrent workspace/CLI traffic inflates delta; "
-        "reconciliation requires a quiet workspace"
-    )
-    settled_value = float(settled_usd)
-    baseline_value = None if baseline_cents is None else float(baseline_cents)
-    final_value = None if final_cents is None else float(final_cents)
-
-    if baseline_value is None or final_value is None:
-        return {
-            "status": "skipped",
-            "reason": "baseline or final counter unavailable",
-            "settled_usd": settled_value,
-            "delta_counter_usd": None,
-            "divergence_pct": None,
-            "tolerance": float(tolerance),
-            "baseline_cents": baseline_value,
-            "final_cents": final_value,
-            "confound_note": confound_note,
-        }
-
-    delta_usd = (final_value - baseline_value) / 100.0
-    if delta_usd < 0:
-        return {
-            "status": "error",
-            "reason": "counter went backwards",
-            "settled_usd": settled_value,
-            "delta_counter_usd": delta_usd,
-            "divergence_pct": None,
-            "tolerance": float(tolerance),
-            "baseline_cents": baseline_value,
-            "final_cents": final_value,
-            "confound_note": confound_note,
-        }
-
-    denominator = max(delta_usd, settled_value, 1e-9)
-    divergence = abs(settled_value - delta_usd) / denominator
-    return {
-        "status": "ok" if divergence <= float(tolerance) else "diverged",
-        "settled_usd": settled_value,
-        "delta_counter_usd": delta_usd,
-        "divergence_pct": divergence * 100.0,
-        "tolerance": float(tolerance),
-        "baseline_cents": baseline_value,
-        "final_cents": final_value,
-        "confound_note": confound_note,
-    }
 
 
 @dataclass
@@ -616,10 +539,263 @@ class BackgammonCellResult:
     turn_anomalies: list[dict[str, Any]] | None = None
     truncated_turns: int = 0
     truncated_turns_retried: int = 0
+    # WO-TURNACCT-1 (Walter 2026-08-10): relay guard-killed turns, excluded
+    # from ``turns`` (scoring) but never silently dropped — counted here.
+    guard_aborted_turns: int = 0
     unmetered_turns: int = 0
     unmetered_turn_wall_s: float = 0.0
     contention: ContentionCovariates | None = None
     worker_image_fingerprint: ImageFingerprint | None = None
+
+
+def _resolve_hold_ui_entrypoint(worktree: Path) -> Path:
+    """Artifact-driven entrypoint resolution — the Python port of
+    tasks/backgammon/gates/lib/harness.ts resolveEntrypoint: package.json
+    scripts.start first, then src/server.{ts,js,mjs,cjs}, else a loud throw
+    (a distinct failure class, never a silent skip)."""
+    pkg_path = worktree / "package.json"
+    if pkg_path.is_file():
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pkg = None
+        scripts = pkg.get("scripts") if isinstance(pkg, dict) else None
+        start_cmd = scripts.get("start") if isinstance(scripts, dict) else None
+        if isinstance(start_cmd, str) and start_cmd.strip():
+            parts = start_cmd.split()
+            for idx, part in enumerate(parts):
+                if part in {"node", "tsx", "deno", "bun", "next", "ts-node", "esrun"}:
+                    if idx + 1 < len(parts) and re.search(
+                        r"\.(ts|js|mjs|cjs|tsx|jsx)$", parts[idx + 1], re.IGNORECASE
+                    ):
+                        resolved = (worktree / parts[idx + 1]).resolve()
+                        if resolved.is_file():
+                            return resolved
+    for name in ("server.ts", "server.js", "server.mjs", "server.cjs"):
+        candidate = worktree / "src" / name
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(
+        "hold-ui: no entrypoint resolved — searched package.json scripts.start and "
+        f"src/server.{{ts,js,mjs,cjs}} in {worktree}"
+    )
+
+
+def _hold_ui_port_listeners(port: int) -> list[int]:
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
+    return [int(tok) for tok in (out.stdout or "").split() if tok.strip().isdigit()]
+
+
+def _hold_ui_healthy(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1.0) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _hold_for_ui_review(
+    *,
+    run_label: str,
+    run_dir: Path,
+    worktree: Path,
+    container_name: str,
+    live_view_url: str,
+    progress: Callable[[str], None],
+) -> None:
+    """Hold the cell stack for operator UI review until released.
+
+    No-op unless WEVIBE_BENCH_HOLD_UI=1. Boots the artifact's server host-side
+    from the worktree on :8002 (the gate boot, minus Playwright), then waits on
+    the RELEASE_HOLD sentinel. Never fails the cell: boot problems are logged
+    and the hold still proceeds (container + worktree stay inspectable). The
+    UI server is killed in a finally — the ProcessReaper does not watch 8002.
+    """
+    if (os.environ.get(_HOLD_UI_ENV) or "").strip() != "1":
+        return
+
+    release_path = run_dir / _HOLD_UI_RELEASE_FILE
+    state_path = run_dir / _HOLD_UI_STATE_FILE
+    server_log_path = run_dir / _HOLD_UI_SERVER_LOG
+    url = f"http://localhost:{_HOLD_UI_PORT}"
+
+    proc: subprocess.Popen[str] | None = None
+    log_handle: Any = None
+    ui_healthy = False
+    boot_detail = "not_attempted"
+
+    # A stale listener here is the audit's leaked-gate-server class; the gates
+    # themselves SIGKILL it on every boot (harness.ts freePort). Mirrored.
+    for pid in _hold_ui_port_listeners(_HOLD_UI_PORT):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            progress(f"PROGRESS run_label={run_label} step=hold-ui killed_stale_listener pid={pid}")
+        except OSError as exc:
+            progress(f"PROGRESS run_label={run_label} step=hold-ui kill_stale_listener_failed pid={pid} detail={exc}")
+
+    try:
+        entrypoint = _resolve_hold_ui_entrypoint(worktree)
+    except RuntimeError as exc:
+        boot_detail = f"entrypoint_unresolved detail={exc}"
+        progress(f"PROGRESS run_label={run_label} step=hold-ui boot=fail {boot_detail}")
+    else:
+        try:
+            log_handle = server_log_path.open("w", encoding="utf-8")
+            proc = subprocess.Popen(
+                ["node", str(entrypoint)],
+                cwd=str(worktree),
+                env={**os.environ, "BENCH_DEBUG": "1"},
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            boot_detail = f"spawn_failed detail={exc}"
+            progress(f"PROGRESS run_label={run_label} step=hold-ui boot=fail {boot_detail}")
+            proc = None
+        else:
+            deadline = time.monotonic() + _HOLD_UI_HEALTH_TIMEOUT_S
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    break
+                if _hold_ui_healthy(_HOLD_UI_PORT):
+                    ui_healthy = True
+                    break
+                time.sleep(0.25)
+            if ui_healthy:
+                boot_detail = f"healthy pid={proc.pid} entrypoint={entrypoint}"
+            elif proc.poll() is not None:
+                boot_detail = f"server_exited exit={proc.returncode} log={server_log_path}"
+            else:
+                boot_detail = f"health_timeout log={server_log_path}"
+            progress(
+                f"PROGRESS run_label={run_label} step=hold-ui "
+                f"boot={'ok' if ui_healthy else 'fail'} {boot_detail}"
+            )
+
+    # Consume any stale sentinel from a prior hold in this run_dir BEFORE waiting.
+    try:
+        release_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    state = {
+        "url": url,
+        "ui_healthy": ui_healthy,
+        "boot_detail": boot_detail,
+        "ui_pid": proc.pid if (proc is not None and proc.poll() is None) else None,
+        "container_name": container_name,
+        "worktree": str(worktree),
+        "live_view_url": live_view_url,
+        "release_cmd": f"touch {release_path}",
+        "server_log": str(server_log_path),
+        "started_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
+    }
+    try:
+        state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        progress(f"PROGRESS run_label={run_label} step=hold-ui state_write_failed detail={exc}")
+
+    hold_banner = (
+        f"HOLD-UI ACTIVE run_label={run_label} url={url} "
+        f"ui={'live' if ui_healthy else f'UNAVAILABLE ({boot_detail})'} "
+        f"container={container_name} live_view={live_view_url} "
+        f"release='touch {release_path}'"
+    )
+    progress(f"PROGRESS run_label={run_label} step=hold-ui waiting {hold_banner}")
+    print(f"\n{hold_banner}\n", flush=True)
+
+    held_at = time.monotonic()
+    last_heartbeat = 0.0
+    try:
+        while not release_path.exists():
+            now = time.monotonic()
+            if now - last_heartbeat >= _HOLD_UI_HEARTBEAT_S:
+                last_heartbeat = now
+                server_alive = proc is not None and proc.poll() is None
+                progress(
+                    f"PROGRESS run_label={run_label} step=hold-ui heartbeat "
+                    f"held_s={now - held_at:.0f} url={url} healthy={_hold_ui_healthy(_HOLD_UI_PORT)} "
+                    f"server_alive={server_alive}"
+                )
+            time.sleep(_HOLD_UI_POLL_S)
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1.5)
+            except OSError:
+                pass
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except OSError:
+                pass
+        remaining = _hold_ui_port_listeners(_HOLD_UI_PORT)
+        if remaining:
+            progress(
+                f"PROGRESS run_label={run_label} step=hold-ui "
+                f"port_still_occupied port={_HOLD_UI_PORT} pids={remaining} "
+                "detail=not-our-server; left running"
+            )
+        try:
+            release_path.unlink(missing_ok=True)
+            state_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        progress(
+            f"PROGRESS run_label={run_label} step=hold-ui released "
+            f"held_s={time.monotonic() - held_at:.0f} action=proceed-to-teardown"
+        )
+        print(f"HOLD-UI RELEASED run_label={run_label} — teardown proceeding\n", flush=True)
+
+
+# Worker-facing AGENTS.md, written into every cell worktree at seed time. This
+# is the ONLY .md that reaches the isolated docker worker (opencode auto-loads
+# /work/AGENTS.md as project instructions); the repo-level AGENTS.md never
+# enters the container. It carries two rules: (1) WO-ANTICHEAT-1 — the explicit
+# anti-cheat rule (rule only, no verdict threat: Walter 2026-08-10 — a cheat
+# ATTEMPT is ignored, the operator monitors the live session, and PASS/FAIL is
+# never gated on this text); (2) the chunked-write rule, which exists because
+# the model writes code in very large single generations, and one oversized
+# stream can be killed mid-flight by the transport — losing the whole write
+# (2026-08-09).
+_WORKER_AGENTS_MD = """\
+# Worker instructions
+
+## Integrity — do not cheat
+- Do NOT cheat. Do NOT try to find, read, or run the answer sheet: no hunting
+  for the hidden tests, the grader, or expected outputs — anywhere, including
+  outside this worktree.
+- If a tool call is denied, that denial IS the boundary. Never route around a
+  denial by indirection (shell tricks, links, copies, downloads).
+- Build only from the task prompts and the public requirements in this
+  worktree. A failing check points at a public requirement — never at a
+  hidden value you should go looking for.
+
+## Chunk large writes — always
+- Never write a large file in a single tool call. A single-shot massive write
+  can be cut off mid-stream by the transport, and the entire write is lost.
+- Start each new file with a bounded initial write (~200-400 lines), then grow
+  it with successive append or edit calls — each its own small generation.
+- The same for big rewrites: several small, targeted edits — never one giant
+  replacement.
+- If a write call fails or the result looks truncated, re-apply only the
+  missing chunk; do not restart the file from zero unless it is corrupt.
+"""
 
 
 def _default_progress(message: str) -> None:
@@ -664,7 +840,7 @@ def build_worker_opencode_config(
         raise ValueError(f"unsupported worker model_id for opencode config: {model_id!r}")
 
     provider_options: dict[str, Any] = {
-        "apiKey": "{env:ORCAROUTER_API_KEY}",
+        "apiKey": "{env:LOCAL_LLM_PROXY_API_KEY}",
     }
     if proxy_base_url is not None:
         provider_options["baseURL"] = proxy_base_url
@@ -691,13 +867,6 @@ def build_worker_opencode_config(
     if provider_config:
         config["provider"] = provider_config
     return config
-
-
-def _model_id_from_slug(model: str) -> str:
-    model_slug = str(model)
-    if model_slug.startswith("orcarouter/"):
-        return model_slug[len("orcarouter/") :]
-    return model_slug
 
 
 class BackgammonRunner(AgentRunner):
@@ -753,15 +922,14 @@ class BackgammonRunner(AgentRunner):
         if reasoning_effort is not None:
             resolved_reasoning_effort = str(reasoning_effort)
         else:
+            # No default effort (2026-08-09 directive): the worker request
+            # shape must match the daily opencode driver, which sends no
+            # reasoning field. Opt-in only via arg or WEVIBE_BENCH_REASONING_EFFORT.
             env_reasoning_effort = os.getenv(_REASONING_EFFORT_ENV)
             if env_reasoning_effort is not None and env_reasoning_effort.strip():
                 resolved_reasoning_effort = env_reasoning_effort.strip()
             else:
-                model_registry = WORKER_MODEL_REGISTRY.get(_model_id_from_slug(self.model))
-                if model_registry is not None and bool(model_registry.get("reasoning")):
-                    resolved_reasoning_effort = DEFAULT_REASONING_EFFORT
-                else:
-                    resolved_reasoning_effort = None
+                resolved_reasoning_effort = None
         self.reasoning_effort = resolved_reasoning_effort
         self.proxy_base_url = None if proxy_base_url is None else str(proxy_base_url)
         self.proxy_token = None if proxy_token is None else str(proxy_token)
@@ -918,6 +1086,11 @@ class BackgammonRunner(AgentRunner):
         worktree.mkdir(parents=True, exist_ok=True)
 
         self._copy_tree_contents(self.task_dir / "scaffold", worktree)
+        worker_agents_md = _WORKER_AGENTS_MD + (
+            "\n## Runtime\n"
+            f"- Model: {self.model}\n"
+        )
+        (worktree / "AGENTS.md").write_text(worker_agents_md, encoding="utf-8")
         self._progress(
             f"PROGRESS run_label={run_label} step=worktree-seed src={self.task_dir / 'scaffold'} dst={worktree}"
         )
@@ -1020,6 +1193,7 @@ class BackgammonRunner(AgentRunner):
                 if not isinstance(managed_cell, DockerCell):
                     raise RuntimeError("docker worker context did not yield a DockerCell")
                 active_cell = managed_cell
+                self._write_worker_permission_config(worktree=worktree)
 
                 # Live-view topology: start the persistent opencode serve for this
                 # cell immediately after the container is entered, before the first
@@ -1048,14 +1222,14 @@ class BackgammonRunner(AgentRunner):
                 self._progress(
                     "PROGRESS step=live-view "
                     f"session_id={cell_session_id or 'none'} serve={serve_base} "
-                    f"attach_cmd='{founder_attach_command(self.serve_host_port)}'"
+                    f"attach_cmd='{founder_attach_command(self.serve_host_port, cell_session_id)}'"
                 )
                 if cell_session_id is not None:
                     try:
                         marker = worktree.parent / "live-view.txt"
                         marker.write_text(
                             f"session_id={cell_session_id}\n"
-                            f"attach_cmd=opencode attach http://127.0.0.1:{self.serve_host_port}\n"
+                            f"attach_cmd={founder_attach_command(self.serve_host_port, cell_session_id)}\n"
                             f"serve=http://127.0.0.1:{self.serve_host_port}\n",
                             encoding="utf-8",
                         )
@@ -1067,10 +1241,12 @@ class BackgammonRunner(AgentRunner):
                             f"PROGRESS step=live-view marker_write_failed detail={exc}"
                         )
 
-                task_prompt = self._build_task_prompt(injected_memory=injected_memory)
+                chunk_prompts = self._load_chunk_prompts(injected_memory=injected_memory)
+                task_prompt = self._joined_chunk_prompt(chunk_prompts)
                 self._progress(
                     f"PROGRESS run_label={run_label} step=worker-launch-start mode=real model={self.model} "
-                    f"pure={pure} prompt_chars={len(task_prompt)} prompt_delivery=stdin"
+                    f"pure={pure} prompt_chars={len(task_prompt)} prompt_chunks={len(chunk_prompts)} "
+                    "prompt_delivery=stdin"
                 )
                 initial_inner = [
                     "opencode",
@@ -1081,6 +1257,8 @@ class BackgammonRunner(AgentRunner):
                     self.agent,
                     "--dir",
                     "/work",
+                    "--config",
+                    "/work/opencode.json",
                     "--format",
                     "json",
                 ]
@@ -1113,17 +1291,15 @@ class BackgammonRunner(AgentRunner):
                         attempt=1,
                         text=task_prompt,
                     )
-                    self._write_worker_permission_config(worktree=worktree)
                     first_run = None
                     if self._serve_client is not None and self._cell_session_id is not None:
                         try:
-                            first_run = self._run_opencode_serve(
+                            first_run = self._run_opencode_serve_chunked(
                                 active_cell=active_cell,
                                 serve_client=self._serve_client,
                                 session_id=self._cell_session_id,
-                                prompt=task_prompt,
+                                prompts=chunk_prompts,
                                 run_label=run_label,
-                                phase="initial",
                                 prior_cost_usd=cell_cost_usd,
                                 timeout_s=self.run_timeout_s,
                                 kill_hook=active_cell.kill_worker_processes,
@@ -1385,6 +1561,8 @@ class BackgammonRunner(AgentRunner):
                     session_id,
                     "--dir",
                     "/work",
+                    "--config",
+                    "/work/opencode.json",
                     "--format",
                     "json",
                 ]
@@ -1585,6 +1763,20 @@ class BackgammonRunner(AgentRunner):
                     termination_reason = "harness_error"
                     break
 
+            # WO-HOLD-UI-1: benchmark end, stack held for operator UI review.
+            # Every loop-exit path converges here; this is the last statement
+            # inside the cell context, so release resumes into the normal
+            # unconditional teardown (RC-6). No-op unless WEVIBE_BENCH_HOLD_UI=1.
+            if active_cell is not None:
+                _hold_for_ui_review(
+                    run_label=run_label,
+                    run_dir=run_dir,
+                    worktree=worktree,
+                    container_name=active_cell.container_name,
+                    live_view_url=f"http://127.0.0.1:{self.serve_host_port}",
+                    progress=self._progress,
+                )
+
         if termination_reason == "pending":
             verdict = "FAIL"
             attempts_to_green = "FAIL"
@@ -1742,6 +1934,11 @@ class BackgammonRunner(AgentRunner):
             turn_anomalies=turn_anomalies_all,
             truncated_turns=len(turn_anomalies_all),
             truncated_turns_retried=sum(1 for record in turn_anomalies_all if record.get("retried")),
+            guard_aborted_turns=sum(
+                1
+                for record in turn_anomalies_all
+                if record.get("terminal") == TURN_TERMINAL_GUARD_ABORT
+            ),
             unmetered_turns=unmetered_turns_total,
             unmetered_turn_wall_s=unmetered_turn_wall_total,
             worker_image_fingerprint=worker_image_identity,
@@ -1797,6 +1994,8 @@ class BackgammonRunner(AgentRunner):
                 str(resume_session_id),
                 "--dir",
                 "/work",
+                "--config",
+                "/work/opencode.json",
                 "--format",
                 "json",
             ]
@@ -1903,9 +2102,11 @@ class BackgammonRunner(AgentRunner):
         Zero-tool-resume semantics: :func:`serve_client.extract_transcript_metrics`
         does NOT compute ``zero_tool_turns``/``terminal_zero_tool_turn`` from the
         transcript, so a serve-driven attempt cannot detect a terminal zero-tool
-        turn from the transcript alone. The resume loop therefore stays on the
-        stdout path; when a serve session is available the prompt is delivered
-        over serve exactly once (no resume nudge can fire).
+        turn from the transcript alone. The zero-tool resume loop therefore stays
+        on the stdout path. A serve-driven attempt IS re-driven in place only by
+        the WO-LOOPREC-1 loop-guard recovery inside :meth:`_run_opencode_serve`
+        (bounded anti-repetition nudge on a ``relay_loop_detected`` terminal);
+        no other resume nudge fires on this path.
         """
         if self._serve_client is not None and self._cell_session_id is not None:
             try:
@@ -2045,6 +2246,26 @@ class BackgammonRunner(AgentRunner):
             marker_dir = worktree / ".wevibe"
             marker_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_org, marker_dir / "org.json")
+
+            # Wire the bench-fixture predicate adapter: the plugin observes the
+            # agent's own tool-call output, so the runner is copied into the cell
+            # worktree (outside the frozen scaffold hash) and a predicate.json
+            # declares the bench-fixture reporter. Missing runner source degrades
+            # to a stderr warning while still writing predicate.json so existing
+            # cells keep working.
+            predicate = {"reporter": "bench-fixture", "command": "node bench-check.mjs"}
+            marker_dir.joinpath("predicate.json").write_text(
+                json.dumps(predicate), encoding="utf-8"
+            )
+            runner_source = self.task_dir / "bench" / "bench-check.mjs"
+            if runner_source.is_file():
+                shutil.copy2(runner_source, worktree / "bench-check.mjs")
+            else:
+                self._progress(
+                    f"PROGRESS step=memory-mode warning=bench-runner-missing "
+                    f"path={runner_source}"
+                )
+
             self._progress(
                 f"PROGRESS step=memory-mode mode=on marker={marker_dir / 'org.json'} "
                 "recall_env_injection=container"
@@ -2055,17 +2276,27 @@ class BackgammonRunner(AgentRunner):
         self._progress("PROGRESS step=memory-mode mode=off pure=true")
         return True
 
-    def _build_task_prompt(self, *, injected_memory: list[RecalledMemory]) -> str:
-        contract_path = self.task_dir / "CONTRACT.md"
-        contract_text = contract_path.read_text(encoding="utf-8")
-        requirements_text = "\n".join(f"- {item}" for item in BACKGAMMON_REQUIREMENTS)
-        base_prompt = (
-            f"{BACKGAMMON_PROMPT}\n\n"
-            "Requirements:\n"
-            f"{requirements_text}\n\n"
-            "Contract:\n"
-            f"{contract_text}"
-        )
+    def _load_chunk_prompts(self, *, injected_memory: list[RecalledMemory]) -> list[str]:
+        """Load the WO-77 chunked first-pass prompts (tasks/backgammon/prompts/chunk-*.md).
+
+        The chunked pass IS the initial pass — there is no monolith fallback.
+        Chunk 1 additionally carries the capture/compliance protocol (appended)
+        and, for arms that deliver memory in-prompt, the memory blob
+        (prepended) — the same delivery points the monolith used. Missing or
+        empty chunk data is a loud cell-prep error, never a skip.
+        """
+        prompts_dir = self.task_dir / "prompts"
+        if not prompts_dir.is_dir():
+            raise RuntimeError(f"chunked prompts directory missing: {prompts_dir}")
+        chunk_paths = sorted(prompts_dir.glob("chunk-*.md"))
+        if not chunk_paths:
+            raise RuntimeError(f"no chunk prompts (chunk-*.md) found in {prompts_dir}")
+        chunks: list[str] = []
+        for path in chunk_paths:
+            text = path.read_text(encoding="utf-8")
+            if not text.strip():
+                raise RuntimeError(f"chunk prompt empty: {path}")
+            chunks.append(text)
 
         s_prompt_path = self._repo_root / "scaffold" / "sxe-candidate" / "S-fork-reasoning.md"
         if not s_prompt_path.is_file():
@@ -2080,21 +2311,18 @@ class BackgammonRunner(AgentRunner):
         self._progress(
             f"PROGRESS step=producer-s-load path={s_prompt_path} chars={len(s_prompt_text)}"
         )
-        base_prompt = (
-            f"{base_prompt}\n\n"
-            "=== CAPTURE & COMPLIANCE PROTOCOL ===\n"
-            f"{s_prompt_text}"
-        )
 
-        final_prompt = base_prompt
+        first = f"{chunks[0]}\n\n=== CAPTURE & COMPLIANCE PROTOCOL ===\n{s_prompt_text}"
         if self.memory_mode != "on":
             memory_blob = _format_memory(injected_memory)
             if memory_blob:
-                final_prompt = f"{memory_blob}\n{base_prompt}"
+                first = f"{memory_blob}\n{first}"
+        return [first, *chunks[1:]]
 
-        # Kimi-k3 reasoning-monster mitigation (prompt behavior): keep this preamble index-0.
-        # See report ledger 27-07-26-2203.
-        return f"{WORKER_WORKING_STYLE_PREAMBLE}\n\n{final_prompt}"
+    @staticmethod
+    def _joined_chunk_prompt(chunks: list[str]) -> str:
+        """Single-text rendering of the chunk plan (stdout fallback path only)."""
+        return "\n\n---\n\n".join(chunks)
 
     @staticmethod
     def _build_pass_verdict(*, newly_passing: list[str]) -> str:
@@ -2231,6 +2459,17 @@ class BackgammonRunner(AgentRunner):
         budget/gating logic decides. ``session_id`` here is the serve-side session
         id (persisted on the serve); the container-side ``opencode run`` session
         id is NOT applicable to this path.
+
+        WO-LOOPREC-1: a relay loop-guard kill (``relay_loop_detected`` in the
+        persisted assistant ``info.error``) is classified ``guard_abort`` and
+        re-driven with the bounded anti-repetition nudge. WO-FINALIZE-REC-1: a
+        relay finalize-watchdog kill is classified
+        ``transport_error/stream_finalize_timeout`` and re-driven with the
+        resume nudge. One shared per-phase budget (env
+        ``WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET``, default 2; 0 disables).
+        Exhaustion is a loud exit 1 (``loop_guard_exhausted`` /
+        ``stream_finalize_exhausted``) — a killed phase never reads as
+        completed work.
         """
         if kill_hook is None:
             kill_hook = active_cell.kill_worker_processes
@@ -2250,92 +2489,179 @@ class BackgammonRunner(AgentRunner):
         evidence_dir = cell_worktree.parent if cell_worktree is not None else Path(tempfile.gettempdir())
         evidence_path = evidence_dir / TRUNCATION_EVIDENCE_FILENAME
 
-        # 1) Enqueue the prompt asynchronously.
+        # Phase baseline for per-phase delta metering: serve transcript metrics
+        # are session-CUMULATIVE, so a phase's true cost is the delta against
+        # this snapshot. Without deltas, every phase after the first
+        # double-counts session totals, and a fully-dead phase (stream
+        # dropped, assistant message discarded) masquerades as success with
+        # stale cumulative numbers (2026-08-09 feedback-phase void).
         try:
-            serve_client.send_prompt(session_id, prompt)
-        except ServeClientError as exc:
+            baseline = serve_client.metrics(session_id)
+        except ServeClientError:
+            baseline = None
             self._progress(
                 f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                f"status=send_error detail={exc}"
-            )
-            return _OpencodeRunStats(
-                input_tokens=0,
-                output_tokens=0,
-                reasoning_tokens=0,
-                turns=0,
-                session_id=session_id,
-                killed_reason=None,
-                exit_code=1,
-                cost_usd=0.0,
+                "status=baseline_metrics_error detail=deltas degrade to cumulative"
             )
 
-        # 2) Wait for completion (busy->idle). The serve-side generation may
-        #    continue briefly after idle returns; do NOT wait further.
-        idle = serve_client.wait_idle(session_id, timeout_s=timeout_s)
+        # WO-LOOPREC-1/FINALIZE-REC-1 transport recovery: a guard-killed or
+        # finalize-killed turn is metered (its tokens burned) but must NOT read
+        # as completed work. When the terminal classification is recoverable
+        # and budget remains, mark the anomaly retried and re-drive the phase —
+        # anti-repetition nudge for a guard kill (never the original prompt:
+        # the same prompt into the same context is the loop's fuel), resume
+        # nudge for a finalize kill. Budget exhausted with the kill repeating
+        # -> loud exit 1: the phase produced no completed work, and proceeding
+        # would re-create the 2026-08-10 defect (gates against an unrepaired
+        # worktree). Budget "0" disables recovery entirely (pre-fix posture:
+        # anomaly recorded, exit 0).
+        recovery_nudge_budget = int(os.environ.get("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET") or "2")
+        recovery_nudges = 0
+        prompt_to_send = prompt
+        turn_anomaly_list: list[dict[str, Any]] = []
         killed_reason: str | None = None
         exit_code = 0
-        if not idle:
-            killed_reason = "run_timeout"
-            exit_code = 1
-            # WO-WATCH-1F: genuinely stop serve-side generation before teardown.
-            # An abort failure is logged but must NOT mask the timeout outcome.
+        m: dict[str, Any] = {}
+        while True:
+            # 1) Enqueue the prompt asynchronously.
             try:
-                serve_client.abort(session_id)
-            except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.
+                serve_client.send_prompt(session_id, prompt_to_send)
+            except ServeClientError as exc:
                 self._progress(
                     f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                    f"status=abort_failed reason={exc}"
+                    f"status=send_error detail={exc}"
                 )
-            else:
-                self._progress(
-                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                    f"status=abort_issued session_id={session_id}"
+                return _OpencodeRunStats(
+                    input_tokens=0,
+                    output_tokens=0,
+                    reasoning_tokens=0,
+                    turns=0,
+                    session_id=session_id,
+                    killed_reason=None,
+                    exit_code=1,
+                    cost_usd=0.0,
+                    turn_anomalies=tuple(turn_anomaly_list),
+                    recovery_nudges=recovery_nudges,
                 )
-            try:
-                kill_hook()
-            except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.
-                self._progress(
-                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                    f"status=kill_hook_error detail={exc}"
-                )
-            self._progress(
-                f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                f"status=timeout timeout_s={timeout_s:.1f} session_id={session_id}"
-            )
 
-        # 3) Pull metrics from the persisted transcript.
-        try:
-            m = serve_client.metrics(session_id)
-        except ServeClientError as exc:
-            # Metering failed after completion; report a transport-style exit and
-            # let the caller decide (fall through to stdout path on retry).
-            self._progress(
-                f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                f"status=metrics_error detail={exc}"
-            )
-            m = {
-                "turns": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "reasoning_tokens": 0,
-                "cost_usd": 0.0,
-                "truncations": 0,
-                "error_parts": 0,
-            }
-            if exit_code == 0:
+            # 2) Confirm the serve actually picked the prompt up (busy), THEN wait
+            #    for completion (busy->idle). prompt_async is fire-and-forget: a
+            #    bare wait_idle races the serve's busy flag and returns a false
+            #    idle in milliseconds, metering turns=0 while gates run against a
+            #    worktree the model is still writing (2026-08-09 void cell).
+            #    A never-busy send is a loud transport failure (exit 1), never a
+            #    clean zero-turn "ok" — unless the transcript already shows turns
+            #    (a turn that raced past the busy window is metered, not voided).
+            busy_grace_s = 60.0
+            went_busy = serve_client.wait_busy(session_id, timeout_s=busy_grace_s)
+            killed_reason = None
+            exit_code = 0
+            if not went_busy:
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=never_busy grace_s={busy_grace_s:.0f} session_id={session_id}"
+                )
+                try:
+                    early = serve_client.metrics(session_id)
+                except ServeClientError:
+                    early = None
+                dead = True
+                if early:
+                    if baseline is not None:
+                        dead = (
+                            int(early.get("turns") or 0) - int(baseline.get("turns") or 0) <= 0
+                            and int(early.get("output_tokens") or 0)
+                            - int(baseline.get("output_tokens") or 0)
+                            <= 0
+                        )
+                    else:
+                        dead = int(early.get("turns") or 0) <= 0
+                if dead:
+                    return _OpencodeRunStats(
+                        input_tokens=0,
+                        output_tokens=0,
+                        reasoning_tokens=0,
+                        turns=0,
+                        session_id=session_id,
+                        killed_reason=None,
+                        exit_code=1,
+                        cost_usd=0.0,
+                        turn_anomalies=tuple(turn_anomaly_list),
+                        recovery_nudges=recovery_nudges,
+                    )
+                # The turn completed inside the busy-grace window; fall through to
+                # the normal metering path with idle already reached.
+                idle = True
+            else:
+                # The serve-side generation may continue briefly after idle
+                # returns; do NOT wait further.
+                idle = serve_client.wait_idle(session_id, timeout_s=timeout_s)
+            if not idle:
+                killed_reason = "run_timeout"
                 exit_code = 1
+                # WO-WATCH-1F: genuinely stop serve-side generation before teardown.
+                # An abort failure is logged but must NOT mask the timeout outcome.
+                try:
+                    serve_client.abort(session_id)
+                except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                        f"status=abort_failed reason={exc}"
+                    )
+                else:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                        f"status=abort_issued session_id={session_id}"
+                    )
+                try:
+                    kill_hook()
+                except Exception as exc:  # noqa: BLE001 - never mask the timeout outcome.
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                        f"status=kill_hook_error detail={exc}"
+                    )
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=timeout timeout_s={timeout_s:.1f} session_id={session_id}"
+                )
 
-        terminal, reason = classify_transport_anomaly(m)
-        turn_anomalies: tuple[dict[str, Any], ...] = ()
-        if terminal is not None:
-            if terminal == "truncated":
-                mapped_terminal = TURN_TERMINAL_TRUNCATED
-            elif terminal == "transport_error":
-                mapped_terminal = TURN_TERMINAL_TRANSPORT_ERROR
-            else:
-                mapped_terminal = terminal
-            turn_anomalies = (
-                {
+            # 3) Pull metrics from the persisted transcript.
+            try:
+                m = serve_client.metrics(session_id)
+            except ServeClientError as exc:
+                # Metering failed after completion; report a transport-style exit and
+                # let the caller decide (fall through to stdout path on retry).
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                    f"status=metrics_error detail={exc}"
+                )
+                m = (
+                    dict(baseline)
+                    if baseline is not None
+                    else {
+                        "turns": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "cost_usd": 0.0,
+                        "truncations": 0,
+                        "error_parts": 0,
+                    }
+                )
+                if exit_code == 0:
+                    exit_code = 1
+
+            terminal, reason = classify_transport_anomaly(m)
+            if terminal is not None:
+                if terminal == "truncated":
+                    mapped_terminal = TURN_TERMINAL_TRUNCATED
+                elif terminal == TERMINAL_GUARD_ABORT:
+                    mapped_terminal = TURN_TERMINAL_GUARD_ABORT
+                elif terminal == "transport_error":
+                    mapped_terminal = TURN_TERMINAL_TRANSPORT_ERROR
+                else:
+                    mapped_terminal = terminal
+                anomaly_record: dict[str, Any] = {
                     "phase": str(phase),
                     "turn_index": int(m.get("turns", 0)),
                     "terminal": str(mapped_terminal),
@@ -2348,53 +2674,141 @@ class BackgammonRunner(AgentRunner):
                     "cost_usd": float(m.get("cost_usd", 0.0) or 0.0),
                     "tokens_unmetered": False,
                     "wall_seconds": None,
+                    "retried": False,
+                    "retry_kind": None,
                     "session_id": session_id,
+                }
+                turn_anomaly_list.append(anomaly_record)
+                self._write_truncation_evidence(
+                    record=_build_truncation_evidence(
+                        attempt_id=attempt_id,
+                        run_label=run_label,
+                        phase=phase,
+                        terminal=mapped_terminal,
+                        reason=str(reason or ""),
+                        ts_start_epoch_ms=ts_start_epoch_ms,
+                        ts_end_epoch_ms=int(time.time() * 1000),
+                        wall_seconds=None,
+                        session_id=session_id,
+                        received_bytes=None,
+                        received_lines=None,
+                        last_event_type=None,
+                        last_event_ts=None,
+                        finish_reason=m.get("last_finish"),
+                        output_tokens_received=int(m.get("output_tokens", 0) or 0),
+                        input_tokens_received=int(m.get("input_tokens", 0) or 0),
+                        reasoning_tokens_received=int(m.get("reasoning_tokens", 0) or 0),
+                        truncations_seen=int(m.get("truncations", 0) or 0),
+                    ),
+                    evidence_path=evidence_path,
+                )
+                recoverable = mapped_terminal == TURN_TERMINAL_GUARD_ABORT or (
+                    mapped_terminal == TURN_TERMINAL_TRANSPORT_ERROR
+                    and str(reason or "") == REASON_STREAM_FINALIZE_TIMEOUT
+                )
+                if (
+                    recoverable
+                    and killed_reason is None
+                    and exit_code == 0
+                    and recovery_nudge_budget > 0
+                ):
+                    if recovery_nudges < recovery_nudge_budget:
+                        anomaly_record["retried"] = True
+                        anomaly_record["retry_kind"] = "harness_resume"
+                        recovery_nudges += 1
+                        self._progress(
+                            f"PROGRESS run_label={run_label} step=transport-recovery "
+                            f"phase={phase} terminal={mapped_terminal} action=nudge "
+                            f"nudge={recovery_nudges} "
+                            f"budget={recovery_nudge_budget} session_id={session_id}"
+                        )
+                        prompt_to_send = (
+                            _LOOP_RECOVERY_NUDGE
+                            if mapped_terminal == TURN_TERMINAL_GUARD_ABORT
+                            else _FINALIZE_RECOVERY_NUDGE
+                        )
+                        continue
+                    exit_code = 1
+                    killed_reason = (
+                        "loop_guard_exhausted"
+                        if mapped_terminal == TURN_TERMINAL_GUARD_ABORT
+                        else "stream_finalize_exhausted"
+                    )
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=transport-recovery "
+                        f"phase={phase} terminal={mapped_terminal} action=exhausted "
+                        f"budget={recovery_nudge_budget} "
+                        f"session_id={session_id}"
+                    )
+            break
+
+        turn_anomalies: tuple[dict[str, Any], ...] = tuple(turn_anomaly_list)
+
+        def _d(key: str) -> int:
+            end_v = int(m.get(key, 0) or 0)
+            if baseline is None:
+                return end_v
+            return end_v - int(baseline.get(key, 0) or 0)
+
+        d_input = _d("input_tokens")
+        d_output = _d("output_tokens")
+        d_reasoning = _d("reasoning_tokens")
+        d_turns = _d("turns")
+        d_guard_aborted = _d("guard_aborted_turns")
+        # WO-TURNACCT-1 (Walter 2026-08-10): guard-killed turns are EXCLUDED
+        # from scoring turns — their tokens stay metered (real burn), the
+        # excluded count is carried on guard_aborted_turns (never silent), and
+        # the raw session turn_index cursors stay untouched (watermarks key on
+        # them). The stdout path never counts a killed turn in the first place
+        # (the interrupted step gets no step_finish), so this subtraction is
+        # what keeps the two arms identical (RC-4).
+        scoring_turns = max(0, d_turns - d_guard_aborted)
+        d_truncations = _d("truncations")
+        d_cost = float(m.get("cost_usd", 0.0) or 0.0) - (
+            float(baseline.get("cost_usd", 0.0) or 0.0) if baseline is not None else 0.0
+        )
+
+        if exit_code == 0 and d_turns <= 0 and d_output <= 0 and d_input <= 0:
+            # The phase reached idle but produced NOTHING: the final assistant
+            # message was discarded (relay stream-finalize defect, 2026-08-09)
+            # or the serve never generated. Loud exit 1 — never a clean zero
+            # that lets gates run against a stale worktree.
+            exit_code = 1
+            turn_anomalies = turn_anomalies + (
+                {
+                    "phase": str(phase),
+                    "turn_index": int(m.get("turns", 0)),
+                    "terminal": "silent_phase",
+                    "reason": "phase produced zero new turns and zero new tokens",
+                    "tool_uses": 0,
                 },
             )
-            self._write_truncation_evidence(
-                record=_build_truncation_evidence(
-                    attempt_id=attempt_id,
-                    run_label=run_label,
-                    phase=phase,
-                    terminal=mapped_terminal,
-                    reason=str(reason or ""),
-                    ts_start_epoch_ms=ts_start_epoch_ms,
-                    ts_end_epoch_ms=int(time.time() * 1000),
-                    wall_seconds=None,
-                    session_id=session_id,
-                    received_bytes=None,
-                    received_lines=None,
-                    last_event_type=None,
-                    last_event_ts=None,
-                    finish_reason=m.get("last_finish"),
-                    output_tokens_received=int(m.get("output_tokens", 0) or 0),
-                    input_tokens_received=int(m.get("input_tokens", 0) or 0),
-                    reasoning_tokens_received=int(m.get("reasoning_tokens", 0) or 0),
-                    truncations_seen=int(m.get("truncations", 0) or 0),
-                ),
-                evidence_path=evidence_path,
+            self._progress(
+                f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
+                f"status=silent_phase session_id={session_id}"
             )
 
         self._progress(
             f"PROGRESS run_label={run_label} step=serve-drive-end phase={phase} "
-            f"turns={m.get('turns', 0)} input={m.get('input_tokens', 0)} "
-            f"output={m.get('output_tokens', 0)} reasoning={m.get('reasoning_tokens', 0)} "
-            f"session_id={session_id} cost_usd={float(m.get('cost_usd', 0.0) or 0.0):.4f} "
+            f"turns={scoring_turns} guard_aborted_turns={d_guard_aborted} "
+            f"session_turns={m.get('turns', 0)} "
+            f"input={d_input} output={d_output} reasoning={d_reasoning} "
+            f"session_id={session_id} cost_usd={d_cost:.4f} "
             f"status={'ok' if idle else 'timeout'}"
         )
 
         return _OpencodeRunStats(
-            input_tokens=int(m.get("input_tokens", 0) or 0),
-            output_tokens=int(m.get("output_tokens", 0) or 0),
-            reasoning_tokens=int(m.get("reasoning_tokens", 0) or 0),
-            turns=int(m.get("turns", 0) or 0),
+            input_tokens=d_input,
+            output_tokens=d_output,
+            reasoning_tokens=d_reasoning,
+            turns=scoring_turns,
             session_id=session_id,
             killed_reason=killed_reason,
             exit_code=exit_code,
-            cost_usd=float(m.get("cost_usd", 0.0) or 0.0),
+            cost_usd=d_cost,
             budget_stop_detected=False,
             budget_stop_signature=None,
-            truncations=int(m.get("truncations", 0) or 0),
+            truncations=d_truncations,
             zero_tool_turns=0,
             terminal_zero_tool_turn=False,
             zero_tool_resumes=0,
@@ -2403,7 +2817,257 @@ class BackgammonRunner(AgentRunner):
             turn_anomalies=turn_anomalies,
             unmetered_turns=0,
             unmetered_turn_wall_s=0.0,
+            recovery_nudges=recovery_nudges,
+            guard_aborted_turns=d_guard_aborted,
         )
+
+    def _run_opencode_serve_chunked(
+        self,
+        *,
+        active_cell: DockerCell,
+        serve_client: ServeClient,
+        session_id: str,
+        prompts: list[str],
+        run_label: str,
+        prior_cost_usd: float = 0.0,
+        timeout_s: float = 5400.0,
+        kill_hook: Callable[[], None] | None = None,
+    ) -> _OpencodeRunStats:
+        """WO-77 chunked first pass: drive the chunk prompts IN ORDER through the
+        one serve session. Per chunk: drive -> watermark-windowed marker scan
+        (only messages THIS chunk produced) -> up to WEVIBE_BENCH_CHUNK_NUDGE_BUDGET
+        marker nudges (default 3) -> loud ``chunk_marker_missing`` failure ->
+        inter-chunk compaction phase (fail-open, skipped after the last chunk).
+        Aggregates are the sum of per-chunk deltas (the per-phase metering in
+        :meth:`_run_opencode_serve` is delta-true).
+        """
+        sum_input = 0
+        sum_output = 0
+        sum_reasoning = 0
+        sum_turns = 0
+        sum_cost = 0.0
+        sum_truncations = 0
+        sum_recovery_nudges = 0
+        sum_guard_aborted = 0
+        anomalies: list[dict[str, Any]] = []
+        chunk_reports: list[dict[str, Any]] = []
+
+        def _aggregate(*, exit_code: int | None, killed_reason: str | None) -> _OpencodeRunStats:
+            return _OpencodeRunStats(
+                input_tokens=sum_input,
+                output_tokens=sum_output,
+                reasoning_tokens=sum_reasoning,
+                turns=sum_turns,
+                session_id=session_id,
+                killed_reason=killed_reason,
+                exit_code=exit_code,
+                cost_usd=sum_cost,
+                truncations=sum_truncations,
+                turn_anomalies=tuple(anomalies),
+                chunk_reports=tuple(chunk_reports),
+                recovery_nudges=sum_recovery_nudges,
+                guard_aborted_turns=sum_guard_aborted,
+            )
+
+        def _drive(phase: str, prompt: str) -> _OpencodeRunStats:
+            nonlocal sum_input, sum_output, sum_reasoning, sum_turns, sum_cost, sum_truncations
+            nonlocal sum_recovery_nudges, sum_guard_aborted
+            stats = self._run_opencode_serve(
+                active_cell=active_cell,
+                serve_client=serve_client,
+                session_id=session_id,
+                prompt=prompt,
+                run_label=run_label,
+                phase=phase,
+                prior_cost_usd=prior_cost_usd + sum_cost,
+                timeout_s=timeout_s,
+                kill_hook=kill_hook,
+            )
+            sum_input += stats.input_tokens
+            sum_output += stats.output_tokens
+            sum_reasoning += stats.reasoning_tokens
+            sum_turns += stats.turns
+            sum_cost += stats.cost_usd
+            sum_truncations += stats.truncations
+            sum_recovery_nudges += stats.recovery_nudges
+            sum_guard_aborted += stats.guard_aborted_turns
+            anomalies.extend(stats.turn_anomalies)
+            return stats
+
+        compact_enabled = (os.environ.get("WEVIBE_BENCH_CHUNK_COMPACT") or "1").strip() != "0"
+        nudge_budget = int(os.environ.get("WEVIBE_BENCH_CHUNK_NUDGE_BUDGET") or "3")
+        compact_grace_s = float(os.environ.get("WEVIBE_BENCH_COMPACT_GRACE_S") or "15")
+        compact_total_s = float(os.environ.get("WEVIBE_BENCH_COMPACT_TOTAL_S") or "1800")
+
+        for index, chunk_prompt in enumerate(prompts, start=1):
+            phase = f"initial-chunk-{index}"
+            report: dict[str, Any] = {
+                "chunk": index,
+                "nudged": False,
+                "nudges": 0,
+                "marker": False,
+                "compaction": None,
+                "recovery_nudges": 0,
+                "guard_aborted_turns": 0,
+            }
+            # Watermark BEFORE the drive: the marker scan below covers only the
+            # messages THIS chunk produced, so a marker from an earlier chunk
+            # can never satisfy a later one.
+            watermark = len(serve_client.get_messages(session_id))
+            stats = _drive(phase, chunk_prompt)
+            report["recovery_nudges"] += stats.recovery_nudges
+            report["guard_aborted_turns"] += stats.guard_aborted_turns
+            report.update(
+                turns=stats.turns,
+                input_tokens=stats.input_tokens,
+                output_tokens=stats.output_tokens,
+                exit_code=stats.exit_code,
+            )
+            chunk_reports.append(report)
+            if stats.exit_code != 0:
+                return _aggregate(exit_code=stats.exit_code, killed_reason=stats.killed_reason)
+            while not any(
+                CHUNK_MARKER in text
+                for text in serve_client.assistant_texts_since(session_id, watermark)
+            ):
+                if report["nudges"] >= nudge_budget:
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=chunk-marker-missing "
+                        f"chunk={index} session_id={session_id} action=fail "
+                        f"nudges={report['nudges']}"
+                    )
+                    return _aggregate(exit_code=1, killed_reason="chunk_marker_missing")
+                report["nudges"] += 1
+                report["nudged"] = True
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=chunk-marker-missing "
+                    f"chunk={index} session_id={session_id} action=nudge "
+                    f"nudge={report['nudges']} budget={nudge_budget}"
+                )
+                nudge = (
+                    f"Your previous response did not end with the {CHUNK_MARKER} marker. "
+                    "If the current chunk task is fully complete, reply with exactly "
+                    f"{CHUNK_MARKER}. Otherwise finish the remaining work for this chunk "
+                    f"first, then end with {CHUNK_MARKER}."
+                )
+                nudge_stats = _drive(f"{phase}-marker-nudge-{report['nudges']}", nudge)
+                report["recovery_nudges"] += nudge_stats.recovery_nudges
+                report["guard_aborted_turns"] += nudge_stats.guard_aborted_turns
+                if nudge_stats.exit_code != 0:
+                    return _aggregate(
+                        exit_code=nudge_stats.exit_code, killed_reason=nudge_stats.killed_reason
+                    )
+            report["marker"] = True
+
+            if compact_enabled and index < len(prompts):
+                report["compaction"] = self._await_chunk_compaction(
+                    serve_client=serve_client,
+                    session_id=session_id,
+                    watermark=watermark,
+                    run_label=run_label,
+                    chunk=index,
+                    grace_s=compact_grace_s,
+                    total_s=compact_total_s,
+                )
+
+        return _aggregate(exit_code=0, killed_reason=None)
+
+    def _await_chunk_compaction(
+        self,
+        *,
+        serve_client: ServeClient,
+        session_id: str,
+        watermark: int,
+        run_label: str,
+        chunk: int,
+        grace_s: float,
+        total_s: float,
+    ) -> str:
+        """Inter-chunk compaction, FAIL-OPEN (a run without compaction is the
+        pre-2026-08-10 status quo; a wedged probe must never kill a cell).
+
+        The worker is instructed to end each chunk by calling its self_compact
+        tool (arm-on-idle -> session.summarize). This phase watches for that
+        self-fired compaction: the session going busy within ``grace_s`` of the
+        marker turn, then a compaction part landing within ``total_s``. When
+        neither materializes the harness fires the backstop summarize itself
+        (auto=False — the harness, not a synthetic continue turn, sends the
+        next chunk). Returns the outcome recorded in the chunk report.
+        """
+        deadline_grace = time.monotonic() + grace_s
+        deadline_total = time.monotonic() + total_s
+        saw_busy = False
+        idle_since: float | None = None
+        while time.monotonic() < deadline_total:
+            try:
+                if serve_client.compaction_since(session_id, watermark):
+                    return "self"
+                busy = serve_client.session_busy(session_id)
+            except Exception as exc:  # probe failure must not wedge the loop
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=chunk-compaction "
+                    f"chunk={chunk} session_id={session_id} probe_error={exc!r} "
+                    f"action=continue"
+                )
+                return "probe_error"
+            now = time.monotonic()
+            if busy:
+                saw_busy = True
+                idle_since = None
+            else:
+                if idle_since is None:
+                    idle_since = now
+                if not saw_busy and now >= deadline_grace:
+                    break  # agent never armed a compaction -> backstop below
+                if saw_busy and now - idle_since > 10.0:
+                    # A busy window ended without compaction evidence: the
+                    # summarize failed server-side. Fail open.
+                    return "no_evidence"
+            time.sleep(min(serve_client.poll_interval, 5.0))
+        else:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=chunk-compaction "
+                f"chunk={chunk} session_id={session_id} action=timeout"
+            )
+            return "timeout"
+
+        model = serve_client.session_model(session_id)
+        if model is None:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=chunk-compaction "
+                f"chunk={chunk} session_id={session_id} action=backstop-skipped "
+                f"reason=no-model"
+            )
+            return "skipped_no_model"
+        provider_id, model_id = model
+        self._progress(
+            f"PROGRESS run_label={run_label} step=chunk-compaction "
+            f"chunk={chunk} session_id={session_id} action=backstop "
+            f"provider={provider_id} model={model_id}"
+        )
+        try:
+            serve_client.summarize(
+                session_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                auto=False,
+                timeout_s=max(60.0, deadline_total - time.monotonic()),
+            )
+        except Exception as exc:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=chunk-compaction "
+                f"chunk={chunk} session_id={session_id} backstop_error={exc!r}"
+            )
+            return "backstop_error"
+        if serve_client.compaction_since(session_id, watermark):
+            return "backstop"
+        # Async-accept servers: brief confirm window before giving up.
+        confirm_deadline = time.monotonic() + 30.0
+        while time.monotonic() < confirm_deadline:
+            if serve_client.compaction_since(session_id, watermark):
+                return "backstop"
+            time.sleep(min(serve_client.poll_interval, 5.0))
+        return "backstop_unconfirmed"
 
     def _run_opencode(
         self,
@@ -3384,7 +4048,7 @@ class BackgammonRunner(AgentRunner):
         data = error_block.get("data") if isinstance(error_block.get("data"), dict) else {}
         message = str(data.get("message", ""))
         haystack = message.lower()
-        if _LOOP_GUARD_SIGNATURE in haystack:
+        if any(sig in haystack for sig in LOOP_GUARD_SIGNATURES):
             return "loop_guard"
         for reason_code, signature in _TRANSPORT_ERROR_SIGNATURES:
             if signature in haystack:

@@ -32,7 +32,7 @@ def _make_runner(
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
-        model="orcarouter/wevibe-bench-worker",
+        model="local-llm-proxy/wevibe-bench-worker",
         cost_limit_usd=cost_limit_usd,
         max_attempts=max_attempts,
         max_output_tokens=max_output_tokens,
@@ -93,6 +93,9 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         def __init__(self, config: _FakeDockerCellConfig, progress: Any) -> None:
             self.config = config
             self.progress = progress
+            # Mirrors the real DockerCell surface (docker_worker.py sets
+            # self.container_name = config.container_name at construction).
+            self.container_name = config.container_name
 
         def __enter__(self) -> "_FakeDockerCell":
             return self
@@ -166,7 +169,7 @@ def test_opencode_argv_omits_prompt_positional_and_delivers_prompts_via_stdin(
     _patch_fake_docker(monkeypatch)
 
     task_prompt = "D6 initial prompt marker"
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: task_prompt)
+    monkeypatch.setattr(runner, "_load_chunk_prompts", lambda *, injected_memory: [task_prompt])
 
     gate_calls = {"count": 0}
 
@@ -228,7 +231,7 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
 ) -> None:
     runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=4)
     _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
+    monkeypatch.setattr(runner, "_load_chunk_prompts", lambda *, injected_memory: ["INITIAL PROMPT"])
 
     gate_calls = {"count": 0}
 
@@ -336,7 +339,7 @@ def test_zero_progress_gap_has_no_pass_verdict_and_uses_false_header(
 ) -> None:
     runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=3)
     _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "INITIAL PROMPT")
+    monkeypatch.setattr(runner, "_load_chunk_prompts", lambda *, injected_memory: ["INITIAL PROMPT"])
 
     gate_calls = {"count": 0}
 
@@ -437,7 +440,7 @@ def test_harness_limit_kill_does_not_force_budget_stop_and_loop_can_continue(
 ) -> None:
     runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
     docker_state = _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "PROMPT")
+    monkeypatch.setattr(runner, "_load_chunk_prompts", lambda *, injected_memory: ["PROMPT"])
 
     gate_calls = {"count": 0}
 
@@ -495,7 +498,7 @@ def test_non_budget_nonzero_worker_exit_classifies_as_harness_error(
 ) -> None:
     runner = _make_runner(tmp_path, cost_limit_usd=None, max_attempts=2)
     _patch_fake_docker(monkeypatch)
-    monkeypatch.setattr(runner, "_build_task_prompt", lambda *, injected_memory: "PROMPT")
+    monkeypatch.setattr(runner, "_load_chunk_prompts", lambda *, injected_memory: ["PROMPT"])
     monkeypatch.setattr(
         runner,
         "_run_opencode_with_zero_tool_resumes",

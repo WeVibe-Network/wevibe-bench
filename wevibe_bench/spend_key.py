@@ -84,7 +84,7 @@ def _resolve_opencode_config_path(path: str | os.PathLike[str] | None) -> Path:
     return Path(candidate).expanduser()
 
 
-def _read_orcarouter_api_key_from_opencode(path: Path) -> str | None:
+def _read_local_llm_proxy_api_key_from_opencode(path: Path) -> str | None:
     if not path.is_file():
         return None
     try:
@@ -98,10 +98,10 @@ def _read_orcarouter_api_key_from_opencode(path: Path) -> str | None:
     provider = payload.get("provider")
     if not isinstance(provider, dict):
         return None
-    orcarouter = provider.get("orcarouter")
-    if not isinstance(orcarouter, dict):
+    local_llm_proxy = provider.get("local-llm-proxy")
+    if not isinstance(local_llm_proxy, dict):
         return None
-    options = orcarouter.get("options")
+    options = local_llm_proxy.get("options")
     if not isinstance(options, dict):
         return None
     key = options.get("apiKey")
@@ -111,58 +111,58 @@ def _read_orcarouter_api_key_from_opencode(path: Path) -> str | None:
     return key if key else None
 
 
-def resolve_orcarouter_api_key(
+def resolve_local_llm_proxy_api_key(
     *,
     env: Mapping[str, str] | None = None,
     dotenv_path: str | os.PathLike[str] | None = None,
     opencode_config_path: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
-    """Resolve OrcaRouter spend-proxy token and return (token, source_label)."""
+    """Resolve Local LLM Proxy consumer token and return (token, source_label)."""
     env_map = os.environ if env is None else env
     env_file = _resolve_dotenv_path(env=env_map, dotenv_path=dotenv_path)
     opencode_file = _resolve_opencode_config_path(opencode_config_path)
     dot = _read_dotenv(env_file, env=env_map)
 
-    from_dotenv = dot.get("ORCAROUTER_API_KEY", "").strip()
+    from_dotenv = dot.get("LOCAL_LLM_PROXY_API_KEY", "").strip()
     if from_dotenv:
         fp = key_fingerprint(from_dotenv)
         logger.info(
-            "spend_key.resolve_orcarouter_api_key outcome=resolved source=dotenv path=%s token_fp=%s",
+            "spend_key.resolve_local_llm_proxy_api_key outcome=resolved source=dotenv path=%s token_fp=%s",
             str(env_file),
             fp,
         )
         return from_dotenv, "dotenv"
 
-    from_env = str(env_map.get("ORCAROUTER_API_KEY", "")).strip()
+    from_env = str(env_map.get("LOCAL_LLM_PROXY_API_KEY", "")).strip()
     if from_env:
         fp = key_fingerprint(from_env)
         logger.info(
-            "spend_key.resolve_orcarouter_api_key outcome=resolved source=env:ORCAROUTER_API_KEY token_fp=%s",
+            "spend_key.resolve_local_llm_proxy_api_key outcome=resolved source=env:LOCAL_LLM_PROXY_API_KEY token_fp=%s",
             fp,
         )
-        return from_env, "env:ORCAROUTER_API_KEY"
+        return from_env, "env:LOCAL_LLM_PROXY_API_KEY"
 
-    from_opencode = _read_orcarouter_api_key_from_opencode(opencode_file)
+    from_opencode = _read_local_llm_proxy_api_key_from_opencode(opencode_file)
     if from_opencode:
         fp = key_fingerprint(from_opencode)
         logger.info(
-            "spend_key.resolve_orcarouter_api_key outcome=resolved source=opencode.json:provider.orcarouter.options.apiKey path=%s token_fp=%s",
+            "spend_key.resolve_local_llm_proxy_api_key outcome=resolved source=opencode.json:provider.local-llm-proxy.options.apiKey path=%s token_fp=%s",
             str(opencode_file),
             fp,
         )
-        return from_opencode, "opencode.json:provider.orcarouter.options.apiKey"
+        return from_opencode, "opencode.json:provider.local-llm-proxy.options.apiKey"
 
     env_example = _REPO_ROOT / ".env.example"
     message = (
-        "Missing required ORCAROUTER_API_KEY for spend-proxy routing. "
+        "Missing required LOCAL_LLM_PROXY_API_KEY for local-proxy routing. "
         f"Checked .env path: {env_file}. "
-        "Checked process env key: ORCAROUTER_API_KEY (empty/unset). "
+        "Checked process env key: LOCAL_LLM_PROXY_API_KEY (empty/unset). "
         f"Checked OpenCode config path: {opencode_file} "
-        "at provider.orcarouter.options.apiKey. "
-        f"Create ORCAROUTER_API_KEY in {env_file} (see {env_example})."
+        "at provider.local-llm-proxy.options.apiKey. "
+        f"Create LOCAL_LLM_PROXY_API_KEY in {env_file} (see {env_example})."
     )
     logger.error(
-        "spend_key.resolve_orcarouter_api_key outcome=missing source=none dotenv_path=%s opencode_path=%s",
+        "spend_key.resolve_local_llm_proxy_api_key outcome=missing source=none dotenv_path=%s opencode_path=%s",
         str(env_file),
         str(opencode_file),
     )

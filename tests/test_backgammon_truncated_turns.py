@@ -31,7 +31,7 @@ def _make_runner(tmp_path: Path, *, memory_mode: str = "off", progress: Any = No
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
-        model="orcarouter/kimi/kimi-k3",
+        model="local-llm-proxy/kimi/kimi-k3",
         memory_mode=memory_mode,
         run_timeout_s=30,
         completion_grace_s=2,
@@ -248,6 +248,94 @@ def test_loop_guard_error_classified_as_guard_abort(tmp_path: Path) -> None:
     assert anomaly["reason"] == "loop_guard"
     assert anomaly["retried"] is False
     assert anomaly["retry_kind"] is None
+
+
+def test_loop_guard_error_live_message_shape_classified_as_guard_abort(tmp_path: Path) -> None:
+    """The live 2026-08-10 relay message shape classifies identically (stdout path)."""
+    runner = _make_runner(tmp_path)
+    script_path = _write_fake_opencode(
+        tmp_path,
+        """
+        import json
+
+
+        def emit(payload):
+            print(json.dumps(payload), flush=True)
+
+
+        emit({"type": "step_start", "timestamp": 3000000, "sessionID": "sess-loop", "part": {}})
+        emit(
+            {
+                "type": "error",
+                "timestamp": 3005000,
+                "sessionID": "sess-loop",
+                "error": {
+                    "name": "UnknownError",
+                    "data": {"message": "relay: generation loop detected (<request-id>)"},
+                },
+            }
+        )
+        """,
+    )
+
+    stats = _run_script(
+        runner,
+        script_path=script_path,
+        events_path=tmp_path / "loop-live.events.jsonl",
+        run_label="loop-live",
+        phase="initial",
+    )
+
+    assert len(stats.turn_anomalies) == 1
+    anomaly = stats.turn_anomalies[0]
+    assert anomaly["terminal"] == TURN_TERMINAL_GUARD_ABORT
+    assert anomaly["reason"] == "loop_guard"
+
+
+def test_finalize_timeout_error_live_shape_reason_on_stdout_path(tmp_path: Path) -> None:
+    """RC-4 taxonomy parity: the relay finalize-watchdog message names itself
+    stream_finalize_timeout on the stdout path exactly as on the serve path."""
+    runner = _make_runner(tmp_path)
+    script_path = _write_fake_opencode(
+        tmp_path,
+        """
+        import json
+
+
+        def emit(payload):
+            print(json.dumps(payload), flush=True)
+
+
+        emit({"type": "step_start", "timestamp": 3000000, "sessionID": "sess-fin", "part": {}})
+        emit(
+            {
+                "type": "error",
+                "timestamp": 3005000,
+                "sessionID": "sess-fin",
+                "error": {
+                    "name": "UnknownError",
+                    "data": {
+                        "message": "relay: upstream completed but the stream did not "
+                        "finalize within 30000ms (<request-id>)"
+                    },
+                },
+            }
+        )
+        """,
+    )
+
+    stats = _run_script(
+        runner,
+        script_path=script_path,
+        events_path=tmp_path / "fin.events.jsonl",
+        run_label="fin",
+        phase="initial",
+    )
+
+    assert len(stats.turn_anomalies) == 1
+    anomaly = stats.turn_anomalies[0]
+    assert anomaly["terminal"] == TURN_TERMINAL_TRANSPORT_ERROR
+    assert anomaly["reason"] == "stream_finalize_timeout"
 
 
 def test_stream_died_open_on_exit_without_terminal_signal(tmp_path: Path) -> None:

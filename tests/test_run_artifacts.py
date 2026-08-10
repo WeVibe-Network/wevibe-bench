@@ -23,7 +23,7 @@ def _manifest() -> RunManifest:
         run_id="run-abc",
         created_at="2026-08-05T00:00:00Z",
         served_model="qwen3.6-35b-bench",
-        requested_model="orcarouter/qwen3.6-35b-bench",
+        requested_model="local-llm-proxy/qwen3.6-35b-bench",
         memory_mode="on",
         org_id="org-1",
         source_commit="deadbeef1234",
@@ -66,7 +66,7 @@ def _status_record(
         "sequence_index": sequence_index,
         "memory_mode": "on",
         "org_id": "org-1",
-        "served_model": {"model": "orcarouter/qwen3.6-35b-bench", "upstream_model": "qwen3.6-35b"},
+        "served_model": {"model": "local-llm-proxy/qwen3.6-35b-bench", "upstream_model": "qwen3.6-35b"},
         "verdict": verdict,
         "termination_reason": "green",
         "attempts_to_green": 1,
@@ -116,7 +116,7 @@ def test_load_run_manifest_round_trips_all_fields(tmp_path) -> None:
     assert loaded.run_id == "run-abc"
     assert loaded.created_at == "2026-08-05T00:00:00Z"
     assert loaded.served_model == "qwen3.6-35b-bench"
-    assert loaded.requested_model == "orcarouter/qwen3.6-35b-bench"
+    assert loaded.requested_model == "local-llm-proxy/qwen3.6-35b-bench"
     assert loaded.memory_mode == "on"
     assert loaded.org_id == "org-1"
     assert loaded.source_commit == "deadbeef1234"

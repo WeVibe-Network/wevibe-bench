@@ -24,7 +24,7 @@ def _make_runner(tmp_path: Path, *, progress: Any = None) -> BackgammonRunner:
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
-        model="orcarouter/kimi/kimi-k3",
+        model="local-llm-proxy/kimi/kimi-k3",
         run_timeout_s=30,
         completion_grace_s=2,
         progress=progress,
@@ -228,7 +228,7 @@ def test_zero_tool_resume_is_bounded_and_honest_fails(monkeypatch: pytest.Monkey
 
     result = runner._run_opencode_with_zero_tool_resumes(
         active_cell=fake_cell,
-        initial_inner=["opencode", "run", "--model", "orcarouter/kimi/kimi-k3", "--dir", "/work", "--format", "json"],
+        initial_inner=["opencode", "run", "--model", "local-llm-proxy/kimi/kimi-k3", "--dir", "/work", "--format", "json"],
         pure=False,
         worktree=tmp_path,
         events_path=tmp_path / "events.jsonl",
@@ -314,3 +314,107 @@ def test_tool_choice_required_guard_absent_in_harness_llm_sources() -> None:
             offenders.append(str(path))
 
     assert not offenders, f"tool_choice='required' is banned in harness LLM call paths: {offenders}"
+
+
+def test_opencode_runs_always_carry_per_cell_config_path() -> None:
+    """Every `opencode run` construction must pass --config /work/opencode.json.
+
+    The per-cell opencode.json (written to the worktree and bind-mounted at
+    /work/opencode.json) is what routes the worker model to the local :4545
+    relay. `docker exec` does not forward host env, so the baked
+    OPENCODE_CONFIG env cannot be overridden per attempt; the explicit
+    --config flag is the only way the per-cell config gets loaded. A bare
+    `opencode run` with no --config would fall back to the container image's
+    config and lose the intended local routing.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    adapter_path = repo_root / "wevibe_bench" / "adapters" / "backgammon.py"
+    payload = adapter_path.read_text(encoding="utf-8")
+
+    # Each construction block is `NAME = [ ... ]`. The list bodies contain no
+    # nested ']', so the first closing bracket after the header is the block end.
+    def block_body(name: str) -> str:
+        match = re.search(rf"{name}\s*=\s*\[(.*?)\]", payload, re.DOTALL)
+        assert match is not None, f"{name} construction not found in backgammon.py"
+        return match.group(1)
+
+    for name in ("initial_inner", "resume_inner", "feedback_inner"):
+        body = block_body(name)
+        assert '"--config"' in body, (
+            f"{name} construction is missing the explicit '--config' flag; "
+            "the per-cell /work/opencode.json (local :4545 routing) would not be loaded."
+        )
+        assert '"/work/opencode.json"' in body, (
+            f"{name} construction is missing the '/work/opencode.json' path for '--config'."
+        )
+
+
+def test_serve_launch_carries_per_cell_config_env() -> None:
+    """The serve-drive launch must load the per-cell config via OPENCODE_CONFIG.
+
+    The cell's actual attempt path is serve-drive: `opencode serve` is started
+    once per cell and a session is driven through it via serve_client. That
+    serve is launched WITHOUT `--config` (opencode serve v1.18.15 has no such
+    flag), and `docker exec` does not forward host env, so the OPENCODE_CONFIG
+    env var must be injected inline into the serve launch script. Without it
+    the serve inherits the container's baked config and the serve-created
+    session falls back to the built-in model -> Invalid token -> 0 model turns
+    -> cell VOID. The inline env override is the only delivery vector.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    adapter_path = repo_root / "wevibe_bench" / "adapters" / "docker_worker.py"
+    payload = adapter_path.read_text(encoding="utf-8")
+    assert "OPENCODE_CONFIG=/work/opencode.json" in payload, (
+        "the serve launch script must set OPENCODE_CONFIG=/work/opencode.json "
+        "so the per-cell config (local :4545 routing) is loaded by `opencode serve`."
+    )
+
+
+def test_serve_config_written_before_serve_boots() -> None:
+    """The per-cell config must exist before the serve boots.
+
+    `opencode serve` boots once per cell and is reused across all attempts, so
+    the per-cell config file (/work/opencode.json) must be written before
+    `active_cell.start_serve()` runs. A config written after serve boot would
+    never be read by the already-running serve. Guard the call ordering: the
+    first `_write_worker_permission_config(worktree=worktree)` occurrence must
+    precede the first `active_cell.start_serve()` occurrence in backgammon.py.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    adapter_path = repo_root / "wevibe_bench" / "adapters" / "backgammon.py"
+    payload = adapter_path.read_text(encoding="utf-8")
+
+    config_write = payload.index("_write_worker_permission_config(worktree=worktree)")
+    serve_boot = payload.index("active_cell.start_serve()")
+    assert config_write < serve_boot, (
+        "the per-cell config write must appear before active_cell.start_serve(); "
+        "a config written after serve boot would be missed (serve boots once per cell)."
+    )
+
+
+def test_agents_md_written_after_seed() -> None:
+    """/work/AGENTS.md must be written AFTER the scaffold seed, not wiped by it.
+
+    The cell worktree seed is a full overlay of the scaffold tree: any file
+    placed in the worktree before the copy runs is silently replaced. The
+    2026-08-09 cells booted with no /work/AGENTS.md at all (4 consecutive
+    runs) because the write never landed. Guard the call ordering: the
+    AGENTS.md write must appear after the scaffold `_copy_tree_contents`
+    call in backgammon.py, and the written content must carry the live
+    model line so the worker knows what it is running as.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    adapter_path = repo_root / "wevibe_bench" / "adapters" / "backgammon.py"
+    payload = adapter_path.read_text(encoding="utf-8")
+    seed = payload.index('self._copy_tree_contents(self.task_dir / "scaffold", worktree)')
+    agents_write = payload.index('(worktree / "AGENTS.md").write_text(')
+    assert seed < agents_write, (
+        "the /work/AGENTS.md write must appear AFTER the scaffold "
+        "_copy_tree_contents(...); written before the seed it is wiped by the "
+        "overlay and the worker receives no repo-orientation context."
+    )
+    assert '"- Model: {self.model}' in payload or "f\"- Model: {self.model}" in payload, (
+        "the seeded AGENTS.md must carry the live model/provider line; without it "
+        "the worker's model identity exists only in opencode.json, never as "
+        "natural-language context."
+    )

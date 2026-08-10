@@ -57,6 +57,7 @@ class CumulativeManifest:
     updated_at: str
     schema_version: int = CUMULATIVE_SCHEMA_VERSION
     run_context: dict[str, Any] | None = None
+    chunk_plan_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class CumulativeManifest:
             "current_index": int(self.current_index),
             "updated_at": self.updated_at,
             "run_context": self.run_context,
+            "chunk_plan_hash": self.chunk_plan_hash,
         }
 
     @classmethod
@@ -95,6 +97,7 @@ class CumulativeManifest:
             current_index=int(d["current_index"]),
             updated_at=str(d["updated_at"]),
             run_context=dict(d["run_context"]) if isinstance(d.get("run_context"), Mapping) else None,
+            chunk_plan_hash=str(d.get("chunk_plan_hash") or ""),
         )
 
 
@@ -142,6 +145,7 @@ def validate_or_fail(
     expected_roster: list[RosterEntry],
     expected_seed: int,
     expected_task: str,
+    expected_chunk_plan_hash: str = "",
 ) -> None:
     if manifest.schema_version != CUMULATIVE_SCHEMA_VERSION:
         raise ValueError(
@@ -168,6 +172,13 @@ def validate_or_fail(
             f"(manifest={manifest.task!r} expected={expected_task!r}); start a fresh run"
         )
 
+    if manifest.chunk_plan_hash != expected_chunk_plan_hash:
+        raise ValueError(
+            "cannot resume: chunk-plan hash drift detected "
+            f"(manifest={manifest.chunk_plan_hash} expected={expected_chunk_plan_hash}); "
+            "start a fresh run"
+        )
+
 
 def resume_or_create(
     path: str | os.PathLike[str],
@@ -179,6 +190,7 @@ def resume_or_create(
     config_fingerprint: str,
     schedule: list[ScheduledSession],
     run_context: Mapping[str, Any] | None = None,
+    chunk_plan_hash: str = "",
 ) -> CumulativeManifest:
     manifest_path = os.fspath(path)
     if os.path.exists(manifest_path):
@@ -188,6 +200,7 @@ def resume_or_create(
             expected_roster=roster,
             expected_seed=seed,
             expected_task=task,
+            expected_chunk_plan_hash=chunk_plan_hash,
         )
         return existing
 
@@ -206,6 +219,7 @@ def resume_or_create(
         updated_at=now,
         schema_version=CUMULATIVE_SCHEMA_VERSION,
         run_context=dict(run_context) if run_context is not None else None,
+        chunk_plan_hash=chunk_plan_hash,
     )
     atomic_write(manifest_path, created)
     return created

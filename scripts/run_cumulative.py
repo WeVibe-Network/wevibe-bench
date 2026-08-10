@@ -67,7 +67,7 @@ from wevibe_bench.process_reaper import (
 from wevibe_bench.proxy_meter import SpendMeter
 from wevibe_bench.spend_key import (
     key_fingerprint,
-    resolve_orcarouter_api_key,
+    resolve_local_llm_proxy_api_key,
     resolve_spend_db_dsn,
     resolve_spend_proxy_base_url,
     resolve_worker_spend_proxy_base_url,
@@ -77,6 +77,7 @@ IS_PRIMARY_SCORED_PATH = True
 _LOG = logging.getLogger("run_cumulative")
 
 DEFAULT_MANIFEST_PATH = Path("runs") / "cumulative" / "manifest.json"
+DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_PROXY_RUNS_DIR = Path("/Users/jerrysmith/Desktop/Local LLM Proxy/runs")
 DEFAULT_TASK_LABEL = "backgammon-cumulative-primary"
 DEFAULT_EXTRACT_TIMEOUT_S = 900
@@ -262,6 +263,51 @@ def _resolve_manifest_layout(manifest_arg: str) -> PathLayout:
     )
 
 
+def _runs_root_from_args(args: argparse.Namespace) -> Path:
+    manifest = Path(str(getattr(args, "manifest", None) or DEFAULT_MANIFEST_PATH))
+    return manifest.expanduser().resolve().parent.parent
+
+
+def _prune_runs_retention(runs_root: Path, *, keep: int = 2) -> dict[str, Any]:
+    """Prune accumulated run artifacts under ``runs/`` (Walter 2026-08-10).
+
+    Retention: the newest ``keep`` launch logs (``off-cell-*.log``) and the
+    newest ``keep`` archived run states (``cumulative.*`` dirs) survive;
+    anything older is deleted. The live ``cumulative/`` state dir is never
+    touched, and no entry outside those two classes is either — so a failed
+    run's evidence (the latest, plus one prior) is always available for
+    post-mortem while long-term accumulation stays bounded. Hooked into
+    every mutating command's exit path (the early-cancellation flow:
+    normal return, exception, and KeyboardInterrupt all land in main()'s
+    finally). Supersedes the blanket "archive, never delete" recovery note
+    for archives older than latest+1. Never raises: a prune failure must
+    not alter the command's exit path or code.
+    """
+    summary: dict[str, Any] = {"kept": [], "deleted": [], "skipped_root": None}
+    try:
+        if not runs_root.is_dir():
+            summary["skipped_root"] = str(runs_root)
+            return summary
+        classes = (
+            sorted(runs_root.glob("off-cell-*.log"), key=lambda p: p.stat().st_mtime, reverse=True),
+            [p for p in sorted(runs_root.glob("cumulative.*"), key=lambda p: p.stat().st_mtime, reverse=True) if p.is_dir()],
+        )
+        for entries in classes:
+            for idx, path in enumerate(entries):
+                if idx < keep:
+                    summary["kept"].append(path.name)
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                summary["deleted"].append(path.name)
+    except Exception as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+    return summary
+
+
+
 def _normalize_model_slug(model: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", model).strip("-")
     return slug or "model"
@@ -273,7 +319,7 @@ def _producer_model_id_from_model(model: str) -> str:
         raise RuntimeError("producer model cannot be empty")
 
     parts = [part for part in model_value.split("/") if part]
-    if parts and parts[0] == "orcarouter":
+    if parts and parts[0] == "local-llm-proxy":
         parts = parts[1:]
 
     producer_model_id = "/".join(parts)
@@ -290,7 +336,7 @@ def _provider_pin_from_model(model: str) -> str:
     parts = [part for part in model.split("/") if part]
     if not parts:
         raise ValueError("model slug must be non-empty")
-    if len(parts) >= 2 and parts[0] == "orcarouter":
+    if len(parts) >= 2 and parts[0] == "local-llm-proxy":
         return parts[1]
     return parts[0]
 
@@ -383,7 +429,7 @@ def _resolve_positive_int_env(
 
 
 def _resolve_extract_api_key() -> tuple[str, str]:
-    return resolve_orcarouter_api_key()
+    return resolve_local_llm_proxy_api_key()
 
 
 def _load_json_file(path: Path) -> Any:
@@ -949,6 +995,9 @@ class RealSessionRunner:
             "length_truncations": int(getattr(result, "truncations", 0) or 0),
             "truncated_turns": int(getattr(result, "truncated_turns", 0) or 0),
             "truncated_turns_retried": int(getattr(result, "truncated_turns_retried", 0) or 0),
+            # Guard-killed turns excluded from scoring turns (WO-TURNACCT-1) —
+            # carried so the exclusion is visible in the ledger, never silent.
+            "guard_aborted_turns": int(getattr(result, "guard_aborted_turns", 0) or 0),
             "unmetered_turns": int(getattr(result, "unmetered_turns", 0) or 0),
             "unmetered_turn_wall_s": float(getattr(result, "unmetered_turn_wall_s", 0.0) or 0.0),
             "session_fp": session_fp,
@@ -1037,7 +1086,7 @@ class RealSessionRunner:
 
     @staticmethod
     def _extract_model_for_session(session: SessionRecord) -> tuple[str, str]:
-        provider = "orcarouter"
+        provider = "local-llm-proxy"
         extract_model = str(session.model)
         provider_prefix = f"{provider}/"
         if extract_model.startswith(provider_prefix):
@@ -1319,6 +1368,57 @@ def _build_offline_leader_client(
     )
 
 
+def ensure_org(
+    cfg: LifecycleConfig,
+    wevibe_root: Path,
+    leader: Identity,
+    contributor: Identity,
+    requested_org: str,
+    logger: logging.Logger,
+    orchestrator_factory: Callable[..., LifecycleOrchestrator] | None = None,
+) -> str:
+    """Idempotently ensure the requested org exists and is gate-ready.
+
+    Reuses LifecycleOrchestrator.run_m1() (seeds keywords + org profile, exactly
+    what verify_org_checklist gates on). run_m1 reuses an already-owned org
+    (no recreation) or mints a fresh one via leader-signer register-org. The
+    requested org is pinned via dataclasses.replace on a fresh LifecycleConfig
+    (LifecycleConfig is frozen). Returns the resolved org_id.
+    """
+    from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
+    from wevibe_bench.lifecycle.mcp_process import McpProcessManager, _resolve_role_keystore
+
+    ensure_cfg = dataclass_replace(cfg, org_id=requested_org)
+    if orchestrator_factory is not None:
+        orch = orchestrator_factory(ensure_cfg)
+    else:
+        leader_keystore, _ = _resolve_role_keystore(ensure_cfg, "leader")
+        contributor_keystore, _ = _resolve_role_keystore(ensure_cfg, "contributor")
+        leader_wallet = os.environ.get("WEVIBE_BENCH_LEADER_WALLET", "")
+        procman = McpProcessManager(
+            wevibe_root=str(wevibe_root),
+            cfg=ensure_cfg,
+            logger=logger,
+        )
+        orch = LifecycleOrchestrator(
+            cfg=ensure_cfg,
+            wevibe_root=str(wevibe_root),
+            leader=leader,
+            contributor=contributor,
+            leader_keystore=leader_keystore,
+            contributor_keystore=contributor_keystore,
+            leader_wallet=leader_wallet,
+            logger=logger,
+            procman=procman,
+        )
+    result = orch.run_m1()
+    org_id = result.get("org_id")
+    if not isinstance(org_id, str) or not org_id:
+        raise RuntimeError(f"org-ensure run_m1 returned no org_id: {result}")
+    logger.info("run_cumulative.org_ensured requested=%s resolved=%s", requested_org, org_id)
+    return org_id
+
+
 def _build_real_runner_and_leader_client(
     args: argparse.Namespace,
     layout: PathLayout,
@@ -1344,7 +1444,7 @@ def _build_real_runner_and_leader_client(
             key_fingerprint(proxy_token),
         )
     else:
-        proxy_token, resolved_source = resolve_orcarouter_api_key()
+        proxy_token, resolved_source = resolve_local_llm_proxy_api_key()
         proxy_token_source = resolved_source
 
     _LOG.info(
@@ -1356,6 +1456,19 @@ def _build_real_runner_and_leader_client(
 
     leader = Identity.from_hex(_required_env("WEVIBE_BENCH_LEADER_SEED_HEX"))
     contributor = Identity.from_hex(_required_env("WEVIBE_BENCH_CONTRIB_SEED_HEX"))
+
+    requested_org = str(getattr(args, "org", "") or "").strip() or None
+    org_id = requested_org or DEFAULT_ORG_ID
+    if requested_org:
+        org_id = ensure_org(
+            cfg=cfg,
+            wevibe_root=os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT", str(repo_root.parent)),
+            leader=leader,
+            contributor=contributor,
+            requested_org=requested_org,
+            logger=_LOG,
+        )
+    args.org = org_id
 
     hub_client = HubClient(cfg, _LOG)
     verify_org_checklist(
@@ -1396,7 +1509,7 @@ def _build_real_runner_and_leader_client(
     extract_base_url = _resolve_extract_base_url()
     _LOG.info(
         "run_cumulative.extract_llm_route provider=%s base_url=%s key_source=%s key_fp=%s",
-        "orcarouter",
+        "local-llm-proxy",
         extract_base_url,
         extract_api_key_source,
         key_fingerprint(extract_api_key),
@@ -1445,6 +1558,14 @@ def _build_real_runner_and_leader_client(
 
 
 def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliContext:
+    # Card §2: --org is first-class; when omitted, every command falls back to
+    # the campaign default org. Centralised here so all subcommands (run,
+    # state, extract, ...) resolve identically — previously str(None) reached
+    # the sequencer and `state` without --org died on a false org-drift error
+    # (2026-08-09). The ON-cell requirement (--mode on requires an explicit
+    # --org) is enforced in _handle_run BEFORE this fallback is applied.
+    if not str(getattr(args, "org", "") or "").strip():
+        args.org = DEFAULT_ORG_ID
     layout = _resolve_manifest_layout(str(args.manifest))
     layout.runs_dir.mkdir(parents=True, exist_ok=True)
     review_card = PrivateReviewCard(str(layout.review_card_path))
@@ -1477,6 +1598,10 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
         config_fingerprint=config_fingerprint,
         on_budget=int(args.on_budget),
         run_context=current_run_context,
+        chunk_plan_hash=compute_task_template_hash(
+            Path(__file__).resolve().parents[1] / "tasks" / "backgammon" / "prompts"
+        )
+        or "",
         require_delivery_verification=config.RunConfig().require_delivery_verification,
     )
     recorded_run_context = getattr(getattr(sequencer, "_manifest"), "run_context", None)
@@ -1573,6 +1698,14 @@ def _decision_template_for_session(
 def _handle_run(args: argparse.Namespace) -> int:
     if not bool(args.until_review):
         raise RuntimeError("run requires --until-review")
+
+    validated_mode = str(getattr(args, "mode", "") or "").strip().lower() or None
+    validated_org = str(getattr(args, "org", "") or "").strip()
+    if validated_mode == "on" and not validated_org:
+        raise RuntimeError(
+            "--mode on requires --org <org>: an ON cell needs a target org. "
+            "Pass --org <org> (created idempotently if absent) or use --mode off."
+        )
 
     context = _build_context(args, require_runtime=True)
     session = _current_session_or_raise(context.sequencer)
@@ -1854,7 +1987,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Spend-proxy base URL baked into worker container opencode.json; default resolves via "
             "WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL env/.env else "
-            "http://host.docker.internal:4480/v1 (container-facing; host loopback "
+            "http://host.docker.internal:4545/v1 (container-facing; host loopback "
             "127.0.0.1 is dead inside cells)."
         ),
     )
@@ -1873,7 +2006,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Spend-proxy base URL baked into worker container opencode.json; default resolves via "
             "WEVIBE_BENCH_WORKER_SPEND_PROXY_BASE_URL env/.env else "
-            "http://host.docker.internal:4480/v1 (container-facing; host loopback "
+            "http://host.docker.internal:4545/v1 (container-facing; host loopback "
             "127.0.0.1 is dead inside cells)."
         ),
     )
@@ -1952,31 +2085,19 @@ def _print_json(payload: Any) -> None:
 
 
 def _discover_bench_ports() -> list[int]:
-    """Best-effort discovery of bench service ports from config URLs.
+    """Ports the BENCH itself publishes and must clear at teardown.
 
-    Returns the hub, mcp-recall, and live-view serve host ports from
-    ``RunConfig``; falls back to an empty list when not discoverable (the
-    reaper then skips port asserts).
+    Only the live-view serve host port qualifies (RunConfig.serve_host_port,
+    default 4096) — one persistent `opencode serve` per cell (WO-WATCH-1E),
+    asserted clear so a leaked serve is caught. The hub (:4440) and MCP recall
+    client (:4450) are STANDING infra owned outside the bench (card §7: the
+    hub is the ONE hub, normally already running); asserting them clear was a
+    guaranteed false alarm on every run (2026-08-09).
     """
-    ports: list[int] = []
     rc = config.RunConfig()
-    for url in (rc.hub_url, rc.mcp_recall_url):
-        try:
-            # urls are "http://127.0.0.1:4440" shape; take the numeric tail.
-            host_port = url.split("://", 1)[-1].split("/", 1)[0]
-            if ":" in host_port:
-                port = int(host_port.rsplit(":", 1)[1])
-                if port > 0:
-                    ports.append(port)
-        except (ValueError, AttributeError):
-            continue
-    # Live-view serve host port (WO-WATCH-1E): ONE persistent `opencode serve`
-    # per cell is published on a fixed host port (RunConfig.serve_host_port,
-    # default 4096). The reaper asserts it is clear at teardown so a leaked
-    # serve is caught, not just the hub/mcp ports.
     if rc.serve_host_port > 0:
-        ports.append(rc.serve_host_port)
-    return sorted(set(ports))
+        return [rc.serve_host_port]
+    return []
 
 
 def main() -> int:
@@ -2010,10 +2131,17 @@ def main() -> int:
     if handler is None:
         raise RuntimeError(f"unsupported command: {args.command!r}")
 
-    # RC-6 / D-NO-REAPER: the reaper runs UNCONDITIONALLY on every exit path —
-    # normal return, exception (failure), and KeyboardInterrupt (operator
-    # interrupt). A silent reaper is not a reaper. It is a safety net wrapper
-    # only: it must not alter the handler's return value or exit code.
+    # RC-6 / D-NO-REAPER: the reaper runs UNCONDITIONALLY on every exit path of
+    # a MUTATING command — normal return, exception (failure), and
+    # KeyboardInterrupt (operator interrupt). A silent reaper is not a reaper.
+    # It is a safety net wrapper only: it must not alter the handler's return
+    # value or exit code. Read-only commands (state, list-*, review-material,
+    # emit/validate-decision, reconcile-inventory) spawn no workers and are
+    # never reaped — a read-only `state` must not tear anything down
+    # (2026-08-09: it ran a compose down against an unrelated project).
+    mutating = {"run", "extract", "resume"}
+    if str(args.command) not in mutating:
+        return handler(args)
     try:
         run_label = getattr(args, "task", None) or "bench"
         bench_ports = _discover_bench_ports()
@@ -2024,10 +2152,15 @@ def main() -> int:
         report = run_reaper_unconditional(reaper)
         _LOG.info(
             "process_reaper: run_label=%s killed_count=%d ports=%s "
-            "compose_down=%s ok=%s",
+            "cell_containers_removed=%s ok=%s",
             report.run_label, report.killed_count, report.ports,
-            report.compose_down, report.ok,
+            report.cell_containers_removed, report.ok,
         )
+        # Runs/ retention prune (Walter 2026-08-10): rides the same
+        # unconditional exit path as the reaper, so every early-cancelled
+        # run's predecessor debris is bounded at latest+1 while the failed
+        # run's own logs survive for post-mortem. Non-fatal by construction.
+        _LOG.info("runs_retention: %s", _prune_runs_retention(_runs_root_from_args(args)))
 
 
 if __name__ == "__main__":

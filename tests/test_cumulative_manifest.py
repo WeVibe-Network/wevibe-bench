@@ -134,6 +134,31 @@ def test_validate_or_fail_accepts_match_and_rejects_each_drift() -> None:
             expected_task=f"{manifest.task}-other",
         )
 
+    with pytest.raises(ValueError, match="chunk-plan hash drift"):
+        validate_or_fail(
+            replace(manifest, chunk_plan_hash="stale-hash"),
+            expected_roster=manifest.roster,
+            expected_seed=manifest.seed,
+            expected_task=manifest.task,
+            expected_chunk_plan_hash="fresh-hash",
+        )
+
+    # A manifest written before the chunk-plan field existed loads with an
+    # empty hash and then fails drift validation loudly (never silently
+    # resumes against a chunked prompt plan).
+    legacy = CumulativeManifest.from_dict(
+        {k: v for k, v in manifest.to_dict().items() if k != "chunk_plan_hash"}
+    )
+    assert legacy.chunk_plan_hash == ""
+    with pytest.raises(ValueError, match="chunk-plan hash drift"):
+        validate_or_fail(
+            legacy,
+            expected_roster=legacy.roster,
+            expected_seed=legacy.seed,
+            expected_task=legacy.task,
+            expected_chunk_plan_hash="fresh-hash",
+        )
+
 
 def test_resume_or_create_create_then_resume_without_clobber(tmp_path) -> None:
     manifest_path = tmp_path / "manifest.json"

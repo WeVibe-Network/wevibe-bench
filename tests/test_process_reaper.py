@@ -242,7 +242,7 @@ def test_reap_report_fields_and_unconditional():
     report = ReapReport(run_label="x")
     assert report.pgid_killed == []
     assert report.children_reaped == []
-    assert report.compose_down is None
+    assert report.cell_containers_removed == []
     assert report.ports == {}
     assert report.killed_count == 0
     assert report.ok is True

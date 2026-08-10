@@ -120,6 +120,7 @@ class CumulativeSequencer:
         config_fingerprint: str,
         on_budget: int,
         run_context: Mapping[str, Any] | None = None,
+        chunk_plan_hash: str = "",
         index_ready_max_polls: int = INDEX_READY_MAX_POLLS,
         require_delivery_verification: bool = True,
     ) -> None:
@@ -151,6 +152,7 @@ class CumulativeSequencer:
             config_fingerprint=config_fingerprint,
             schedule=planned_schedule,
             run_context=run_context,
+            chunk_plan_hash=chunk_plan_hash,
         )
 
         if manifest.org_id != org_id:

@@ -39,21 +39,25 @@ COPY . /opt/docker-worker-context
 
 RUN set -eux; \
     plugin_path=""; \
+    self_compact_path=""; \
     if [ -f /opt/docker-worker-context/vendor/wevibe-opencode-plugin/package.json ]; then \
       npm i -g --install-links=true /opt/docker-worker-context/vendor/wevibe-opencode-plugin; \
       plugin_path="$(npm root -g)/wevibe-opencode-plugin/plugins/wevibe-plugin.ts"; \
       test -f "${plugin_path}"; \
+      self_compact_path="$(npm root -g)/wevibe-opencode-plugin/plugins/self-compact.ts"; \
+      test -f "${self_compact_path}"; \
     else \
       echo "NOTE: vendored wevibe-opencode-plugin missing; opencode plugin remains disabled in-image."; \
     fi; \
-    WEVIBE_PLUGIN_PATH="${plugin_path}" node - <<'NODE'
+    WEVIBE_PLUGIN_PATH="${plugin_path}" WEVIBE_SELF_COMPACT_PATH="${self_compact_path}" node - <<'NODE'
 const fs = require("node:fs")
 const pluginPath = (process.env.WEVIBE_PLUGIN_PATH || "").trim()
+const selfCompactPath = (process.env.WEVIBE_SELF_COMPACT_PATH || "").trim()
 const config = {
   $schema: "https://opencode.ai/config.json",
 }
 if (pluginPath) {
-  config.plugin = [pluginPath]
+  config.plugin = [pluginPath, selfCompactPath].filter(Boolean)
   config.mcp = {
     wevibe: {
       "//": "disabled by design: use external WEVIBE_MCP_HTTP_URL, do not auto-spawn local MCP",

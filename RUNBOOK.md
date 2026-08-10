@@ -28,6 +28,55 @@
 
 ---
 
+## 0. OPERATOR QUICKSTART — start one cell
+
+Everything an operator needs to launch a run. Rationale and rules live in the sections cited.
+
+```bash
+# 1. Preflight — all three must succeed (§7 for bring-up if any fail):
+nc -z 127.0.0.1 4545   # local relay (session + extraction models)
+nc -z 127.0.0.1 4460   # leader clone MCP
+nc -z 127.0.0.1 4440   # hub
+
+# 2. Worker image — rebuild ONLY when docker/worker/ changed since the last build
+#    (the vendored opencode plugin is baked in at build time; a stale image runs
+#    the stale plugin silently). Compare:
+docker image inspect wevibe-bench-worker:v1 --format '{{.Created}}'
+#    vs the newest mtime under docker/worker/. Rebuild:
+docker build -t wevibe-bench-worker:v1 docker/worker
+
+# 3. Run one cell (OFF; ON cells add `--mode on --org <org>`, §2):
+nohup .venv/bin/python scripts/run_cumulative.py run --until-review --mode off \
+  > runs/off-cell-$(date +%Y%m%dT%H%M%S).log 2>&1 &
+
+# 4. Watch + attach. The runner logs the session id and attach command itself:
+grep -E 'attach_cmd|session_id' runs/off-cell-<ts>.log | tail -5
+#    then attach to the cell's live worker serve:
+opencode attach http://127.0.0.1:4096 --session <ses_...>
+```
+
+**Optional — hold the stack for UI review (WO-HOLD-UI-1).** Set `WEVIBE_BENCH_HOLD_UI=1` on the
+run environment. At benchmark end (all attempts + gates done) the cell is NOT torn down: the
+artifact's server boots host-side from the bind-mounted worktree on `http://localhost:8002` —
+the exact code the model wrote, via the same boot the gates perform — and the run waits. The log
+carries a loud `HOLD-UI ACTIVE` line with the URL, the held container name, and the release
+command; machine-readable state is `<run_dir>/hold-ui.json`. Browse the UI (the live view on
+:4096 also stays up), then release: `touch <run_dir>/RELEASE_HOLD`. Teardown + reap then run
+unconditionally as always (RC-6); heartbeat progress lines keep the status stream live during
+the wait (rule 5.15 is not tripped). Never set this on an unattended cell — the run waits until
+released or killed, and a kill still tears the stack down.
+
+**Recovery — "roster hash drift detected ... start a fresh run":** the manifest pins the
+model roster; a provider/model migration invalidates it. Archive (never delete) and rerun:
+`mv runs/cumulative runs/cumulative.<why>-<date>` — the run recreates it fresh. This is a
+harness-level reset only; the server corpus is untouched (§2 wipe rules still govern that).
+
+Auth: no key setup needed for the local path — `LOCAL_LLM_PROXY_API_KEY` resolves from
+`.env`, the environment, or `opencode.json` provider config, in that order (spend_key.py).
+Extraction is a separate invocation after the cell (§9), never folded into the run.
+
+---
+
 ## 1. THE CAMPAIGN
 
 **Goal:** measure lift on whatever model is resident — does an accumulated WeVibe corpus make the
@@ -156,6 +205,19 @@ A re-baseline wipes the corpus and so is a walk-back (rule 18) — declared, nev
 
 **BENCH `MODE=on|off`** — one cell. See §3.
 
+**`--org`** — a first-class input to the run command, with mode-dependent requirement.
+- **ON cells: REQUIRED.** `run_cumulative.py run --until-review --mode on --org <org>` — omitting
+  `--org` with `--mode on` errors before any run begins ("`--mode on requires --org <org>`").
+- **OFF cells: OPTIONAL.** Omit `--org` and the run falls back to `wevibe-org-0`.
+- **When `--org` is passed**, the run idempotently ensures the org exists first: it reuses the
+  established `run_m1`/create-org path (seeds keywords + org profile — exactly what the preflight
+  gate checks), reusing an existing org as specified or creating an absent one. **No separate manual
+  `bootstrap_org_m1.py` run is required before a run.** The leader MCP endpoint comes from
+  `WEVIBE_BENCH_LEADER_MCP_URL` (the run's existing source; live leader clone :4460). Hub :4440.
+- The chain assigns fresh-mint org ids. When `--org` names an absent org on a fresh stack, the run
+  proceeds with the chain-assigned id returned by creation, reported in the run log as
+  `run_cumulative.org_ensured`.
+
 **EXTRACT** — a separate invocation after each bench, never folded inside the bench command. The
 integrity gate and the smart-leader procedure are §9.
 
@@ -178,6 +240,29 @@ integrity gate and the smart-leader procedure are §9.
 ---
 
 ## 3. THE CELL — one per invocation, always
+
+**The first pass is chunked (WO-77, 2026-08-09; compaction loop 2026-08-10).** Attempt 1 is a
+sequence of chunk prompts (`tasks/backgammon/prompts/chunk-01..06.md`), driven in order through
+the one serve session. Per chunk: drive → marker scan → compaction → next chunk.
+
+- **Marker scan is watermark-windowed.** The harness watermarks the message list before each chunk
+  and scans only what THAT chunk produced for `CHUNK FINISHED` — the worker emits the marker and
+  its `WEVIBE_DISCOVERY` block in either order, sometimes in separate assistant messages, so a
+  tail-only check misdetects. A missing marker is a stall: the harness nudges
+  (`WEVIBE_BENCH_CHUNK_NUDGE_BUDGET`, default 3), then fails loudly `chunk_marker_missing`.
+- **Inter-chunk compaction.** Chunks 1–5 instruct the worker to call its `self_compact` tool
+  (baked plugin `plugins/self-compact.ts`, arm-on-idle → `session.summarize`, autocontinue always
+  suppressed — the harness sends the next chunk itself). The harness watches for the compaction
+  part (`WEVIBE_BENCH_COMPACT_GRACE_S` 15s / `WEVIBE_BENCH_COMPACT_TOTAL_S` 1800s) and fires a
+  fail-open backstop summarize (`auto:false`) when the worker never armed. Compaction is an
+  optimization, never a gate; `WEVIBE_BENCH_CHUNK_COMPACT=0` disables it. No compaction after
+  chunk 6 — no chunk follows.
+
+Attempts 2+ remain the error-only feedback loop.
+Chunk content is arm-identical (mode toggles only injection, RC-4). Editing any chunk changes the
+manifest's `chunk_plan_hash` → the roster-drift recovery applies (§0): archive `runs/cumulative`,
+rerun. Serve-phase metering is per-phase **delta** against a pre-send baseline; a phase that ends
+with zero new turns AND zero new tokens is a loud `silent_phase` failure, never a clean zero.
 
 1. **Select ON or OFF.** Passed as a parameter.
 2. **Watch progress** from the status stream the run publishes (RC-5). Deterministic sensor only —
@@ -367,6 +452,31 @@ reading.
 | Extraction-attempt observability distinguishes "never invoked" from "gate cut it off" | all integrity claims |
 | Reasoning cap present in the outbound request, not deleted by the proxy | any cell that could produce the void signature above |
 
+### Reasoning controls — verified 2026-08-10, oMLX 0.5.7 (live probes, Qwen3.6-35B-A3B)
+
+What each knob ACTUALLY does on this stack, measured — not assumed:
+
+| Knob | Where set | Verified behaviour |
+|---|---|---|
+| `max_tokens` | request (proxy clamps to alias `limits.output`) | The ONLY hard ceiling. Reasoning and visible content share this one budget; exhaustion = `finish_reason: length`, possibly severed tool-call JSON (the VOID-INSTRUMENT class of rule 5.10) |
+| `max_reasoning_tokens` | bench alias `requestDefaults` (forced 8192; client value stripped) | **ACCEPTED but NOT enforced by oMLX 0.5.7.** Probe: `max_reasoning_tokens: 50` → full reasoning still flowed (284 completion tokens). The smoke assertion below is a PRESENCE check (proxy fills it, oMLX accepts it) — it is NOT an enforced clamp. Do not rely on it as one |
+| `reasoning_effort` | request; **stripped by bench aliases** (`forbiddenRequestParams`) | Accepted by oMLX (no 400). Qualitative level (low/medium/high; DeepSeek V4 publishes effort levels). Not a token cap |
+| `chat_template_kwargs.enable_thinking: false` | request | The real OFF switch, verified: zero reasoning, answer-only (3 tokens vs 200) |
+| thinking on/off + `preserve_thinking` defaults | oMLX admin per-model settings | Native, apply at load. `preserve_thinking_default: true` is set for both Qwen3.6 models (2026-08-10) — the BENCH aliases override per-request with `preserve_thinking: false` (§12 remediation item 1) |
+| `thinking_budget_enabled` | oMLX admin per-model settings | Exists in the schema; UNVERIFIED — do not enable mid-campaign |
+
+**Frozen for the campaign.** The bench posture is: `max_reasoning_tokens: 8192` present,
+`preserve_thinking: false`, `reasoning_effort` stripped, thinking otherwise uncapped. Changing ANY
+of these mid-campaign is a template-configuration change — the arms then differ in something other
+than injection (RC-4) and the paired arm breaks (rule 5.18 walk-back class). Set once, freeze, touch
+only between campaigns.
+
+**Walter's personal opencode sessions are deliberately UNCAPPED** (OMLX-REASON-1, proxy
+`config/models.yaml`): the interactive aliases send no reasoning parameters at all, so thinking runs
+as long as it needs inside the 16384 output budget. His control, when he wants one, is per-model
+`options.reasoningEffort` in `opencode.json` — the proxy passes it through untouched on interactive
+aliases. Never add a reasoning default to an interactive alias.
+
 **ON smoke** — the delivery-verification gate; gates every ON cell. It runs at a **fixed campaign
 point**: after the first OFF-cell extraction (post-wipe), before the first scored ON cell (matching
 §2). It is additionally re-run after any pipeline change (rule 5.1). Asserts non-null on the actual
@@ -471,10 +581,16 @@ Verified: a denied external read returns a tool error and exits cleanly in secon
 **Known residual hole:** a shell can still exfiltrate external files by indirection that
 path-pattern denies cannot fully close. Layer 3 exists because of this.
 
-**Layer 3 — transcript hard gate.** After every cell, scan the worker's event log for any tool call
-whose input references oracle paths or distinctive oracle filenames, including the gate runner.
-**Any hit forces the verdict to CHEAT → INVALID/FAIL — never PASS, even if every gate passes.** Write
-a loud marker and surface it in the scorecard.
+**Layer 3 — operator live view (primary) + transcript hard gate (stdout path only).** Amended
+2026-08-10 (Walter): the founder watches the live worker session (`opencode attach` to the cell's
+serve, §0 step 4) and IS the Layer-3 backstop on serve-driven cells — a cheat ATTEMPT the operator
+witnesses is noted, never an automated verdict flip; PASS/FAIL is never gated on the anti-cheat
+rule. The automated transcript hard gate stays enabled but its only operative input is the stdout
+fallback path's event log: after such a cell, scan it for any tool call whose input references
+oracle paths or distinctive oracle filenames, including the gate runner. **Any hit forces the
+verdict to CHEAT → INVALID/FAIL — never PASS, even if every gate passes.** Write a loud marker and
+surface it in the scorecard. On serve-driven cells (the primary path) the scan's input is not
+exported — accepted posture, not a defect: live-view replaced it.
 
 **Feedback content limits.** Worker-facing feedback carries **only the failing gate's ID and human
 title**, in the form `- [G02] pip count: FAILING`. **Forbidden in worker-facing feedback:** expected
@@ -486,8 +602,8 @@ host-side logs and is stripped before the worker sees anything. A failure points
 - Never re-add a skip-permissions flag to worker launches.
 - Never include expected, observed, path or stack detail in worker-facing feedback.
 - Never copy oracle assets into a worker worktree.
-- Keep the transcript hard gate enabled. It is the guaranteed backstop when everything else is
-  bypassed.
+- Keep the transcript hard gate enabled on the stdout fallback path (its only operative input). On
+  serve-driven cells the backstop is the operator's live view of the worker session.
 
 **Option-A invariant:** no gate may require a constant, formula, string, count or mechanism that is
 not published in the worktree contract artifact. Publishing requirements is orthogonal to all three

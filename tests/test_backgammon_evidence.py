@@ -58,7 +58,7 @@ def _make_runner(tmp_path: Path, *, progress: Any = None) -> BackgammonRunner:
     return BackgammonRunner(
         task_dir=TASK_DIR,
         work_root=tmp_path / "work-root",
-        model="orcarouter/kimi/kimi-k3",
+        model="local-llm-proxy/kimi/kimi-k3",
         memory_mode="off",
         run_timeout_s=30,
         completion_grace_s=2,

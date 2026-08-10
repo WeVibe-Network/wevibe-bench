@@ -41,7 +41,7 @@ def _cell_result() -> Any:
         ]
         session_id = "sid-1"
         memory_mode = "off"
-        model = "orcarouter/x"
+        model = "local-llm-proxy/x"
         tool_calls = 5
         test_invocations = 2
         agentic_cycles = 1
@@ -116,7 +116,7 @@ class _FakeRunner:
 def _session(sequence_index: int) -> SessionRecord:
     return SessionRecord(
         sequence_index=sequence_index,
-        model="orcarouter/x",
+        model="local-llm-proxy/x",
         provider_pin="local",
         memory_mode="off",
         phase_group=PhaseGroup.OFF_BASELINE.value,
@@ -160,7 +160,7 @@ def test_run_manifest_and_status_stream_written(tmp_path: Path) -> None:
     manifest = _read_manifest(runs_dir)
     assert manifest["memory_mode"] == "off"
     assert manifest["org_id"] == "org-test"
-    assert manifest["requested_model"] == "orcarouter/x"
+    assert manifest["requested_model"] == "local-llm-proxy/x"
     assert manifest["served_model"] is None  # fake meter returns []
     assert manifest["run_id"] == runs_dir.name
 
@@ -341,7 +341,7 @@ def test_served_model_capture_and_failure_tolerance(tmp_path: Path) -> None:
     records = _read_status_records(runs_dir)
     served_model = records[0]["served_model"]
     assert served_model["upstream_model"] == "served-y"
-    assert served_model["model"] == "orcarouter/x"
+    assert served_model["model"] == "local-llm-proxy/x"
 
     # Failure path: model_identity raises -> served_model None, run succeeds.
     runner2 = _build_runner(module, tmp_path, runs_dir=tmp_path / "runs2")
@@ -419,7 +419,7 @@ def test_local_proxy_log_served_identity_lands_in_manifest_and_status(
             record["served_model"]["upstream_model"]
             == "Vontra--DeepSeek-V4-Flash-0731-MXFP4-MLX"
         )
-        assert record["served_model"]["model"] == "orcarouter/x"
+        assert record["served_model"]["model"] == "local-llm-proxy/x"
 
     # Direct reader assertions: genuine identity via the fixture dir, None when
     # the source dir is empty (fallback degrades).

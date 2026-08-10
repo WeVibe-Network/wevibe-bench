@@ -28,7 +28,7 @@ from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.preflight import preflight
 from wevibe_bench.spend_key import (
     key_fingerprint,
-    resolve_orcarouter_api_key,
+    resolve_local_llm_proxy_api_key,
     resolve_spend_proxy_base_url,
 )
 
@@ -170,7 +170,7 @@ def _resolve_extract_num_ctx() -> int | None:
 
 
 def _resolve_extract_api_key() -> tuple[str, str]:
-    return resolve_orcarouter_api_key()
+    return resolve_local_llm_proxy_api_key()
 
 
 def _load_prompt(path: Path) -> str:
@@ -764,7 +764,7 @@ def main() -> int:
         num_ctx_label = str(extract_num_ctx) if extract_num_ctx is not None else "none"
         progress(
             "extract llm route "
-            f"provider=orcarouter base_url={extract_base_url} num_ctx={num_ctx_label} "
+            f"provider=local-llm-proxy base_url={extract_base_url} num_ctx={num_ctx_label} "
             f"key_source={api_key_source} key_fp={api_key_fp}"
         )
 
@@ -790,8 +790,8 @@ def main() -> int:
             "api_key_source": api_key_source,
         }
 
-        extract_provider = "orcarouter"
-        # The opencode SESSION slug is provider-prefixed (e.g. 'orcarouter/anthropic/claude-opus-4.6'),
+        extract_provider = "local-llm-proxy"
+        # The opencode SESSION slug is provider-prefixed (e.g. 'local-llm-proxy/wevibe-bench-worker'),
         # but /v1/extract wants the RAW provider id with `provider` passed separately. For
         # self-extraction (extract_model defaults to session_model) normalize by stripping a leading
         # provider prefix that matches extract_provider.

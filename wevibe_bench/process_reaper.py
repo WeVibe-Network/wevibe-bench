@@ -2,9 +2,17 @@
 
 Teardown and reap are unconditional: they run on success, on failure, on abort
 and on operator interrupt. The reaper kills the run's process group, reaps
-orphaned Playwright/node children, brings the compose project down, asserts no
-listener remains on the bench ports, and reports what it killed. A silent
-reaper is not a reaper (D-NO-REAPER).
+orphaned Playwright/node children, force-removes any leaked bench cell
+containers, asserts no listener remains on bench-owned ports, and reports what
+it killed. A silent reaper is not a reaper (D-NO-REAPER).
+
+Scope rule (2026-08-09): the reaper touches ONLY bench-owned things — child
+processes of the run, ``wevibe-bench-cell-*`` containers, and the live-view
+serve port. The bench owns NO compose project (cells are plain ``docker run``),
+so there is no compose-down step at all: the old bare ``docker compose down``
+resolved whatever compose file the caller's CWD walked up to — on this host it
+downed an UNRELATED personal project on every run exit. Standing infra (the
+hub, the MCP recall client, the proxy) is never a reap target.
 
 This module is self-contained and has a MOCKABLE kill surface so tests can run
 without Docker/Playwright: candidate identification and the kill operation are
@@ -44,8 +52,7 @@ class ReapReport:
     run_label: str
     pgid_killed: list[int] = field(default_factory=list)
     children_reaped: list[int] = field(default_factory=list)
-    compose_down: bool | None = None
-    compose_detail: str = ""
+    cell_containers_removed: list[str] = field(default_factory=list)
     ports: dict[int, str] = field(default_factory=dict)
     killed_count: int = 0
     ok: bool = True
@@ -242,29 +249,53 @@ class ProcessReaper:
         self.log.info("process_reaper reaped children=%s", killed)
         return killed
 
-    def _compose_down(self) -> tuple[bool | None, str]:
-        """Best-effort ``docker compose down``. Never fails the reaper."""
+    def _remove_cell_containers(self) -> list[str]:
+        """Force-remove leaked bench cell containers. Never fails the reaper.
+
+        Cell workers are plain ``docker run`` containers named
+        ``wevibe-bench-cell-<run_label>``; the run path removes its own on a
+        clean exit, so anything still present here is a crash leak. Scoped by
+        name prefix — never a pattern that could match non-bench containers.
+        """
         docker = shutil.which("docker")
         if docker is None:
-            self.log.info("process_reaper docker unavailable; skipping compose down")
-            return None, "docker not found; skipped"
+            self.log.info("process_reaper docker unavailable; skipping cell container sweep")
+            return []
         try:
             out = subprocess.run(
-                [docker, "compose", "down"],
+                [docker, "ps", "-aq", "--filter", "name=wevibe-bench-cell-"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.log.warning("process_reaper cell container listing failed: %s", exc)
+            return []
+        ids = [line.strip() for line in out.stdout.splitlines() if line.strip()]
+        if not ids:
+            return []
+        removed: list[str] = []
+        try:
+            rm = subprocess.run(
+                [docker, "rm", "-f", *ids],
                 capture_output=True,
                 text=True,
                 timeout=30,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
-            self.log.warning("process_reaper docker compose down failed: %s", exc)
-            return False, f"compose down error: {exc}"
-        detail = (out.stdout or out.stderr or "").strip()
-        ok = out.returncode == 0
-        self.log.info(
-            "process_reaper compose down ok=%s detail=%r", ok, detail
-        )
-        return ok, detail
+            if rm.returncode == 0:
+                removed = ids
+            else:
+                self.log.warning(
+                    "process_reaper cell container rm rc=%d detail=%r",
+                    rm.returncode, (rm.stderr or rm.stdout or "").strip(),
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.log.warning("process_reaper cell container rm failed: %s", exc)
+        if removed:
+            self.log.info("process_reaper cell containers removed=%s", removed)
+        return removed
 
     def _assert_ports(self) -> dict[int, str]:
         """Probe each bench port; report clear/occupied/error. Never fails.
@@ -312,8 +343,7 @@ class ProcessReaper:
         )
         pgid_killed: list[int] = []
         children_reaped: list[int] = []
-        compose_down: bool | None = None
-        compose_detail = ""
+        cell_containers_removed: list[str] = []
         try:
             pgid_killed = self._kill_process_group()
         except Exception as exc:  # noqa: BLE001
@@ -323,11 +353,9 @@ class ProcessReaper:
         except Exception as exc:  # noqa: BLE001
             self.log.error("process_reaper child reap failed: %s", exc)
         try:
-            compose_down, compose_detail = self._compose_down()
+            cell_containers_removed = self._remove_cell_containers()
         except Exception as exc:  # noqa: BLE001
-            compose_down = False
-            compose_detail = f"compose down raised: {exc}"
-            self.log.error("process_reaper compose down raised: %s", exc)
+            self.log.error("process_reaper cell container sweep raised: %s", exc)
         try:
             ports = self._assert_ports()
         except Exception as exc:  # noqa: BLE001
@@ -339,15 +367,14 @@ class ProcessReaper:
             run_label=self.run_label,
             pgid_killed=pgid_killed,
             children_reaped=children_reaped,
-            compose_down=compose_down,
-            compose_detail=compose_detail,
+            cell_containers_removed=cell_containers_removed,
             ports=ports,
             killed_count=len(killed),
             ok=True,
         )
         self.log.info(
-            "process_reaper report killed_count=%d ports=%s compose_down=%s",
-            report.killed_count, report.ports, report.compose_down,
+            "process_reaper report killed_count=%d ports=%s cell_containers_removed=%s",
+            report.killed_count, report.ports, report.cell_containers_removed,
         )
         return report
 
@@ -368,8 +395,6 @@ def run_reaper_unconditional(reaper: ProcessReaper) -> ReapReport:
         _LOG.error("run_reaper_unconditional reaper raised: %s", exc)
         return ReapReport(
             run_label=getattr(reaper, "run_label", "bench"),
-            compose_down=False,
-            compose_detail=f"reaper raised: {exc}",
             ports={p: "clear" for p in getattr(reaper, "bench_ports", [])},
             killed_count=0,
             ok=False,

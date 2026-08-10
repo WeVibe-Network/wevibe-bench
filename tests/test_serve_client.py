@@ -161,6 +161,24 @@ def test_extract_transcript_metrics_realistic():
     assert m["user_messages"] == 1
 
 
+def test_extract_transcript_metrics_ignores_empty_placeholder():
+    # One bare step-finish placeholder (no tokens/text/tool) + one real
+    # assistant message carrying a text part -> turns == 1.
+    transcript = [
+        {
+            "info": {"role": "assistant"},
+            "parts": [{"type": "step-finish", "reason": "stop"}],
+        },
+        {
+            "info": {"role": "assistant", "tokens": {"output": 0, "reasoning": 0}},
+            "parts": [{"type": "text", "text": "real answer"}],
+        },
+    ]
+    m = extract_transcript_metrics(transcript)
+    assert m["turns"] == 1
+    assert m["assistant_messages"] == 2
+
+
 def test_extract_transcript_metrics_empty():
     m = extract_transcript_metrics([])
     assert m == {
@@ -172,6 +190,10 @@ def test_extract_transcript_metrics_empty():
         "truncations": 0,
         "last_finish": None,
         "error_parts": 0,
+        "info_errors": 0,
+        "guard_aborted_turns": 0,
+        "finalize_timeouts": 0,
+        "error_texts": [],
         "assistant_messages": 0,
         "user_messages": 0,
     }
@@ -187,9 +209,11 @@ def test_extract_transcript_metrics_malformed():
 
 
 def test_extract_transcript_metrics_missing_keys():
+    # Bare step-finish placeholder: no tokens, no text/tool -> NOT a turn, but
+    # the missing keys must not raise and must default to safe zeros.
     msg = {"info": {"role": "assistant"}, "parts": [{"type": "step-finish"}]}
     m = extract_transcript_metrics([msg])
-    assert m["turns"] == 1
+    assert m["turns"] == 0
     assert m["input_tokens"] == 0
     assert m["output_tokens"] == 0
     assert m["last_finish"] == "unknown"  # reason None -> classified "unknown"
@@ -220,10 +244,319 @@ def test_classify_transport_anomaly_clean():
 
 
 # ---------------------------------------------------------------------------
+# WO-LOOPREC-1: error-text capture + loop-guard classification
+# ---------------------------------------------------------------------------
+def _loop_killed_transcript():
+    """The relay StreamLoopGuard kill as opencode 1.18.x actually persists it:
+    ``info.error`` on the assistant message (processor halt path), NOT an
+    "error" part (verified against pinned 1.18.1 source + a live 1.18.15
+    session DB — zero error parts, 2113 info.error rows)."""
+    return [
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "fix it"}]},
+        {
+            "info": {
+                "role": "assistant",
+                "tokens": {"input": 500, "output": 300, "reasoning": 50, "total": 850},
+                "finish": "error",
+                "cost": 0.0,
+                "error": {
+                    "name": "UnknownError",
+                    "data": {
+                        # Live-observed shape (2026-08-10 runs): the relay stamps
+                        # a per-request trace id in the parens — placeholder here.
+                        "message": "relay: generation loop detected (<request-id>)"
+                    },
+                },
+            },
+            "parts": [
+                {"type": "step-start", "id": "s1"},
+                {"type": "text", "text": "repeated repeated repeated"},
+            ],
+        },
+    ]
+
+
+def test_extract_transcript_metrics_captures_info_error_text():
+    m = extract_transcript_metrics(_loop_killed_transcript())
+    assert m["info_errors"] == 1
+    assert m["error_parts"] == 0
+    assert len(m["error_texts"]) == 1
+    assert "generation loop detected" in m["error_texts"][0]
+    # The killed message carries a text part -> it is a real turn, so the
+    # turn-aligned exclusion count records it (WO-TURNACCT-1).
+    assert m["guard_aborted_turns"] == 1
+    assert m["finalize_timeouts"] == 0
+    # The looped turn still meters (turn accounting unchanged).
+    assert m["turns"] == 1
+    assert m["output_tokens"] == 300
+
+
+def test_extract_transcript_metrics_error_texts_bounded():
+    long_msg = "x" * 500 + " relay_loop_detected"
+    msgs = [
+        {
+            "info": {
+                "role": "assistant",
+                "error": {"name": "UnknownError", "data": {"message": long_msg}},
+            },
+            "parts": [],
+        }
+        for _ in range(12)
+    ]
+    m = extract_transcript_metrics(msgs)
+    assert m["info_errors"] == 12  # count is exact
+    assert len(m["error_texts"]) == 8  # capture is capped
+    assert all(len(t) <= 240 for t in m["error_texts"])  # and truncated
+    # Turn-aligned: a killed message with no text/tool parts is not a real
+    # turn, so it must NOT enter the exclusion count (WO-TURNACCT-1) — the
+    # subtraction downstream keys on ``turns``, which never counted these.
+    assert m["guard_aborted_turns"] == 0
+
+
+def test_extract_transcript_metrics_guard_aborted_count_is_exact_and_turn_aligned():
+    # 12 guard-killed REAL turns (text part each): the exclusion count is
+    # exact even though the error_texts capture caps at 8.
+    msgs = [
+        {
+            "info": {
+                "role": "assistant",
+                "error": {
+                    "name": "UnknownError",
+                    "data": {"message": "relay: generation loop detected (<request-id>)"},
+                },
+            },
+            "parts": [{"type": "text", "text": "repeated"}],
+        }
+        for _ in range(12)
+    ]
+    m = extract_transcript_metrics(msgs)
+    assert m["guard_aborted_turns"] == 12
+    assert m["turns"] == 12
+    assert len(m["error_texts"]) == 8
+
+
+def test_extract_transcript_metrics_finalize_timeout_counted_separately():
+    m = extract_transcript_metrics(
+        [
+            {
+                "info": {
+                    "role": "assistant",
+                    "error": {
+                        "name": "UnknownError",
+                        "data": {
+                            "message": "relay: upstream completed but the stream "
+                            "did not finalize within 30000ms (<request-id>)"
+                        },
+                    },
+                },
+                "parts": [{"type": "text", "text": "partial work"}],
+            }
+        ]
+    )
+    assert m["finalize_timeouts"] == 1
+    assert m["guard_aborted_turns"] == 0
+
+
+def test_extract_transcript_metrics_error_part_text_still_captured():
+    m = extract_transcript_metrics(
+        [
+            {
+                "info": {"role": "assistant"},
+                "parts": [{"type": "error", "message": "relay_loop_detected n=40 limit=3"}],
+            }
+        ]
+    )
+    assert m["error_parts"] == 1
+    assert m["info_errors"] == 0
+    assert m["error_texts"] == ["relay_loop_detected n=40 limit=3"]
+
+
+def test_classify_transport_anomaly_loop_guard_from_info_error_text():
+    m = extract_transcript_metrics(_loop_killed_transcript())
+    assert classify_transport_anomaly(m) == ("guard_abort", "loop_guard")
+
+
+def test_classify_transport_anomaly_loop_guard_beats_truncation():
+    assert classify_transport_anomaly(
+        {
+            "truncations": 1,
+            "error_parts": 0,
+            "info_errors": 1,
+            "error_texts": ["relay_loop_detected n=40 limit=3"],
+        }
+    ) == ("guard_abort", "loop_guard")
+
+
+def test_classify_transport_anomaly_loop_guard_legacy_shape_still_matches():
+    # The older proxy build's literal signature (pinned stdout fixture shape)
+    # must keep classifying as the guard terminal alongside the live shape.
+    assert classify_transport_anomaly(
+        {
+            "truncations": 0,
+            "error_parts": 0,
+            "info_errors": 1,
+            "error_texts": ["relay_loop_detected n=40 limit=3"],
+        }
+    ) == ("guard_abort", "loop_guard")
+
+
+def test_classify_transport_anomaly_finalize_timeout_is_not_loop_guard():
+    # The relay's 30s stream-finalize watchdog (observed 2x in the 2026-08-10
+    # run's worker DB) is a transport death, NOT a repetition guard kill: it
+    # gets its own reason so recovery picks the resume nudge, never the
+    # anti-repetition nudge.
+    assert classify_transport_anomaly(
+        {
+            "truncations": 0,
+            "error_parts": 0,
+            "info_errors": 1,
+            "error_texts": [
+                "relay: upstream completed but the stream did not finalize "
+                "within 30000ms (<request-id>)"
+            ],
+        }
+    ) == ("transport_error", "stream_finalize_timeout")
+
+
+def test_classify_transport_anomaly_info_error_without_signature_is_transport():
+    assert classify_transport_anomaly(
+        {
+            "truncations": 0,
+            "error_parts": 0,
+            "info_errors": 1,
+            "error_texts": ["relay: stream incomplete (a03b34fe888a4c739dbb0fb2c122ec25)"],
+        }
+    ) == ("transport_error", "error_event")
+
+
+# ---------------------------------------------------------------------------
 # founder_attach_command
 # ---------------------------------------------------------------------------
 def test_founder_attach_command():
     assert founder_attach_command(4096) == "opencode attach http://127.0.0.1:4096"
+    assert founder_attach_command(4096, session_id="ses_abc") == (
+        "opencode attach http://127.0.0.1:4096 --session ses_abc"
+    )
+
+
+def test_last_assistant_text_returns_newest_assistant_text_only():
+    from wevibe_bench.serve_client import ServeClient
+
+    client = ServeClient(base_url="http://127.0.0.1:1", timeout=0.1, poll_interval=0.01)
+    messages = [
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "chunk one"}]},
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {"type": "text", "text": "scaffold written. "},
+                {"type": "tool", "text": "ignored"},
+                {"type": "text", "text": "CHUNK FINISHED"},
+            ],
+        },
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "chunk two"}]},
+    ]
+    client.get_messages = lambda session_id: messages  # type: ignore[method-assign]
+    assert client.last_assistant_text("ses_x") == "scaffold written. CHUNK FINISHED"
+
+    client.get_messages = lambda session_id: []  # type: ignore[method-assign]
+    assert client.last_assistant_text("ses_x") == ""
+
+
+def test_assistant_texts_since_scans_only_the_window():
+    client = ServeClient(base_url="http://127.0.0.1:1", timeout=0.1, poll_interval=0.01)
+    messages = [
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "chunk one"}]},
+        {
+            "info": {"role": "assistant"},
+            "parts": [{"type": "text", "text": "old chunk. CHUNK FINISHED"}],
+        },
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "chunk two"}]},
+        {
+            "info": {"role": "assistant"},
+            "parts": [{"type": "text", "text": "CHUNK FINISHED"}],
+        },
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {"type": "tool", "text": "ignored"},
+                {"type": "text", "text": "WEVIBE_DISCOVERY: something"},
+            ],
+        },
+    ]
+    client.get_messages = lambda session_id: messages  # type: ignore[method-assign]
+    # watermark=2: the prior chunk's marker (index 1) is excluded; both new
+    # assistant messages are returned in order (marker before the discovery
+    # block here — the loop's any() scan catches either order).
+    assert client.assistant_texts_since("ses_x", 2) == [
+        "CHUNK FINISHED",
+        "WEVIBE_DISCOVERY: something",
+    ]
+    assert client.assistant_texts_since("ses_x", len(messages)) == []
+
+
+def test_compaction_since_detects_compaction_part_in_window_only():
+    client = ServeClient(base_url="http://127.0.0.1:1", timeout=0.1, poll_interval=0.01)
+    messages = [
+        {"info": {"role": "user"}, "parts": [{"type": "compaction"}]},
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "chunk two"}]},
+    ]
+    client.get_messages = lambda session_id: messages  # type: ignore[method-assign]
+    assert client.compaction_since("ses_x", 0) is True
+    # watermark past the compaction parent: no evidence in-window.
+    assert client.compaction_since("ses_x", 1) is False
+
+
+def test_session_model_skips_compaction_parents():
+    client = ServeClient(base_url="http://127.0.0.1:1", timeout=0.1, poll_interval=0.01)
+    messages = [
+        {
+            "info": {
+                "role": "user",
+                "model": {"providerID": "local-llm-proxy", "modelID": "kimi/kimi-k3"},
+            },
+            "parts": [{"type": "text", "text": "chunk one"}],
+        },
+        {
+            "info": {"role": "user"},
+            "parts": [{"type": "compaction"}],
+        },
+    ]
+    client.get_messages = lambda session_id: messages  # type: ignore[method-assign]
+    assert client.session_model("ses_x") == ("local-llm-proxy", "kimi/kimi-k3")
+
+    client.get_messages = lambda session_id: [  # type: ignore[method-assign]
+        {"info": {"role": "user"}, "parts": [{"type": "compaction"}]}
+    ]
+    assert client.session_model("ses_x") is None
+
+
+def test_summarize_posts_required_body(monkeypatch):
+    import wevibe_bench.serve_client as sc
+
+    calls: list[tuple[str, str, object, float]] = []
+
+    def fake_status(method, url, body=None, timeout=5.0):
+        calls.append((method, url, body, timeout))
+        return 200
+
+    monkeypatch.setattr(sc, "_http_status", fake_status)
+    client = ServeClient(base_url="http://127.0.0.1:9", timeout=0.1, poll_interval=0.01)
+    client.summarize("ses_abc", provider_id="local-llm-proxy", model_id="kimi/kimi-k3")
+    assert calls == [
+        (
+            "POST",
+            "http://127.0.0.1:9/session/ses_abc/summarize",
+            {"providerID": "local-llm-proxy", "modelID": "kimi/kimi-k3", "auto": False},
+            1800.0,
+        )
+    ]
+
+    def raising_status(method, url, body=None, timeout=5.0):
+        raise ServeClientError("boom")
+
+    monkeypatch.setattr(sc, "_http_status", raising_status)
+    with pytest.raises(ServeClientError):
+        client.summarize("ses_abc", provider_id="p", model_id="m")
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +696,8 @@ def test_metrics_composition(monkeypatch):
     ]
     _fake_json(monkeypatch, [transcript])
     m = ServeClient("http://127.0.0.1:4096").metrics("ses_1")
-    assert m["turns"] == 1
+    # Bare step-finish with no tokens/text/tool is a placeholder -> 0 turns.
+    assert m["turns"] == 0
     assert m["last_finish"] == "stop"
 
 
