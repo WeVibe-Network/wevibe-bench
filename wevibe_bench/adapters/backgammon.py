@@ -778,16 +778,17 @@ def _hold_for_ui_review(
         print(f"HOLD-UI RELEASED run_label={run_label} — teardown proceeding\n", flush=True)
 
 
-# Worker-facing AGENTS.md, written into every cell worktree at seed time. This
-# is the ONLY .md that reaches the isolated docker worker (opencode auto-loads
-# /work/AGENTS.md as project instructions); the repo-level AGENTS.md never
-# enters the container. It carries two rules: (1) WO-ANTICHEAT-1 — the explicit
-# anti-cheat rule (rule only, no verdict threat: Walter 2026-08-10 — a cheat
-# ATTEMPT is ignored, the operator monitors the live session, and PASS/FAIL is
-# never gated on this text); (2) the chunked-write rule, which exists because
-# the model writes code in very large single generations, and one oversized
-# stream can be killed mid-flight by the transport — losing the whole write
-# (2026-08-09).
+# Worker-facing AGENTS.md, written into every cell worktree at seed time. The
+# only .md files that reach the isolated docker worker are this one (opencode
+# auto-loads /work/AGENTS.md as project instructions) and CONTRACT.md (seeded
+# from the scaffold, WO-FEEDBACK-CONTRACT 2026-08-10); the repo-level AGENTS.md
+# never enters the container. This file carries two rules: (1) WO-ANTICHEAT-1 —
+# the explicit anti-cheat rule (rule only, no verdict threat: Walter 2026-08-10 —
+# a cheat ATTEMPT is ignored, the operator monitors the live session, and
+# PASS/FAIL is never gated on this text); (2) the chunked-write rule, which
+# exists because the model writes code in very large single generations, and
+# one oversized stream can be killed mid-flight by the transport — losing the
+# whole write (2026-08-09).
 _WORKER_AGENTS_MD = """\
 # Worker instructions
 
@@ -800,6 +801,8 @@ _WORKER_AGENTS_MD = """\
 - Build only from the task prompts and the public requirements in this
   worktree. A failing check points at a public requirement — never at a
   hidden value you should go looking for.
+- CONTRACT.md in this worktree is the complete published requirements list.
+  Every REQ-ID in a FAILING feedback line names the exact clause in it.
 
 ## Chunk large writes — always
 - Never write a large file in a single tool call. A single-shot massive write
@@ -844,6 +847,7 @@ def build_worker_opencode_config(
             "edit": {"*": "allow", "*opencode.json": "deny"},
             "doom_loop": "deny",
             "question": "deny",
+            "task": "deny",
         },
     }
     provider_id, _, model_id = model.partition("/")
@@ -1569,6 +1573,19 @@ class BackgammonRunner(AgentRunner):
                     termination_reason = "transport_incomplete"
                     break
 
+                boundary_compaction = self._compact_attempt_boundary(
+                    serve_client=self._serve_client,
+                    session_id=session_id,
+                    run_label=run_label,
+                    attempt=attempt,
+                )
+                if attempt_reports:
+                    attempt_reports[-1]["boundary_compaction"] = boundary_compaction
+                self._progress(
+                    f"PROGRESS run_label={run_label} step=attempt-compaction "
+                    f"attempt={attempt} outcome={boundary_compaction}"
+                )
+
                 feedback_inner = [
                     "opencode",
                     "run",
@@ -2194,7 +2211,7 @@ class BackgammonRunner(AgentRunner):
         (worktree / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         self._progress(
             "PROGRESS step=worker-permission-config external_directory=deny "
-            "oracle_bash_deny=active skip_permissions_removed=true"
+            "oracle_bash_deny=active task_deny=active skip_permissions_removed=true"
         )
 
     def _build_cell_config(self, *, worktree: Path, container_name: str) -> DockerCellConfig:
@@ -3075,18 +3092,42 @@ class BackgammonRunner(AgentRunner):
             )
             return "timeout"
 
+        return self._fire_backstop_summarize(
+            serve_client=serve_client,
+            session_id=session_id,
+            watermark=watermark,
+            run_label=run_label,
+            step="chunk-compaction",
+            label=f"chunk={chunk}",
+            timeout_s=max(60.0, deadline_total - time.monotonic()),
+        )
+
+    def _fire_backstop_summarize(
+        self,
+        *,
+        serve_client: ServeClient,
+        session_id: str,
+        watermark: int,
+        run_label: str,
+        step: str,
+        label: str,
+        timeout_s: float,
+    ) -> str:
+        """Fail-open backstop summarize shared by the inter-chunk watch and the
+        attempt-boundary compaction: resolve the session model, POST
+        summarize(auto=False), then confirm a compaction part landed."""
         model = serve_client.session_model(session_id)
         if model is None:
             self._progress(
-                f"PROGRESS run_label={run_label} step=chunk-compaction "
-                f"chunk={chunk} session_id={session_id} action=backstop-skipped "
+                f"PROGRESS run_label={run_label} step={step} "
+                f"{label} session_id={session_id} action=backstop-skipped "
                 f"reason=no-model"
             )
             return "skipped_no_model"
         provider_id, model_id = model
         self._progress(
-            f"PROGRESS run_label={run_label} step=chunk-compaction "
-            f"chunk={chunk} session_id={session_id} action=backstop "
+            f"PROGRESS run_label={run_label} step={step} "
+            f"{label} session_id={session_id} action=backstop "
             f"provider={provider_id} model={model_id}"
         )
         try:
@@ -3095,12 +3136,12 @@ class BackgammonRunner(AgentRunner):
                 provider_id=provider_id,
                 model_id=model_id,
                 auto=False,
-                timeout_s=max(60.0, deadline_total - time.monotonic()),
+                timeout_s=timeout_s,
             )
         except Exception as exc:
             self._progress(
-                f"PROGRESS run_label={run_label} step=chunk-compaction "
-                f"chunk={chunk} session_id={session_id} backstop_error={exc!r}"
+                f"PROGRESS run_label={run_label} step={step} "
+                f"{label} session_id={session_id} backstop_error={exc!r}"
             )
             return "backstop_error"
         if serve_client.compaction_since(session_id, watermark):
@@ -3112,6 +3153,52 @@ class BackgammonRunner(AgentRunner):
                 return "backstop"
             time.sleep(min(serve_client.poll_interval, 5.0))
         return "backstop_unconfirmed"
+
+    def _compact_attempt_boundary(
+        self,
+        *,
+        serve_client: ServeClient | None,
+        session_id: str | None,
+        run_label: str,
+        attempt: int,
+    ) -> str:
+        """Attempt-boundary compaction, FAIL-OPEN (same posture as the
+        inter-chunk watch: a compaction failure must never kill a cell).
+
+        The inter-chunk machinery compacts only between chunks 1-5 of the
+        first pass; chunk 6 and every failure-phase repair turn otherwise ride
+        one uncompacted tail for the rest of the cell. The failure-phase
+        prompts never instruct self_compact, so there is nothing to watch for
+        — fire the backstop summarize directly so the next feedback run starts
+        on a compacted transcript.
+        """
+        if (os.environ.get("WEVIBE_BENCH_CHUNK_COMPACT") or "1").strip() == "0":
+            return "disabled"
+        if serve_client is None or not session_id:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=attempt-compaction "
+                f"attempt={attempt} session_id={session_id or 'none'} "
+                "action=skipped reason=no-serve-session"
+            )
+            return "skipped_no_serve"
+        try:
+            watermark = len(serve_client.get_messages(session_id))
+        except Exception as exc:  # probe failure must not wedge the loop
+            self._progress(
+                f"PROGRESS run_label={run_label} step=attempt-compaction "
+                f"attempt={attempt} session_id={session_id} watermark_error={exc!r}"
+            )
+            return "watermark_error"
+        total_s = float(os.environ.get("WEVIBE_BENCH_COMPACT_TOTAL_S") or "1800")
+        return self._fire_backstop_summarize(
+            serve_client=serve_client,
+            session_id=session_id,
+            watermark=watermark,
+            run_label=run_label,
+            step="attempt-compaction",
+            label=f"attempt={attempt}",
+            timeout_s=max(60.0, total_s),
+        )
 
     def _run_opencode(
         self,

@@ -139,7 +139,7 @@ export async function runPreGate(): Promise<Problem[]> {
       server = await startServer({ debug: true });
     } catch (error) {
       add(
-        "REQ-BIND/boot",
+        "REQ-BIND/boot — server boots and listens on :8002 with /health ok",
         "server listening on :8002 with /health ok",
         bootObserved(error),
       );
@@ -149,22 +149,22 @@ export async function runPreGate(): Promise<Problem[]> {
     try {
       const response = await health();
       if (response.status !== 200) {
-        add("REQ-API/health.status", "200", String(response.status));
+        add("REQ-API/health.status — GET /health returns 200", "200", String(response.status));
       }
 
       let body: unknown;
       try {
         body = await response.json();
       } catch (error) {
-        add("REQ-API/health.body", '{"status":"ok",...}', errorLine(error));
+        add("REQ-API/health.body — /health responds with JSON {\"status\":\"ok\",...}", '{"status":"ok",...}', errorLine(error));
         body = undefined;
       }
 
       if (!isRecord(body) || body.status !== "ok") {
-        add("REQ-API/health.body.status", '{"status":"ok",...}', asObserved(body));
+        add("REQ-API/health.body.status — /health body carries \"status\":\"ok\"", '{"status":"ok",...}', asObserved(body));
       }
     } catch (error) {
-      add("REQ-BIND/health", "GET /health succeeds", errorLine(error));
+      add("REQ-BIND/health — GET /health succeeds", "GET /health succeeds", errorLine(error));
     }
 
     try {
@@ -178,13 +178,13 @@ export async function runPreGate(): Promise<Problem[]> {
 
       for (const key of REQUIRED_STATE_KEYS) {
         if (!isRecord(echoed) || !Object.prototype.hasOwnProperty.call(echoed, key)) {
-          add(`REQ-STATE/state.${key}`, "present", "missing");
+          add(`REQ-STATE/state.${key} — /api/state response carries the "${key}" field`, "present", "missing");
         }
       }
 
       const offWhite = (echoed as any)?.off?.white;
       if (offWhite !== 7) {
-        add("REQ-STATE/state.off.white", "7", String(offWhite));
+        add("REQ-STATE/state.off.white — seeded off counts survive the state echo", "7", String(offWhite));
       }
 
       const pip = (echoed as any)?.pip;
@@ -192,21 +192,21 @@ export async function runPreGate(): Promise<Problem[]> {
         isRecord(pip) && typeof pip.white === "number" && typeof pip.black === "number";
       if (!pipOk) {
         add(
-          "REQ-STATE/state.pip",
+          "REQ-STATE/state.pip — state carries pip as an object with numeric white and black",
           "object with numeric white and black",
           asObserved(pip),
         );
       }
 
       if (!Array.isArray((echoed as any)?.legalMoves)) {
-        add("REQ-STATE/state.legalMoves", "array", asObserved((echoed as any)?.legalMoves));
+        add("REQ-STATE/state.legalMoves — state carries legalMoves as an array", "array", asObserved((echoed as any)?.legalMoves));
       }
 
       if (typeof (echoed as any)?.canDouble !== "boolean") {
-        add("REQ-STATE/state.canDouble", "boolean", asObserved((echoed as any)?.canDouble));
+        add("REQ-STATE/state.canDouble — state carries canDouble as a boolean", "boolean", asObserved((echoed as any)?.canDouble));
       }
     } catch (error) {
-      add("REQ-DEBUG/debug.setState", "debug state can be set and echoed", errorLine(error));
+      add("REQ-DEBUG/debug.setState — debug.setState seeds a board and /api/state echoes it", "debug state can be set and echoed", errorLine(error));
     }
 
     try {
@@ -215,10 +215,10 @@ export async function runPreGate(): Promise<Problem[]> {
       const dice = sortedDice((rolled as any)?.dice);
       const honored = dice !== null && dice.length === 2 && dice[0] === 1 && dice[1] === 6;
       if (!honored) {
-        add("REQ-DEBUG/debug.roll", "dice [1,6] after /api/roll", asObserved((rolled as any)?.dice));
+        add("REQ-DEBUG/debug.roll — the debug roll queue is honored by /api/roll", "dice [1,6] after /api/roll", asObserved((rolled as any)?.dice));
       }
     } catch (error) {
-      add("REQ-DEBUG/debug.roll", "debug roll queue is honored", errorLine(error));
+      add("REQ-DEBUG/debug.roll — the debug roll queue is honored by /api/roll", "debug roll queue is honored", errorLine(error));
     }
 
     try {
@@ -233,7 +233,7 @@ export async function runPreGate(): Promise<Problem[]> {
           .locator(`[data-testid="${testId}"]`)
           .count();
         if (count < 1) {
-          add(`REQ-TESTID/testid.${testId}`, "present", "missing");
+          add(`REQ-TESTID/testid.${testId} — page exposes data-testid "${testId}"`, "present", "missing");
         }
       }
 
@@ -260,27 +260,27 @@ export async function runPreGate(): Promise<Problem[]> {
 
       const pointCount = await page.locator('[data-testid="point"]').count();
       if (pointCount !== 24) {
-        add("REQ-TESTID/point", "24", String(pointCount));
+        add("REQ-TESTID/point — board renders 24 data-testid \"point\" elements", "24", String(pointCount));
       }
 
       const checkerCount = await page.locator('[data-testid="checker"]').count();
       if (checkerCount !== 30) {
-        add("REQ-TESTID/checker", "30", String(checkerCount));
+        add("REQ-TESTID/checker — board renders 30 data-testid \"checker\" elements (15 per side)", "30", String(checkerCount));
       }
 
       const barCount = await page.locator('[data-testid="bar"]').count();
       if (barCount < 1) {
-        add("REQ-TESTID/bar", ">=1", String(barCount));
+        add("REQ-TESTID/bar — a data-testid \"bar\" element is present", ">=1", String(barCount));
       }
 
       const offTrayCount = await page.locator('[data-testid="off-tray"]').count();
       if (offTrayCount < 1) {
-        add("REQ-TESTID/off-tray", ">=1", String(offTrayCount));
+        add("REQ-TESTID/off-tray — a data-testid \"off-tray\" element is present", ">=1", String(offTrayCount));
       }
 
       const dieCount = await page.locator('[data-testid="die"]').count();
       if (dieCount < 2) {
-        add("REQ-TESTID/die", ">=2", String(dieCount));
+        add("REQ-TESTID/die — at least two data-testid \"die\" elements are present", ">=2", String(dieCount));
       }
 
       let hintCount = await page.locator('[data-testid="hint"]').count();
@@ -325,7 +325,7 @@ export async function runPreGate(): Promise<Problem[]> {
 
       if (hintCount < 1) {
         add(
-          "REQ-HINT/hint",
+          "REQ-HINT/hint — selecting a movable checker shows one hint per playable die",
           "hints appear after selecting a movable checker",
           "none",
         );
@@ -333,10 +333,10 @@ export async function runPreGate(): Promise<Problem[]> {
 
       await page.close();
     } catch (error) {
-      add("REQ-TESTID/dom", "DOM testids and hint flow are present", errorLine(error));
+      add("REQ-TESTID/dom — page DOM exposes the required testids and hint flow", "DOM testids and hint flow are present", errorLine(error));
     }
   } catch (error) {
-    add("REQ-TESTID/pregate", "pre-gate completes", errorLine(error));
+    add("REQ-TESTID/pregate — conformance pre-gate completes without errors", "pre-gate completes", errorLine(error));
   } finally {
     if (browser) {
       try {

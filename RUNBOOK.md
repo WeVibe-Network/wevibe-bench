@@ -274,6 +274,11 @@ the one serve session. Per chunk: drive → marker scan → compaction → next 
   fail-open backstop summarize (`auto:false`) when the worker never armed. Compaction is an
   optimization, never a gate; `WEVIBE_BENCH_CHUNK_COMPACT=0` disables it. No compaction after
   chunk 6 — no chunk follows.
+  This `self_compact` lives ONLY in the benchmark worker's own OpenCode instance (in-image config
+  `/etc/xdg/opencode/opencode.json` + the vendored plugin above) — NOT the daily-driver
+  `~/.config/opencode` stack (workspace `AGENTS.md` §0.1). "Compact after every chunk / at end of
+  turn" is bench-harness pacing and must never be ported into daily-driver agents; the two instances
+  share nothing but the binary name.
 - **Relay-killed turns are recovered, never scored.** A relay loop-guard kill (`guard_abort`) or
   stream-finalize-watchdog kill is metered (tokens burned; guard kills excluded from scoring
   turns), then re-driven with a bounded nudge (`WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET`, default 2;
@@ -340,7 +345,10 @@ the injection observability values; extraction-attempt observability; and the te
 its reason.
 
 **RC-5a · Task-template freeze (scaffold hash).** The frozen task-template hash for the benchmark
-campaign is `a68ff9cba9470fa0ccf5fdee4604425a2ef38631c97a97498369ac2b6159d4d4`, computed as SHA-256
+campaign is `08afc8011cde5b81e6e158def2bc040f42372bbc1e32e7ca125382c27031cdb1` (re-baselined
+2026-08-10, WO-FEEDBACK-CONTRACT: CONTRACT.md moved into the scaffold so the published requirements
+seed every worker worktree; supersedes `a68ff9cb…`, whose cells are walked back by the declared
+re-baseline), computed as SHA-256
 over the live `tasks/backgammon/scaffold/` directory (sorted relative path + raw bytes per file) —
 the exact bytes the harness hashes at runtime (`compute_task_template_hash` / `_compute_task_template_hash`,
 scripts/run_cumulative.py). Any change to the scaffold invalidates this hash and therefore every
@@ -643,6 +651,36 @@ config while keeping test-mode auto-approve. That is the clean way; changing the
   only, and only on ON cells.
 - Egress is **not** domain-allowlisted — the worker retains general outbound network access. This is
   a known, accepted residual, not an oversight to rediscover.
+
+### Known failure signature — run_m1 leader-membership race
+
+**Symptom.** A fresh post-wipe first OFF cell fails `run_m1` bootstrap in ~8s with a hub HTTP 403 at
+`seed_keywords`: `{"error":"not a member of this org"}`, arriving ~3ms after `create_org`.
+
+**True root cause (not an identity problem).** A leader-membership sequencing gap in `run_m1`:
+`seed_keywords` fired immediately after `create_org`, with no confirmation that the leader's
+`members.active=true` row existed. The seeded route `POST /v1/orgs/{org}/keywords` is gated by
+`RequireVerifiedMembership` (wevibe-server/wevibe-hub/internal/auth/middleware.go:38, 403 at line 62,
+`members.active=true` existence check at lines 55-62). The only membership poll ran for the
+*contributor*, after seeding; the pre-fix code had `create_org`→`seed_keywords` with no poll between
+them.
+
+**Explicit correction — do NOT re-investigate an identity mismatch.** The initial hypothesis blamed a
+keystore-derived clone identity differing from the seed-derived leader after a wipe. Disproven: the
+clone identity is ENV-derived — `WEVIBE_IDENTITY_SEED_HEX` is injected on both launch paths
+(mcp_process.py:193 harness MCP spawn; preflight.py:54 clone start), both sourced from the same
+`WEVIBE_BENCH_LEADER_SEED_HEX`, and the clone's keystore is only a fallback when the env var is
+absent (scaffold/wevibe-mcp-clone/src/key-store.ts env-first). A wipe regenerating the keystore
+does NOT change the clone identity (seed fp `f534aa02`). Do not re-open this.
+
+**Fix (resolved, not an open defect).** Commit `e2b4562` added `poll_leader_membership` between
+`create_org` and `seed_keywords` in `run_m1` (orchestrator.py:622-628), raising a loud
+`RuntimeError("leader membership did not include org_id=...")` before seeding when the leader's
+membership is unconfirmed, plus two regression tests. A silent 403 is now an early, diagnosable
+failure.
+
+**Value.** The next benchmark start recognizes this signature by name and proceeds to the known fix
+instead of re-deriving it.
 
 ---
 

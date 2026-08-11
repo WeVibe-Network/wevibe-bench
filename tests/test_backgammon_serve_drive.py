@@ -1057,6 +1057,66 @@ def test_chunked_pass_compaction_disabled_via_env(
     assert all(r["compaction"] is None for r in stats.chunk_reports)
 
 
+def test_attempt_boundary_compaction_fires_backstop(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+
+    outcome = runner._compact_attempt_boundary(
+        serve_client=client,
+        session_id="ses_boundary",
+        run_label="cell-boundary",
+        attempt=1,
+    )
+
+    assert outcome == "backstop"
+    assert client.summarize_calls == [
+        ("ses_boundary", "local-llm-proxy", "kimi/kimi-k3", False)
+    ]
+
+
+def test_attempt_boundary_compaction_disabled_via_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WEVIBE_BENCH_CHUNK_COMPACT", "0")
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+
+    outcome = runner._compact_attempt_boundary(
+        serve_client=client,
+        session_id="ses_boundary",
+        run_label="cell-boundary",
+        attempt=1,
+    )
+
+    assert outcome == "disabled"
+    assert client.summarize_calls == []
+
+
+def test_attempt_boundary_compaction_skips_without_serve(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+
+    assert (
+        runner._compact_attempt_boundary(
+            serve_client=None,
+            session_id="ses_boundary",
+            run_label="cell-boundary",
+            attempt=1,
+        )
+        == "skipped_no_serve"
+    )
+    assert (
+        runner._compact_attempt_boundary(
+            serve_client=client,
+            session_id=None,
+            run_label="cell-boundary",
+            attempt=1,
+        )
+        == "skipped_no_serve"
+    )
+    assert client.summarize_calls == []
+
+
 def test_chunked_pass_nudge_recovers_and_advances(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()

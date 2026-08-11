@@ -92,7 +92,9 @@ DEFAULT_ON_BUDGET = 0
 # the scaffold invalidates the hash and therefore every previously scored cell
 # that ran against the old bytes — the run path fails closed until the freeze is
 # re-baselined deliberately.
-FROZEN_TASK_TEMPLATE_HASH = "a68ff9cba9470fa0ccf5fdee4604425a2ef38631c97a97498369ac2b6159d4d4"
+# Re-baselined 2026-08-10 (Walter, WO-FEEDBACK-CONTRACT): CONTRACT.md moved into
+# the scaffold so the published requirements seed every worker worktree.
+FROZEN_TASK_TEMPLATE_HASH = "08afc8011cde5b81e6e158def2bc040f42372bbc1e32e7ca125382c27031cdb1"
 
 
 def compute_task_template_hash(scaffold: Path) -> str | None:
