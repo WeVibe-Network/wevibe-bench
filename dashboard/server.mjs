@@ -3,7 +3,6 @@
 // WEVIBE BENCH DASHBOARD — SERVER
 //
 //   node server.mjs                 # http://127.0.0.1:7717
-//   node server.mjs --mock          # run against the mock generator
 //   node server.mjs --port 8080 --runs ../runs
 //
 // ZERO DEPENDENCIES. Node stdlib only. No build step, no npm install.
@@ -33,11 +32,24 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // ── args ─────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { mock: false, port: 7717, host: "127.0.0.1", runs: null, config: null };
+  // HOST DEFAULT, and why it is env-derived:
+  // On the host, binding 127.0.0.1 is the safe default — the board is not
+  // exposed to the network unless someone decides it should be.
+  // INSIDE A CONTAINER that default is wrong in a way that looks like a bug:
+  // a process bound to the container's loopback is unreachable from a
+  // published port, so `-p 7717:7717` would silently serve nothing. The
+  // container image sets WEVIBE_DASH_HOST=0.0.0.0 explicitly, which is safe
+  // there precisely because the container's network namespace IS the boundary
+  // and publishing is still opt-in at `docker run`.
+  const out = {
+    port: 7717,
+    host: process.env.WEVIBE_DASH_HOST ?? "127.0.0.1",
+    runs: null,
+    config: null,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === "--mock") out.mock = true;
-    else if (a === "--port") out.port = Number(argv[++i]);
+    if (a === "--port") { out.port = Number(argv[++i]); out.portExplicit = true; }
     else if (a === "--host") out.host = String(argv[++i]);
     else if (a === "--runs") out.runs = String(argv[++i]);
     else if (a === "--config") out.config = String(argv[++i]);
@@ -54,7 +66,6 @@ wevibe bench dashboard
 
   node server.mjs [options]
 
-  --mock            serve generated mock data instead of live artifacts
   --port <n>        default 7717
   --host <addr>     default 127.0.0.1 (pass 0.0.0.0 to expose deliberately)
   --runs <dir>      runs root (default: ../runs relative to this file)
@@ -78,15 +89,48 @@ const DEFAULT_CONFIG = {
     "funnel-cells": true,
     "plugin-log": true,
     "opencode-serve": true,
-    "hub-db": false, // shells out to docker — opt in explicitly
+    "hub-db": false, // needs a reachable postgres — opt in explicitly
   },
   hubDb: {
     enabled: false,
-    container: "wevibe-postgres",
+    host: "wevibe-postgres",
+    port: 5432,
     user: "wevibe",
     database: "wevibe_hub",
   },
 };
+
+/**
+ * Env overrides. These exist so the CONTAINER can be reconfigured without a
+ * rebuild and without baking a config file into the image — `docker run -e …`
+ * or a compose `environment:` block is the whole interface.
+ *
+ * Precedence: env > config file > defaults.
+ */
+function applyEnv(cfg) {
+  const env = process.env;
+  if (env.WEVIBE_DASH_BENCH_ROOT) cfg.benchRoot = env.WEVIBE_DASH_BENCH_ROOT;
+  if (env.WEVIBE_DASH_RUNS_ROOT) cfg.runsRoot = env.WEVIBE_DASH_RUNS_ROOT;
+  if (env.WEVIBE_DASH_PORT) cfg.port = Number(env.WEVIBE_DASH_PORT);
+  if (env.WEVIBE_DASH_POLL_MS) cfg.pollMs = Number(env.WEVIBE_DASH_POLL_MS);
+  if (env.WEVIBE_DASH_OPENCODE_URL) cfg.opencodeServeUrl = env.WEVIBE_DASH_OPENCODE_URL;
+
+  // Per-source toggles: WEVIBE_DASH_SOURCE_HUB_DB=1, ..._OPENCODE_SERVE=0, etc.
+  for (const name of Object.keys(cfg.sources)) {
+    const key = `WEVIBE_DASH_SOURCE_${name.replace(/-/g, "_").toUpperCase()}`;
+    if (env[key] !== undefined) cfg.sources[name] = /^(1|true|on|yes)$/i.test(env[key]);
+  }
+
+  if (env.WEVIBE_DASH_HUBDB === "1") cfg.hubDb.enabled = true;
+  if (env.WEVIBE_HUB_DB_HOST) cfg.hubDb.host = env.WEVIBE_HUB_DB_HOST;
+  if (env.WEVIBE_HUB_DB_PORT) cfg.hubDb.port = Number(env.WEVIBE_HUB_DB_PORT);
+  if (env.WEVIBE_HUB_DB_USER) cfg.hubDb.user = env.WEVIBE_HUB_DB_USER;
+  if (env.WEVIBE_HUB_DB_NAME) cfg.hubDb.database = env.WEVIBE_HUB_DB_NAME;
+  // Password is read from the environment at query time and is never stored in
+  // config, never logged, and never returned by /api/health.
+  if (cfg.hubDb.enabled) cfg.sources["hub-db"] = true;
+  return cfg;
+}
 
 async function loadConfig() {
   const path = args.config ? resolve(args.config) : join(HERE, "dashboard.config.json");
@@ -96,12 +140,12 @@ async function loadConfig() {
   } catch {
     // absent config is the normal out-of-the-box case
   }
-  const cfg = {
+  const cfg = applyEnv({
     ...DEFAULT_CONFIG,
     ...user,
     sources: { ...DEFAULT_CONFIG.sources, ...(user.sources ?? {}) },
     hubDb: { ...DEFAULT_CONFIG.hubDb, ...(user.hubDb ?? {}) },
-  };
+  });
   cfg.benchRoot = resolve(cfg.benchRoot);
   cfg.runsRoot = resolve(args.runs ?? cfg.runsRoot ?? join(cfg.benchRoot, "runs"));
   return cfg;
@@ -203,10 +247,6 @@ let cachedAt = 0;
 let inFlight = null;
 
 async function getBoard(cfg, mods, broken) {
-  if (args.mock) {
-    const { mockBoard } = await import("./mock.mjs");
-    return mockBoard();
-  }
   const age = Date.now() - cachedAt;
   if (cached && age < cfg.pollMs) return cached;
   if (inFlight) return inFlight; // share one refresh across concurrent clients
@@ -279,7 +319,6 @@ const main = async () => {
       res.end(
         JSON.stringify({
           ok: true,
-          mock: args.mock,
           benchRoot: cfg.benchRoot,
           runsRoot: cfg.runsRoot,
           sources: mods.map((m) => m.id),
@@ -304,14 +343,17 @@ const main = async () => {
     res.writeHead(404, { "content-type": "text/plain" }).end("not found");
   });
 
-  server.listen(cfg.port ?? args.port, args.host, () => {
+  // Precedence: explicit CLI flag > env/config > default. An earlier revision
+  // had `cfg.port ?? args.port`, which let an env var silently win over a flag
+  // the operator typed — the opposite of what a flag means.
+  const port = args.portExplicit ? args.port : (cfg.port ?? args.port);
+  server.listen(port, args.host, () => {
     const port = server.address().port;
     console.log(`wevibe bench dashboard → http://${args.host}:${port}`);
     console.log(`  bench root : ${cfg.benchRoot}`);
     console.log(`  runs root  : ${cfg.runsRoot}`);
     console.log(`  sources    : ${mods.map((m) => m.id).join(", ") || "(none)"}`);
     if (broken.length) console.log(`  unwired    : ${broken.map((b) => b.id).join(", ")}`);
-    if (args.mock) console.log("  MODE       : MOCK DATA");
   });
 };
 

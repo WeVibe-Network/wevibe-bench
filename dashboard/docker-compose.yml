@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WeVibe Bench Dashboard
+#
+#   cd wevibe-bench/dashboard && docker compose up -d
+#   open http://localhost:7717
+#
+# In Docker Desktop the container appears as `wevibe-bench-dashboard` with 7717
+# as a clickable link, and the health dot goes green once the board assembles.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  wevibe-bench-dashboard:
+    build: .
+    image: wevibe-bench-dashboard:v1
+    container_name: wevibe-bench-dashboard
+    restart: unless-stopped
+
+    ports:
+      # Host-only by default, matching the rest of the WeVibe stack. Set
+      # WEVIBE_BIND_HOST=0.0.0.0 to expose it on the LAN — a deliberate act.
+      - "${WEVIBE_BIND_HOST:-127.0.0.1}:7717:7717"
+
+    volumes:
+      # The bench repo, READ-ONLY. `:ro` is not decoration — the dashboard has
+      # no reason to write, and the run artifacts under runs/ are the
+      # authoritative record of a measurement (RC-5). A read-only mount makes
+      # "the dashboard corrupted a run" structurally impossible rather than
+      # merely unlikely.
+      - ..:/bench:ro
+
+    environment:
+      WEVIBE_DASH_BENCH_ROOT: /bench
+      WEVIBE_DASH_POLL_MS: "2000"
+
+      # The live agent session API runs on the HOST, not in this container.
+      # host.docker.internal is the documented Docker Desktop path to it.
+      # If unreachable, the source reports `unwired` and the board simply
+      # loses liveness — it does not fail.
+      WEVIBE_DASH_OPENCODE_URL: "http://host.docker.internal:4096"
+
+      # ── OPT-IN: hub recall tables ───────────────────────────────────────
+      # Off by default. The board must come up on a machine with no database
+      # and no WeVibe stack. Enable by uncommenting these AND the network
+      # block below, then `docker compose up -d`.
+      # WEVIBE_DASH_HUBDB: "1"
+      # WEVIBE_HUB_DB_HOST: wevibe-postgres
+      # WEVIBE_HUB_DB_PORT: "5432"
+      # WEVIBE_HUB_DB_USER: wevibe
+      # WEVIBE_HUB_DB_NAME: wevibe_hub
+      # WEVIBE_HUB_DB_PASSWORD: wevibe_dev
+
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux too, where it is not
+      # automatic as it is on Docker Desktop.
+      - "host.docker.internal:host-gateway"
+
+    # ── OPT-IN: join the hub's network to reach wevibe-postgres by name ────
+    # networks:
+    #   - wevibe-server_default
+
+# networks:
+#   wevibe-server_default:
+#     external: true

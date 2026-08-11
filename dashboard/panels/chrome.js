@@ -36,7 +36,6 @@ export function renderTopbar(board, { stale, lastError }) {
     <span class="ident">${r.model ? esc(r.model) : nul("model unobserved")}</span>
     <span class="spacer"></span>
     ${feed}
-    ${board.mock ? '<span class="attest" style="color:var(--arm-b)">MOCK DATA</span>' : ""}
     <span class="attest">${esc(p.attestation ?? "bench-mock/self-declared")}</span>
     ${state}
   </div>`;

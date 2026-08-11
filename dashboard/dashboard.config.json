@@ -13,7 +13,8 @@
   },
   "hubDb": {
     "enabled": false,
-    "container": "wevibe-postgres",
+    "host": "wevibe-postgres",
+    "port": 5432,
     "user": "wevibe",
     "database": "wevibe_hub"
   }

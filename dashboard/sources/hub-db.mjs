@@ -1,9 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SOURCE: hub-db  [OPT-IN — DISABLED BY DEFAULT]
 //
-// Reads the hub's recall observability tables through the postgres container.
-// This is the ONLY source that can populate the recall-moment candidate list
-// with real relevance and standing values.
+// Reads the hub's recall observability tables. This is the ONLY source that can
+// populate the recall-moment candidate list with real relevance and standing.
 //
 // Tables used (wevibe-server/db/schema.sql):
 //   query_log              — one row per recall query: candidate_count,
@@ -15,9 +14,15 @@
 //   outcome_events         — resolution tri-state: worked/didnt_work/unobserved
 //   memory_standing        — DERIVED projection, never authoritative
 //
-// DISABLED BY DEFAULT because it shells out to `docker exec`. A user running
-// this dashboard out of the box must not need docker, a database, or any part
-// of the WeVibe stack. Enable in dashboard.config.json.
+// ── CONNECTS OVER TCP, NEVER `docker exec` ───────────────────────────────────
+// An earlier revision shelled out to `docker exec wevibe-postgres psql`. That
+// cannot work from inside a container without mounting the docker socket —
+// which would hand this read-only dashboard root-equivalent control of the
+// host's docker daemon. A TCP connection to postgres is both containerisable
+// and dramatically less privileged, so the socket is never mounted.
+//
+// DISABLED BY DEFAULT because a user running this out of the box must not need
+// a database, or any part of the WeVibe stack, for the board to come up.
 //
 // PRIVACY BOUNDARY — enforced here, not by convention:
 //   - query_log.query_text is v1-always-NULL by design and is NEVER selected.
@@ -25,6 +30,10 @@
 //     scores and dispositions cross into the board.
 //   - CIDs are truncated for display upstream in the UI.
 // Everything rendered is public forever; this module is written to that rule.
+//
+// READ-ONLY BY CONSTRUCTION: every statement is a SELECT, and the session is
+// opened with `default_transaction_read_only=on` so the server itself rejects
+// a write even if one were ever introduced here.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { execFile } from "node:child_process";
@@ -34,26 +43,54 @@ import { int, num, str } from "../contract.mjs";
 const exec = promisify(execFile);
 
 export const id = "hub-db";
-export const fields = ["recall_moment.candidates", "memory_standing", "honesty.serves"];
+export const fields = ["recall_moment.candidates", "hub", "honesty.serves"];
 export function describe() {
-  return "hub recall tables — candidate relevance/standing, serves, outcomes (opt-in, disabled by default)";
+  return "hub recall tables over TCP — candidate relevance/standing, serves, outcomes (opt-in, disabled by default)";
 }
 
-/** Run one read-only SQL statement, returning rows as arrays of strings. */
+/**
+ * Run one read-only SQL statement via psql over TCP.
+ * Returns rows as arrays of strings. \x01 is the field separator because it
+ * cannot appear in any of the columns we select.
+ */
 async function q(ctx, sql) {
-  const container = ctx.config?.hubDb?.container ?? "wevibe-postgres";
-  const user = ctx.config?.hubDb?.user ?? "wevibe";
-  const db = ctx.config?.hubDb?.database ?? "wevibe_hub";
+  const cfg = ctx.config?.hubDb ?? {};
+  const host = cfg.host ?? "wevibe-postgres";
+  const port = String(cfg.port ?? 5432);
+  const user = cfg.user ?? "wevibe";
+  const db = cfg.database ?? "wevibe_hub";
+  const password = cfg.password ?? process.env.WEVIBE_HUB_DB_PASSWORD ?? "";
 
   const { stdout } = await exec(
-    "docker",
-    ["exec", container, "psql", "-U", user, "-d", db, "-At", "-F", "\u0001", "-c", sql],
-    { timeout: 1500, maxBuffer: 2 * 1024 * 1024 },
+    "psql",
+    [
+      "-h", host,
+      "-p", port,
+      "-U", user,
+      "-d", db,
+      "-At",
+      "-F", "\u0001",
+      "-v", "ON_ERROR_STOP=1",
+      "-c", "SET default_transaction_read_only = on;",
+      "-c", sql,
+    ],
+    {
+      timeout: 1500,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        PGPASSWORD: password,
+        PGCONNECT_TIMEOUT: "2",
+        // Never let psql try to open an interactive prompt in a container.
+        PSQL_PAGER: "cat",
+      },
+    },
   );
+
   return stdout
     .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
+    .filter((l) => l && l !== "SET")
     .map((l) => l.split("\u0001"));
 }
 
@@ -73,7 +110,8 @@ export async function read(ctx) {
          (SELECT count(*) FROM memory_standing)`,
     );
   } catch (err) {
-    return { ok: false, reason: `hub db unreachable: ${String(err?.message ?? err).slice(0, 120)}` };
+    const msg = String(err?.stderr || err?.message || err).trim().slice(0, 160);
+    return { ok: false, reason: `hub db unreachable: ${msg}` };
   }
 
   const [queries, serves, outcomes, standing] = (counts[0] ?? []).map((v) => int(v) ?? 0);

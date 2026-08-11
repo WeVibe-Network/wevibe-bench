@@ -1,0 +1,13 @@
+# Nothing in the build context should ever reach the image except source.
+# The bench artifacts arrive via a read-only MOUNT, never baked into a layer —
+# a run's artifacts are a measurement record, not image content.
+**/node_modules
+**/.git
+**/runs
+**/data
+**/*.log
+dashboard.config.json
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

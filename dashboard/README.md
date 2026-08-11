@@ -5,11 +5,29 @@ phosphor palette, built to be read at a glance on a stream and to survive a
 skeptical engineer reading it closely.
 
 ```bash
-node server.mjs            # http://127.0.0.1:7717 — live artifacts
-node server.mjs --mock     # generated data, for design/demo without a run
+docker compose up -d          # → http://localhost:7717
 ```
 
-**No dependencies. No build step. No `npm install`.** Node 18+ stdlib only.
+In Docker Desktop it appears as `wevibe-bench-dashboard` with 7717 as a
+clickable link and a health dot that goes green once the board assembles.
+
+Host mode still works and needs no install — Node 18+ stdlib only:
+
+```bash
+node server.mjs               # → http://127.0.0.1:7717
+node server.mjs --help
+```
+
+**No dependencies. No build step. No `npm install`.** If this ever needs a
+package manager to start, something has been added that should not have been.
+
+The bench repo is mounted **read-only** at `/bench`. That `:ro` is not
+decoration: run artifacts under `runs/` are the authoritative record of a
+measurement (RC-5), and a read-only mount makes "the dashboard corrupted a run"
+structurally impossible rather than merely unlikely.
+
+There is **no mock mode**. The board renders whatever the artifacts carry,
+including nothing — the empty states are designed for exactly that.
 
 ---
 
@@ -67,6 +85,8 @@ Most of a real run is null. The empty states are designed, not incidental.
 ```
 contract.mjs          the versioned JSON contract + null-safe helpers
 server.mjs            zero-dep read-only HTTP server
+Dockerfile            single stage — there is nothing to build
+docker-compose.yml    read-only mount, host-only port, opt-in hub-db
 sources/
   _runtime.mjs        module isolation: timeouts, tail-bounded reads, merge
   run-manifest.mjs    provenance: policy anchor, levers, org, model
@@ -75,11 +95,29 @@ sources/
   truncation.mjs      transport anomalies
   funnel-cells.mjs    plugin funnel counters      (ON cells only)
   plugin-log.mjs      recall latency p50/p95      (ON cells only)
-  opencode-serve.mjs  live token burn             (opt-in, localhost)
+  opencode-serve.mjs  live token burn             (opt-in, host API)
   hub-db.mjs          candidate relevance/standing (opt-in, DISABLED default)
 index.html + board.js + panels/   the board
-mock.mjs              realistic generator incl. the ugly cases
 ```
+
+### Configuration
+
+Env vars override the config file, so the container is reconfigured with
+`docker run -e …` or a compose `environment:` block — never a rebuild:
+
+| Var | Default | Purpose |
+|---|---|---|
+| `WEVIBE_DASH_HOST` | `127.0.0.1` (image: `0.0.0.0`) | bind address |
+| `WEVIBE_DASH_PORT` | `7717` | port |
+| `WEVIBE_DASH_BENCH_ROOT` | `..` (image: `/bench`) | bench repo root |
+| `WEVIBE_DASH_POLL_MS` | `2000` | refresh cadence |
+| `WEVIBE_DASH_OPENCODE_URL` | `http://127.0.0.1:4096` | live agent API |
+| `WEVIBE_DASH_SOURCE_<NAME>` | — | force a source on/off |
+| `WEVIBE_DASH_HUBDB` | off | enable the hub-db source |
+| `WEVIBE_HUB_DB_{HOST,PORT,USER,NAME,PASSWORD}` | — | hub postgres |
+
+The password is read from the environment at query time. It is never written to
+config, never logged, and never returned by `/api/health`.
 
 ### Adding a source
 
@@ -99,17 +137,23 @@ already a designed UI state.
 
 Written to be run by anyone, out of the box, without wrecking their machine:
 
-- **Read-only.** Nothing opens a file for write.
-- **Binds `127.0.0.1`.** Exposing it requires an explicit `--host`.
+- **Read-only.** Nothing opens a file for write. The bench mount is `:ro`, so
+  this is enforced by the kernel, not by good intentions.
+- **Runs as a non-root user** (`node`, uid 1000) with no writable state.
+- **The docker socket is never mounted.** `hub-db` connects to postgres over
+  TCP. Handing a read-only dashboard control of the host docker daemon in order
+  to read four tables is an absurd trade, so it isn't made.
+- **Host-only port by default.** `WEVIBE_BIND_HOST=0.0.0.0` to expose on the
+  LAN — a deliberate act.
 - **Tail-bounded reads** (256KB). A six-hour log costs the same as a fresh one.
 - **Fixed static allowlist** — no dynamic path resolution, so traversal is
   impossible by construction.
-- **`hub-db` ships disabled** because it shells out to `docker`. You do not need
-  docker, a database, or any part of the WeVibe stack to run this dashboard.
-- **No network calls** except the opt-in localhost agent API.
+- **`hub-db` ships disabled.** You do not need a database, docker, or any part
+  of the WeVibe stack for the board to come up.
 - **No CDN, no webfont fetch.** The board renders offline.
 - **Privacy:** memory plaintext, raw queries and full CIDs never reach the
-  board. Everything rendered is assumed public forever.
+  board. `query_log.query_text` is never selected. Everything rendered is
+  assumed public forever.
 
 ---
 
