@@ -180,6 +180,7 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes(tmp_
     class FakeHubClient:
         def __init__(self) -> None:
             self._contributor_member_orgs_checks = 0
+            self._leader_member_orgs_checks = 0
 
         def enable_recall(self, identity: Identity, org_id: str, member_pubkey: str, free: bool = True) -> Any:
             calls.append("enable_recall")
@@ -191,7 +192,14 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes(tmp_
 
         def member_orgs(self, identity: Identity) -> Any:
             if identity is leader:
-                return []
+                self._leader_member_orgs_checks += 1
+                # create_org's _resolve_owned_org probe (call 1) must see no owned
+                # org so a fresh org is registered; the new leader membership poll
+                # (call 2) must see the org so seed_keywords proceeds.
+                if self._leader_member_orgs_checks == 1:
+                    return []
+                calls.append("poll_leader_membership")
+                return [{"org_id": "org-123"}]
             assert identity is contributor
             self._contributor_member_orgs_checks += 1
             # run_m1 checks membership before invite/add-member, then checks again while polling.
@@ -266,6 +274,7 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes(tmp_
     }
     assert [step["step"] for step in result["steps"]] == [
         "create_org",
+        "poll_leader_membership",
         "seed_keywords",
         "contributor_pubkeys",
         "invite",
@@ -275,6 +284,7 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes(tmp_
         "poll_membership",
     ]
     assert calls == [
+        "poll_leader_membership",
         *[f"add_keyword:{keyword}" for keyword in cfg.org_keywords],
         "contributor_pubkeys",
         "invite",
@@ -378,6 +388,7 @@ def test_orchestrator_run_m1_reuses_existing_org_membership(tmp_path, monkeypatc
     class FakeHubClient:
         def __init__(self) -> None:
             self._contributor_member_orgs_checks = 0
+            self._leader_member_orgs_checks = 0
 
         def enable_recall(self, identity: Identity, org_id: str, member_pubkey: str, free: bool = True) -> Any:
             calls.append("enable_recall")
@@ -389,10 +400,15 @@ def test_orchestrator_run_m1_reuses_existing_org_membership(tmp_path, monkeypatc
 
         def member_orgs(self, identity: Identity) -> Any:
             if identity is leader:
-                return []
+                self._leader_member_orgs_checks += 1
+                # create_org's _resolve_owned_org probe (call 1) sees no owned org;
+                # the leader membership poll (call 2) sees the org.
+                if self._leader_member_orgs_checks == 1:
+                    return []
+                return [{"org_id": "org-123"}]
             assert identity is contributor
             self._contributor_member_orgs_checks += 1
-            # run_m1 checks membership before invite/add-member, then checks again while polling.
+            # run_m1 checks membership before enable_recall, then checks again while polling.
             if self._contributor_member_orgs_checks == 1:
                 return [{"org_id": "org-123"}]
             calls.append("poll_membership")
@@ -454,6 +470,7 @@ def test_orchestrator_run_m1_reuses_existing_org_membership(tmp_path, monkeypatc
     assert result["org_id"] == "org-123"
     assert [step["step"] for step in result["steps"]] == [
         "create_org",
+        "poll_leader_membership",
         "seed_keywords",
         "contributor_pubkeys",
         "enable_recall",
@@ -860,3 +877,237 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     assert isinstance(parsed_input, dict)
     assert isinstance(parsed_input.get("batch"), list)
     assert parsed_input["batch"]
+
+
+def test_orchestrator_run_m1_awaits_leader_membership_before_seed_keywords(
+    tmp_path, monkeypatch
+) -> None:
+    logger, _ = _capture_logger("test.lifecycle.orchestrator.m1.leader-membership")
+    leader = Identity.from_hex("11" * 32)
+    contributor = Identity.from_hex("22" * 32)
+    leader_keystore = tmp_path / "leader-keystore"
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_SEED_HEX", leader.seed_hex)
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_SEED_HEX", contributor.seed_hex)
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_KEYSTORE", str(leader_keystore))
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+        session_token_path="~/test-session-token",
+        leader_signer_dir="/opt/leader-signer",
+    )
+
+    calls: list[str] = []
+    signer_calls: list[dict[str, Any]] = []
+    leader_confirm_after: int  # member_orgs(leader) calls before membership confirms
+    leader_confirm_after = 2
+
+    class FakeAdminCli:
+        def __init__(self, env: dict[str, str]) -> None:
+            self._env = env
+
+        def invite(
+            self,
+            org_id: str,
+            invitee_pubkey: str,
+            invitee_x25519: str,
+            invitee_pre_pubkey: str,
+            can_contribute: bool = True,
+            can_moderate: bool = False,
+        ) -> str:
+            calls.append("invite")
+            assert org_id == "org-123"
+            return "invited"
+
+        def provision_recall(self, org_id: str) -> str:
+            calls.append("provision_recall")
+            assert org_id == "org-123"
+            return "provisioned"
+
+    class FakeHubClient:
+        def __init__(self) -> None:
+            self._leader_member_orgs_checks = 0
+            self._contributor_member_orgs_checks = 0
+
+        def enable_recall(self, identity: Identity, org_id: str, member_pubkey: str, free: bool = True) -> Any:
+            calls.append("enable_recall")
+            assert identity is leader
+            assert org_id == "org-123"
+            return {"status": "ok"}
+
+        def member_orgs(self, identity: Identity) -> Any:
+            if identity is leader:
+                self._leader_member_orgs_checks += 1
+                # Call 1 is create_org's _resolve_owned_org probe (must see no
+                # owned org so a fresh org is registered). Calls 2..leader_confirm_after
+                # are the leader membership poll, confirming only on the last one.
+                if self._leader_member_orgs_checks < leader_confirm_after:
+                    return []
+                calls.append("poll_leader_membership")
+                return [{"org_id": "org-123"}]
+            assert identity is contributor
+            self._contributor_member_orgs_checks += 1
+            # run_m1 checks membership before invite/add-member, then checks again while polling.
+            if self._contributor_member_orgs_checks == 1:
+                return []
+            calls.append("poll_membership")
+            return [{"org_id": "org-123"}]
+
+        def add_keyword(self, identity: Identity, org_id: str, keyword: str) -> Any:
+            calls.append(f"add_keyword:{keyword}")
+            assert identity is leader
+            assert org_id == "org-123"
+            return {"status": "ok"}
+
+    class FakeMcpRest:
+        def identity_pubkeys(self) -> dict[str, str]:
+            calls.append("contributor_pubkeys")
+            return {"ed25519": "ed-contrib", "x25519": "x-contrib", "pre_pubkey": "pre-contrib"}
+
+    class FakeProcman:
+        pass
+
+    def run_cmd(*args, **kwargs):
+        cmd = args[0]
+        signer_calls.append(
+            {
+                "cmd": cmd,
+                "cwd": kwargs.get("cwd"),
+                "env": kwargs.get("env"),
+            }
+        )
+        if "register-org" in cmd:
+            return subprocess.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='register-org done\n{"org_id":"org-123","tx_hash":"tx-1","leader_wallet":"wallet-1","hub_serving_key":"hub-key"}\n',
+                stderr="",
+            )
+        if "add-member" in cmd:
+            return subprocess.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='add-member done\n{"tx_hash":"tx-add-1","code":0}\n',
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command {cmd}")
+
+    orchestrator = LifecycleOrchestrator(
+        cfg=cfg,
+        wevibe_root="/workspace",
+        leader=leader,
+        contributor=contributor,
+        leader_keystore="/tmp/leader.ks",
+        contributor_keystore="/tmp/contrib.ks",
+        leader_wallet="wallet-1",
+        logger=logger,
+        procman=FakeProcman(),
+        admin_cli_factory=lambda env: FakeAdminCli(env),
+        hub_client=FakeHubClient(),
+        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        sleep_fn=lambda _seconds: None,
+        run_cmd=run_cmd,
+    )
+
+    result = orchestrator.run_m1()
+
+    assert result["org_id"] == "org-123"
+    assert [step["step"] for step in result["steps"]] == [
+        "create_org",
+        "poll_leader_membership",
+        "seed_keywords",
+        "contributor_pubkeys",
+        "invite",
+        "add_member_onchain",
+        "enable_recall",
+        "provision_recall",
+        "poll_membership",
+    ]
+    # The leader membership poll must be recorded BEFORE any keyword is seeded:
+    # seed_keywords (add_keyword) must never precede the confirming leader poll.
+    assert calls.index("poll_leader_membership") < min(
+        i for i, c in enumerate(calls) if c.startswith("add_keyword:")
+    )
+
+
+def test_orchestrator_run_m1_raises_when_leader_membership_never_confirms(
+    tmp_path, monkeypatch
+) -> None:
+    logger, _ = _capture_logger("test.lifecycle.orchestrator.m1.leader-membership-never")
+    leader = Identity.from_hex("11" * 32)
+    contributor = Identity.from_hex("22" * 32)
+    leader_keystore = tmp_path / "leader-keystore"
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_SEED_HEX", leader.seed_hex)
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_SEED_HEX", contributor.seed_hex)
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_KEYSTORE", str(leader_keystore))
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+        session_token_path="~/test-session-token",
+        leader_signer_dir="/opt/leader-signer",
+    )
+
+    calls: list[str] = []
+
+    class FakeAdminCli:
+        def __init__(self, env: dict[str, str]) -> None:
+            self._env = env
+
+        def invite(self, *args, **kwargs) -> str:
+            raise AssertionError("invite must not run when leader membership never confirms")
+
+        def provision_recall(self, org_id: str) -> str:
+            raise AssertionError("provision_recall must not run when leader membership never confirms")
+
+    class FakeHubClient:
+        def member_orgs(self, identity: Identity) -> Any:
+            # Leader never becomes a member; the resolve probe and every leader
+            # poll call return no owned org.
+            if identity is leader:
+                return []
+            raise AssertionError("contributor member_orgs must not be reached before seed_keywords")
+
+        def add_keyword(self, identity: Identity, org_id: str, keyword: str) -> Any:
+            calls.append(f"add_keyword:{keyword}")
+            return {"status": "ok"}
+
+    class FakeMcpRest:
+        def identity_pubkeys(self) -> dict[str, str]:
+            raise AssertionError("contributor_pubkeys must not run before seed_keywords")
+
+    class FakeProcman:
+        pass
+
+    def run_cmd(*args, **kwargs):
+        cmd = args[0]
+        if "register-org" in cmd:
+            return subprocess.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='register-org done\n{"org_id":"org-123","tx_hash":"tx-1","leader_wallet":"wallet-1","hub_serving_key":"hub-key"}\n',
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command {cmd}")
+
+    orchestrator = LifecycleOrchestrator(
+        cfg=cfg,
+        wevibe_root="/workspace",
+        leader=leader,
+        contributor=contributor,
+        leader_keystore="/tmp/leader.ks",
+        contributor_keystore="/tmp/contrib.ks",
+        leader_wallet="wallet-1",
+        logger=logger,
+        procman=FakeProcman(),
+        admin_cli_factory=lambda env: FakeAdminCli(env),
+        hub_client=FakeHubClient(),
+        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        sleep_fn=lambda _seconds: None,
+        run_cmd=run_cmd,
+    )
+
+    with pytest.raises(RuntimeError, match="leader membership did not include org_id=org-123"):
+        orchestrator.run_m1()
+
+    # No keyword seeding happened before the leader membership failure.
+    assert all(not c.startswith("add_keyword:") for c in calls)
+    assert calls == []

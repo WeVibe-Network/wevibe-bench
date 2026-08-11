@@ -619,6 +619,13 @@ class LifecycleOrchestrator:
     def run_m1(self) -> dict[str, Any]:
         steps: list[dict[str, Any]] = []
         org_id = self._step(steps, "create_org", self.create_org)
+        leader_membership_ok = self._step(
+            steps,
+            "poll_leader_membership",
+            lambda: self.poll_membership(self._leader, org_id),
+        )
+        if not leader_membership_ok:
+            raise RuntimeError(f"leader membership did not include org_id={org_id}")
         self._step(steps, "seed_keywords", lambda: self.seed_keywords(org_id))
         contributor_pk = self._step(steps, "contributor_pubkeys", self.contributor_pubkeys)
         try:
