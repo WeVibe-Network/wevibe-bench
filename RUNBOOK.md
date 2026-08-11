@@ -1,5 +1,5 @@
 # RUNBOOK.md — the operative run card
-**Version:** 7 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v6 (2026-08-07) · **Amended:** 2026-08-10 (WO-MODEL-FLAG): §0/§2 `--model` subject selection + CLI syntax correction (main-parser flags precede the subcommand) · §1/RC-7 operator-selects-model amendment · §6 reasoning posture rewritten self-explanatory — frozen at MAX, with the defensible-claim reasoning
+**Version:** 7 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v6 (2026-08-07) · **Amended:** 2026-08-10 (WO-MODEL-FLAG): §0/§2 `--model` subject selection + CLI syntax correction (main-parser flags precede the subcommand) · §1/RC-7 operator-selects-model amendment · §6 reasoning posture rewritten self-explanatory — frozen at MAX, with the defensible-claim reasoning · **Amended:** 2026-08-11 (WO-NO-SMOKE, Walter): **all smoke stages removed** — a smoke requires a full session + extraction + approval to prove recall, which can only be done by running a session in full, so a standalone smoke proves nothing and has never worked; delivery is verified **in-band** by the first OFF cell + extraction + the first ON cell's injection-seam values (§2, §6)
 
 > **This is the only operative document. Read it and nothing else to operate the benchmark.**
 > Every other document in this repository is history with no authority over what runs. Their binding
@@ -114,7 +114,7 @@ this fixes.)
 | Org | **one org for the entire campaign**, recorded in the manifest; chain assigned `wevibe-org-0`, leader fp `f534aa02` |
 | Runtime | **oMLX.** The `--model` alias pins which checkpoint the proxy loads. Identity is read from the API response and recorded in the manifest, so this row is documentation, never a gate |
 | Transport | session production model AND session extraction model → local relay proxy `:4545` → resident oMLX model. **ONLY** the embedding/vector-dim path bypasses the proxy to the local embedding endpoint directly |
-| Harness | OpenCode in a Docker worker image + plugin. **The version is not asserted here** — the worker image fingerprint is measured at run time and recorded in the manifest (RC-5), and the stack smoke asserts it matches the commit under test (§6) |
+| Harness | OpenCode in a Docker worker image + plugin. **The version is not asserted here** — the worker image fingerprint is measured at run time and recorded in the manifest (RC-5); the operator confirms it matches the commit under test before the campaign (§0 step 2) |
 | Task | the LOCKED backgammon prompt — unstructured, no requirements checklist |
 | Oracle | deterministic: Playwright conformance + Vitest backend + Playwright chromium. **No LLM judge exists anywhere in scoring.** |
 
@@ -128,12 +128,21 @@ its `name` field may change.
 
 **The campaign sequence, in full:**
 
-> **test** (all green) → **stack smoke** (all green) → **wipe** (once) → **OFF cell** → **extract** →
-> **ON smoke** (unscored, hard gate) → **first scored ON cell** → **extract** → continue
+> **test** (all green) → **wipe** (once) → **OFF cell** → **extract** →
+> **first scored ON cell** → **extract** → continue
 
 Each stage is **its own invocation**. Nothing here is nested inside anything else. If a procedure
 cannot be expressed as one of the stages below, it is not a procedure — it is drift, and it gets
 deleted rather than documented.
+
+**There are no smoke stages (WO-NO-SMOKE, Walter, 2026-08-11).** A smoke that proves the recall seam
+requires a full session, an extraction, and an approval first — and that can only be produced by
+running a session in full. A standalone smoke therefore proves nothing and has never worked. Delivery
+verification is **in-band**: the first post-wipe OFF cell builds the corpus, its extraction commits
+it, and the first ON cell's status stream either carries non-null injection seams
+(`injected_count`, `injected_block_chars`, `injected_block_est_tokens`, `consumer_injected_count`) —
+delivery proven on the built artifact through the real transport — or it does not, which is the
+rule-18 walk-back class. The first ON cell IS the delivery verification.
 
 **TEST**
 1. Start the stack.
@@ -152,30 +161,13 @@ same hazard class as a second wipe. The reset route must NOT be registered to ac
 suite is restored behind a guard after the campaign, not before. Recorded as
 D-INTEGRATION-SUITE-QUARANTINE (§11).
 
-**SMOKE**
-1. Start the docker stack.
-2. Run the smoke.
-3. Check the smoke output.
-
-The **stack smoke** is a **one-time preflight before the campaign**, not a per-cell step. It is
-re-run after a pipeline change (rule 5.1) — never between cells of an unchanged pipeline. Contents: §6.
-
-The **ON smoke** is the delivery-verification gate and runs at a **fixed mid-campaign point**: after
-the first OFF-cell extraction (post-wipe), before the first scored ON cell — never skipped, never
-merged into that first scored ON cell. Contents: §6.
-
-**Why the ON smoke sits here and not pre-wipe.** A post-wipe corpus is empty, so an ON invocation
-immediately after the wipe recalls nothing and certifies nothing. A pre-wipe smoke proves a seam the
-wipe then destroys, because the epoch-key mismatch is specifically a post-wipe failure that surfaces
-hours later looking like a recall bug. The ON smoke must therefore run after the wipe AND after the
-first OFF-cell extraction (which builds a non-empty corpus), as an unscored hard gate before the
-first scored ON cell. It is neither skipped nor merged into the first scored ON cell — merging makes
-a broken seam indistinguishable from a null result.
-
-**Session ruling (2026-08-07): the pairing token's real deadline was never the wipe.** An OFF cell
-emits no serve and no outcome events, so the boundary is the first serve — the ON smoke.
-
-Gate: all green.
+**SMOKE — REMOVED (WO-NO-SMOKE, Walter, 2026-08-11).** Both former smoke stages (stack smoke, ON
+smoke) are deleted from the campaign. The ON smoke purported to verify recall delivery before the
+first scored ON cell, but verifying recall requires a full session, an extraction, and an approval —
+obtainable only by running a session in full — so the smoke could never certify anything and has
+never worked. Delivery verification is in-band (see the sequence above): the first ON cell's
+injection-seam values are the proof, and null injection values on an ON cell remain a rule-18
+walk-back class.
 
 **WIPE — the full procedure, and it is not one command**
 
@@ -241,16 +233,15 @@ integrity gate and the smart-leader procedure are §9.
 ### Consequences — these follow from the sequence and are not separately negotiable
 
 - **The first bench after the wipe is necessarily OFF — and it is UNSCORED.** The corpus is empty
-  by construction. This first OFF cell exists to build a non-empty corpus so the ON smoke (which
-  follows its extraction) has something to recall.
+  by construction. This first OFF cell exists to build a non-empty corpus so the first ON cell
+  (which follows its extraction) has something to recall.
 - **One org for the whole campaign.** Any scheme assigning an org per arm or per model is stale and
   wrong: it breaks corpus accumulation, which is the only thing being measured. Walter's 2026-08-07
   reasoning, transcribed: someone must be responsible for a corpus, and the org focuses context for
   retrieval and extraction alike.
 - **Mode toggles exactly one thing** — whether injection runs before attempt 1 (RC-4).
-- **Smoke and wipe are separate invocations, never nested inside `bench`.** The operator runs each
-  stage. The ON smoke is additionally a **hard gate** on the first scored ON cell: it is a separate
-  stage run **between** cells, not inside a bench.
+- **Wipe and extract are separate invocations, never nested inside `bench`.** The operator runs each
+  stage.
 
 **Not every entrypoint above exists yet.** This section is the contract they are built to. See §11.
 
@@ -400,9 +391,12 @@ run has none of the isolation guarantees in §8 and would be scored as though it
 
 ## 5. BINDING RULES
 
-1. **R-BENCHMARK-INTEGRITY.** End-to-end delivery verification before any measurement run
-   (echo-guard exists and exported, seed succeeds with vector stored, dry run shows delivery=YES).
-   A full smoke requalification is required between **any** pipeline change and the next scored run.
+1. **R-BENCHMARK-INTEGRITY.** End-to-end delivery verification is **in-band** (WO-NO-SMOKE,
+   2026-08-11): the first post-wipe ON cell's status stream must carry non-null injection seams
+   (`injected_count`, `injected_block_chars`, `injected_block_est_tokens`,
+   `consumer_injected_count`) — observed on the built artifact through the real transport. Null
+   values there are the rule-18 walk-back class. After **any** pipeline change, the next ON cell
+   re-proves delivery the same way before its result is counted.
 2. **Extraction model equals producer model.** `extractor ≠ producer` is not a valid arm. This binds
    one cell. It says nothing about the campaign.
 3. **Extraction-integrity hard abort.** See §9 — the condition, the discovery path and the
@@ -455,19 +449,21 @@ run has none of the isolation guarantees in §8 and would be scored as though it
     reaches chain · an outcome that never pairs · standing moving with no human signal and no observed
     transition · the arms differing in anything but injection (RC-4) · a second org or manifest (§1,
     §2) · extraction from a session that resolved nothing (the §9 abort class) · injected-block tokens
-    null on an ON cell (the §6 ON-smoke class) · a wipe after the first cell (rule 13, §2). A break
-    confined to
+    null on an ON cell (the §2/§6 in-band delivery-verification class) · a wipe after the first cell
+    (rule 13, §2). A break confined to
     **one cell** is a **rerun** (§10 — a new disclosed run, never a merge). The distinction: anything
     breaking a pairing is a walk-back; anything breaking one cell is a rerun.
 
 ---
 
-## 6. PREFLIGHT — checks, then two smokes
+## 6. PREFLIGHT — checks
 
 A run launched with an unproven seam is **VOID-INSTRUMENT by construction** and is never counted in
 N, however clean its output looks. Proven means **observed emitting a real value, on the built
 artifact, through the real transport.** Never compile-green. Never "it was dispatched." Never a code
-reading.
+reading. With the smoke stages removed (WO-NO-SMOKE, 2026-08-11), seam proof is delivered in-band:
+the injection seams are proven by the first ON cell's status-stream values (rule 5.1), and the
+progress-vector and extraction-observability seams are proven by the first post-wipe OFF cell's.
 
 **Before any scored run, three checks:**
 
@@ -479,16 +475,6 @@ reading.
    bench failure.
 3. **Model load verified** — context length, parallelism, one real completion, no TTL (RC-7).
 
-**Stack smoke** — fails the campaign if it cannot assert all of:
-
-| Assertion | Blocks |
-|---|---|
-| Worker image fingerprint matches the commit under test | everything below — and it is what settles which harness version is actually running |
-| Oracle boots and scores a reference artifact, entrypoint resolved **from** the artifact across all spawn sites | everything — an oracle that cannot boot reports capability failure for an instrument fault |
-| Progress vector populated on a real full-path cell: `problems_before` / `problems_after` / `resolved_count` / `agentic_cycles` / `tool_calls` / `test_invocations` / `attempts_to_green` | all convergence claims |
-| Extraction-attempt observability distinguishes "never invoked" from "gate cut it off" | all integrity claims |
-| Reasoning cap present in the outbound request, not deleted by the proxy | any cell that could produce the void signature above |
-
 ### Reasoning controls — verified 2026-08-10, oMLX 0.5.7 (live probes, Qwen3.6-35B-A3B)
 
 What each knob ACTUALLY does on this stack, measured — not assumed:
@@ -496,7 +482,7 @@ What each knob ACTUALLY does on this stack, measured — not assumed:
 | Knob | Where set | Verified behaviour |
 |---|---|---|
 | `max_tokens` | request (proxy clamps to alias `limits.output`) | The ONLY hard ceiling. Reasoning and visible content share this one budget; exhaustion = `finish_reason: length`, possibly severed tool-call JSON (the VOID-INSTRUMENT class of rule 5.10) |
-| `max_reasoning_tokens` | bench alias `requestDefaults` (forced 8192; client value stripped) | **ACCEPTED but NOT enforced by oMLX 0.5.7.** Probe: `max_reasoning_tokens: 50` → full reasoning still flowed (284 completion tokens). The smoke assertion below is a PRESENCE check (proxy fills it, oMLX accepts it) — it is NOT an enforced clamp. Do not rely on it as one |
+| `max_reasoning_tokens` | bench alias `requestDefaults` (forced 8192; client value stripped) | **ACCEPTED but NOT enforced by oMLX 0.5.7.** Probe: `max_reasoning_tokens: 50` → full reasoning still flowed (284 completion tokens). Treat it as a PRESENCE marker only (proxy fills it, oMLX accepts it) — it is NOT an enforced clamp. Do not rely on it as one |
 | `reasoning_effort` | request; **stripped by bench aliases** (`forbiddenRequestParams`) | Accepted by oMLX (no 400). Qualitative level (low/medium/high; DeepSeek V4 publishes effort levels). Not a token cap |
 | `chat_template_kwargs.enable_thinking: false` | request | The real OFF switch, verified: zero reasoning, answer-only (3 tokens vs 200) |
 | thinking on/off + `preserve_thinking` defaults | oMLX admin per-model settings | Native, apply at load. `preserve_thinking_default: true` is set for both Qwen3.6 models (2026-08-10) — the BENCH aliases override per-request with `preserve_thinking: false` (§12 remediation item 1) |
@@ -568,16 +554,12 @@ as long as it needs inside the 16384 output budget. His control, when he wants o
 `options.reasoningEffort` in `opencode.json` — the proxy passes it through untouched on interactive
 aliases. Never add a reasoning default to an interactive alias.
 
-**ON smoke** — the delivery-verification gate; gates every ON cell. It runs at a **fixed campaign
-point**: after the first OFF-cell extraction (post-wipe), before the first scored ON cell (matching
-§2). It is additionally re-run after any pipeline change (rule 5.1). Asserts non-null on the actual
-worker image, through the real transport: `injected_count`, `injected_block_chars`,
-`injected_block_est_tokens`, `consumer_injected_count`.
-
-These four are **null BY CONTRACT on OFF cells** (`memory_mode != "on"` ⇒ `None`). An OFF cell
-therefore proves nothing about them, and a null there is not a defect. Running ON without this smoke
-is exactly what voided the paid R2 campaign. This is why the smoke sits after the wipe, matching §2:
-a pre-wipe smoke proves a seam the wipe then destroys.
+**The injection-seam delivery check (in-band).** The four injection values — `injected_count`,
+`injected_block_chars`, `injected_block_est_tokens`, `consumer_injected_count` — are **null BY
+CONTRACT on OFF cells** (`memory_mode != "on"` ⇒ `None`). An OFF cell therefore proves nothing about
+them, and a null there is not a defect. They are proven on the **first ON cell** (rule 5.1): non-null
+values on the actual worker image through the real transport = delivery proven; null = rule-18
+walk-back. A pre-wipe ON cell proves a seam the wipe then destroys, so no ON cell runs pre-wipe.
 
 **The `missing_telemetry_seams` list is itself an instrument.** In R2 it named seven seams, four of
 which had real values in the same record. A list that over-reports trains the operator to ignore it.
@@ -812,7 +794,8 @@ future seam, not a flag.
 
 **Caveat, unverified:** if the vendored plugin inside the worker image predates this cadence, the
 plugin still re-injects every turn. **Do not report cadence effects as conformant until the image is
-confirmed to carry the cadence code** — the stack smoke's fingerprint assertion is what confirms it.
+confirmed to carry the cadence code** — confirmed by comparing the manifest's recorded worker image
+fingerprint against an image built from the commit under test (§0 step 2).
 
 ---
 
@@ -858,7 +841,7 @@ Fixed defects are not listed. They are in git.
 | ID | Status | Description | Blocks |
 |---|---|---|---|
 | **D-TEMPLATE-DESYNC** | 🔴 **top campaign risk** | The proof is partially executed. Low-context **PASSED** (WO-TEMPLATE-PROOF-1: two 105-turn sessions, 0 desyncs each); high-context (≥100K tokens) behaviour — what the §12 probe measures — remains **unverified**. Blocks every scored cell until high-context is proven. See §12. | every scored cell |
-| **D-ENTRYPOINTS-MISSING** | 🟢 CLOSED by 09cab437 | `feat: split extraction invocation, add run --mode, unconditional reaper` makes test/smoke/wipe/bench/extract a coherent entrypoint set. | §2 |
+| **D-ENTRYPOINTS-MISSING** | 🟢 CLOSED by 09cab437 | `feat: split extraction invocation, add run --mode, unconditional reaper` makes test/wipe/bench/extract a coherent entrypoint set (smokes later removed, WO-NO-SMOKE 2026-08-11). | §2 |
 | **D-MODE-DRIFT** | 🟢 CLOSED by 09cab437 + 98a286b + 0141930 + e60ccc1 | The 13 drift branches are gone: the delivery-scan arm is keyed on the injection record not mode (`98a286b`), the telemetry seam on `injected_count` (`0141930`), and the scorecard is label-invariant under `e60ccc1`'s test. The only remaining mode branch is the legitimate injection call site. The arms are comparable. | every scored comparison |
 | **D-RUN-STATUS-MISSING** | 🟢 CLOSED by 1a50ba9 + e60ccc1 | Write-once run manifest + append-only status stream + scorecard landed in `1a50ba9`; `e60ccc1` adds the scorecard test. | the contract itself |
 | **D-NO-REAPER** | 🟢 CLOSED by 09cab437 | `process_reaper.py` (RC-6 unconditional reaper) wired into every exit path, with tests. | §2 TEST step 4, bench |
@@ -1040,16 +1023,21 @@ baseline reconciled to `350f899` · template low-context proof PASSED (WO-TEMPLA
 2. **High-context template probe to ≥100K tokens** (§12): the low-context proof passed; the
    high-context behaviour this probe measures is still unverified. Only after it passes does the
    template get FREEZEd.
-3. **Stack smoke** (§6) as the pre-campaign preflight; the **ON smoke** runs at its fixed point later — after the first OFF-cell extraction (post-wipe), before the first scored ON cell.
+3. **Preflight checks** (§6) before the campaign; delivery is then verified in-band by the first
+   OFF cell + extraction + the first ON cell's injection seams (rule 5.1) — there are no smoke
+   stages (WO-NO-SMOKE, 2026-08-11).
 4. **FREEZE the template** (§12), only after the high-context probe passes.
 
 > **Terminology:** §12/§17 "template" = the **agent reasoning template** (a different artifact from
 > the task prompt/scaffold). The **task-template freeze** — the backgammon scaffold hash that the
 > run path fails closed on — is recorded separately at RC-5a above.
 5. **Wipe before the first cell** — the full four-step procedure (§2). Then first OFF cell (unscored)
-   → extract → ON smoke (unscored, hard gate) → first scored ON cell → extract, continuing until
+   → extract → first scored ON cell → extract, continuing until
    performance drops or something needs Walter. A model switch is one of the things
    that needs Walter. The corpus carries across it; the wipe does not run again after the first cell.
 
-**Do not skip the ON smoke.** The injection seams are null by contract on OFF cells, so no OFF cell can ever
-prove them. Running ON without that smoke is exactly what voided the paid R2 campaign.
+**The first ON cell is the delivery verification.** The injection seams are null by contract on OFF
+cells, so no OFF cell can ever prove them — and no standalone smoke can either (WO-NO-SMOKE): proving
+recall requires a full session + extraction + approval, which only a real cell produces. Read the
+first ON cell's status stream: non-null `injected_count` / `injected_block_chars` /
+`injected_block_est_tokens` / `consumer_injected_count` = delivery proven; null = rule-18 walk-back.
