@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -255,15 +256,18 @@ class ProcessReaper:
         Cell workers are plain ``docker run`` containers named
         ``wevibe-bench-cell-<run_label>``; the run path removes its own on a
         clean exit, so anything still present here is a crash leak. Scoped by
-        name prefix — never a pattern that could match non-bench containers.
+        this reaper's own run label — an unscoped prefix sweep would remove
+        OTHER runs' live cells (and did: reaper unit tests force-removing
+        parallel xdist docker-isolation cells was the suite's flake class).
         """
         docker = shutil.which("docker")
         if docker is None:
             self.log.info("process_reaper docker unavailable; skipping cell container sweep")
             return []
+        label = re.sub(r"[^a-zA-Z0-9_.-]", "-", self.run_label)
         try:
             out = subprocess.run(
-                [docker, "ps", "-aq", "--filter", "name=wevibe-bench-cell-"],
+                [docker, "ps", "-aq", "--filter", f"name=wevibe-bench-cell-{label}"],
                 capture_output=True,
                 text=True,
                 timeout=15,

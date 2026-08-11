@@ -237,6 +237,31 @@ def test_transient_probe_error_retries_to_clear(monkeypatch):
     assert calls["n"] == pr._PORT_CLEAR_ATTEMPTS
 
 
+def test_cell_container_sweep_is_scoped_to_run_label(monkeypatch):
+    """The container sweep filters by THIS reaper's run label, never the bare
+    ``wevibe-bench-cell-`` prefix. Regression: an unscoped sweep force-removed
+    other xdist workers' live docker-isolation cells mid-test (the recurring
+    'container is not running' flake class)."""
+    import wevibe_bench.process_reaper as pr
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(pr.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(pr.subprocess, "run", fake_run)
+
+    reaper = ProcessReaper(run_label="my-run-42")
+    removed = reaper._remove_cell_containers()
+
+    assert removed == []
+    assert calls == [
+        ["/fake/docker", "ps", "-aq", "--filter", "name=wevibe-bench-cell-my-run-42"]
+    ]
+
+
 def test_reap_report_fields_and_unconditional():
     """ReapReport shape + unconditional wrapper never raises."""
     report = ReapReport(run_label="x")
