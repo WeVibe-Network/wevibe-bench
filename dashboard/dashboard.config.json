@@ -1,0 +1,20 @@
+{
+  "pollMs": 2000,
+  "opencodeServeUrl": "http://127.0.0.1:4096",
+  "sources": {
+    "run-manifest": true,
+    "status-stream": true,
+    "run-log": true,
+    "truncation": true,
+    "funnel-cells": true,
+    "plugin-log": true,
+    "opencode-serve": true,
+    "hub-db": false
+  },
+  "hubDb": {
+    "enabled": false,
+    "container": "wevibe-postgres",
+    "user": "wevibe",
+    "database": "wevibe_hub"
+  }
+}

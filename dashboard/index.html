@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" data-theme="midnight">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WeVibe Bench — live</title>
+<!--
+─────────────────────────────────────────────────────────────────────────────
+ JSON CONTRACT v1.0 — what this board consumes. Diff against contract.mjs and
+ against what the backend actually emits.
+
+ {
+   contract_version, generated_at, mock?,
+   run:        { org_id, model, arm, cell_label, started_at, elapsed_s, phase,
+                 chunk{current,total}, attempt{current,max}, turns,
+                 session_turns, tokens{input,output,injected_block}, state,
+                 session_id, log_silent_s, terminal_status }
+   provenance: { attestation, gate_mode, gate_mode_source, policy_version,
+                 policy_anchor_status, worker_image_fp, leader_fp, corpus, seed }
+   arm_delta:  { sufficient, min_cells_per_arm, delta, ci, statement, note,
+                 a|b:{ cells, gates_resolved, gates_total, resolution_rate,
+                       median_turns_to_green } }
+   wall:       { gates:[{id,req,title,a,b,a_flipped_at_attempt,
+                         b_flipped_at_attempt}], totals:{a,b} }
+   episodes:   [{ failure_key, arm, state, turns, elapsed_s, error, opened_at }]
+   recall_moment: null | { failure_key, fired_at, error, latency_ms, gate_mode,
+                 gate_decision_ms, candidates[], guard{detections,scanned},
+                 chosen{cid,implement,context,dnd,stack}, outcome }
+   memories:   [{ cid, implement, context, dnd, stack, serves,
+                 outcomes_resolved, outcomes_unresolved, outcomes_unobserved,
+                 standing_bps, self_authored_discounted }]
+   honesty:    { coverage{concluded,total,note}, unresolved, guard_detections{},
+                 recall_latency_ms{p50,p95,n}, wasted_turns, recovered_turns,
+                 serves{sent,rejected,confirmed_on_chain,note},
+                 transport{truncations,finalize_timeouts,finalize_timeout_turns,
+                           guard_aborts,recovery_nudges,recoveries} }
+   history:    [{ cell_label, arm, started_at, duration_s,
+                 segments[{kind,from_s,to_s}], triggers[], gates_resolved,
+                 verdict }]
+   sources:    [{ id, ok, fields[], reason, provenance, ms }]
+ }
+
+ EVERY FIELD IS NULLABLE. null = NOT OBSERVED and renders as an explicit state.
+ Three null-ish states stay visually distinct: unobserved / unwired / zero.
+
+ THREE CLAIMS, NEVER MERGED:
+   serve   = a memory was injected. NOT that it helped.
+   outcome = the episode resolved or didn't. NOT that memory caused it.
+   delta   = the only causal surface on this board.
+─────────────────────────────────────────────────────────────────────────────
+-->
+<style>
+/* ── WeVibe Midnight ────────────────────────────────────────────────────────
+   Palette C. Midnight is the one sanctioned theme that is not a single-hue
+   ramp — it ships two accents on the same surface, so the two arms are
+   separated by BRAND tokens rather than invented colour.
+
+   ARM A  --accent #82aaff (blue,   L*≈70)
+   ARM B  --num    #f78c6c (orange, L*≈68)
+   Separated in luminance AND hue, so they survive 4:2:0 chroma subsampling at
+   720p and stay distinct in greyscale and for red-green CVD.
+
+   Red #ff6b6b and green #5ad27a are RESERVED for gate fail/pass and are never
+   used for arm identity — an arm accent that reads as a verdict is a lie.
+─────────────────────────────────────────────────────────────────────────── */
+:root{
+  --bg:#0a0e16; --bg-2:#0d121c; --panel:#0f1520; --raised:#131a27;
+  --fg:#aeb9cc; --dim:#43506a; --type:#e6edf6;
+  --arm-a:#82aaff; --arm-b:#f78c6c;
+  --fail:#ff6b6b; --pass:#5ad27a; --null:#5b6b86;
+  --rule:#1c2534; --rule-2:#26314a;
+  --font:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --fs-hero:56px; --fs-metric:28px; --fs-body:16px; --fs-ident:15px; --fs-label:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--fg); font-family:var(--font);
+  font-size:var(--fs-body); font-variant-numeric:tabular-nums;
+  -webkit-font-smoothing:antialiased; overflow:hidden;
+}
+#root{height:100vh;display:flex;flex-direction:column}
+
+/* NO AMBIENT ANIMATION. The board is on screen for hours; constant motion is
+   exhausting and reads as filler. The entire motion budget belongs to the
+   recall-moment takeover. State changes announce once and settle. */
+@keyframes settle{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+.settle{animation:settle .2s ease-out}
+@media (prefers-reduced-motion:reduce){.settle{animation:none}}
+
+.label{font-size:var(--fs-label);font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.ident{font-size:var(--fs-ident);font-weight:500;color:var(--type)}
+.null{color:var(--null)}
+.a{color:var(--arm-a)} .b{color:var(--arm-b)}
+.pass{color:var(--pass)} .fail{color:var(--fail)}
+
+.panel{background:var(--panel);border:1px solid var(--rule);display:flex;flex-direction:column;min-height:0}
+.phead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 14px;border-bottom:1px solid var(--rule)}
+.pbody{padding:12px 14px;overflow:hidden;flex:1;min-height:0}
+
+/* ── top bar ─────────────────────────────────────────────────────────────── */
+.topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;background:var(--bg-2);border-bottom:1px solid var(--rule-2)}
+.brand{font-size:20px;font-weight:700;color:var(--type);letter-spacing:.04em}
+.attest{font-size:var(--fs-label);color:var(--dim);letter-spacing:.06em}
+.spacer{flex:1}
+.armtag{font-size:var(--fs-label);font-weight:700;letter-spacing:.08em;padding:3px 10px;border:1px solid currentColor}
+
+/* ── layout: wall-dominant (1c) ──────────────────────────────────────────── */
+.grid{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr auto;gap:10px;padding:10px;min-height:0}
+.rail{grid-column:1/-1;display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+
+/* ── the wall ────────────────────────────────────────────────────────────── */
+.wallrow{margin-bottom:14px}
+.wallhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.strip{display:grid;gap:2px;grid-auto-flow:column;grid-auto-columns:1fr}
+.cellbox{height:26px;border:1px solid var(--rule-2);background:transparent}
+.cellbox.red{background:var(--fail);border-color:var(--fail)}
+.cellbox.green{background:var(--pass);border-color:var(--pass)}
+.cellbox.unobserved{background:repeating-linear-gradient(45deg,#141b28 0 3px,transparent 3px 6px)}
+.wallgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(22px,1fr));gap:3px}
+.wallgrid .cellbox{height:22px}
+.changed{margin-top:10px;font-size:var(--fs-label);color:var(--fg);line-height:1.5}
+
+/* ── hero ────────────────────────────────────────────────────────────────── */
+.hero{display:flex;align-items:flex-start;gap:22px}
+.heronum{font-size:var(--fs-hero);font-weight:700;line-height:1;color:var(--type)}
+.collect{font-size:32px;font-weight:700;letter-spacing:.06em;color:var(--dim)}
+.armcol{flex:1}
+.armrate{font-size:var(--fs-metric);font-weight:600}
+.note{font-size:var(--fs-label);color:var(--dim);line-height:1.5;margin-top:8px;border-top:1px solid var(--rule);padding-top:8px}
+
+/* ── ticker ──────────────────────────────────────────────────────────────── */
+.trow{display:grid;grid-template-columns:96px 40px 1fr 54px 62px;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--rule);font-size:var(--fs-body)}
+/* red-again: the pre-trigger tension. STATIC — double rule + inset, no pulse. */
+.trow.tense{border-left:3px double var(--fail);box-shadow:inset 0 0 0 1px rgba(255,107,107,.22);background:rgba(255,107,107,.05)}
+.state{font-size:var(--fs-label);font-weight:700;letter-spacing:.04em}
+
+/* ── recall moment ───────────────────────────────────────────────────────── */
+.takeover{border-color:var(--arm-a);box-shadow:0 0 0 1px var(--arm-a),0 0 34px rgba(130,170,255,.14)}
+.atomic{display:grid;grid-template-columns:76px 1fr;gap:4px 10px;font-size:var(--fs-body);line-height:1.45}
+.cand{display:grid;grid-template-columns:1fr 52px 62px 96px;gap:8px;padding:4px 0;border-bottom:1px solid var(--rule);font-size:var(--fs-ident)}
+.disp{font-size:12px;font-weight:600;letter-spacing:.04em}
+
+.railbox{background:var(--panel);border:1px solid var(--rule);padding:8px 10px}
+.railval{font-size:22px;font-weight:600;color:var(--type);margin:2px 0}
+.railnote{font-size:12px;color:var(--dim);line-height:1.35}
+.prov{display:flex;gap:16px;flex-wrap:wrap;padding:6px 18px;background:var(--bg-2);border-top:1px solid var(--rule-2);font-size:13px;color:var(--dim)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="./board.js"></script>
+</body>
+</html>
