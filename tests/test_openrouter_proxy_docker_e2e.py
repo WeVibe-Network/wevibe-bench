@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import http.client
 import json
+import os
 import subprocess
 import threading
 import time
@@ -502,6 +503,20 @@ def test_openrouter_proxy_worker_docker_best_effort_teardown_on_runtime_error(
     _assert_precise_single_rm_call(rm_calls, container_name=cfg.container_name)
 
 
+def _c0probe_serve_host_port() -> int:
+    """Host port for the real-docker c0 probe cell, disjoint per xdist worker.
+
+    DockerCellConfig.serve_host_port defaults to 4096, and this probe publishes
+    it for real. test_docker_isolation's cells own 4096 + N*40 (N = xdist worker
+    index, up to gw31 -> 5375), so a cell there running concurrently with this
+    probe made `docker run` fail rc=125 "Bind for 0.0.0.0:4096: port is already
+    allocated". This band starts above that range so the two never overlap.
+    """
+    raw = os.environ.get("PYTEST_XDIST_WORKER", "")
+    worker_index = int(raw[2:]) if raw.startswith("gw") and raw[2:].isdigit() else 0
+    return 5400 + worker_index
+
+
 @pytest.mark.skipif(not (_DOCKER_OK and _IMAGE_OK), reason=_DOCKER_SKIP_REASON)
 def test_worker_completes_tool_result_continuation_through_fixed_proxy(tmp_path: Path) -> None:
     fake = _FakeUpstream(_streamed_tool_then_stop_responses())
@@ -528,6 +543,7 @@ def test_worker_completes_tool_result_continuation_through_fixed_proxy(tmp_path:
             worktree=worktree,
             memory_mode="off",
             container_name=f"wevibe-c0probe-{uuid.uuid4().hex[:12]}",
+            serve_host_port=_c0probe_serve_host_port(),
         )
         cfg.proxy_token = running.run_token
 

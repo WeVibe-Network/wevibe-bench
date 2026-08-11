@@ -67,7 +67,10 @@ def test_lifecycle_config_env_hooks_default_and_override(monkeypatch: pytest.Mon
 
     default_cfg = LifecycleConfig()
     assert default_cfg.hub_url == "http://127.0.0.1:4440"
-    assert default_cfg.leader_mcp_url == "http://127.0.0.1:4450"
+    # :4550 is the seed-derived bench leader clone. The default was :4450 (the
+    # real host wevibe-mcp, keychain identity, no seed support), so a run
+    # without the env override minted its org under the wrong leader.
+    assert default_cfg.leader_mcp_url == "http://127.0.0.1:4550"
     assert default_cfg.contributor_mcp_url == "http://127.0.0.1:4451"
 
     monkeypatch.setenv("WEVIBE_BENCH_HUB_URL", "http://127.0.0.1:4449")

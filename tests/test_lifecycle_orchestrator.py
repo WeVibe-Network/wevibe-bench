@@ -19,6 +19,24 @@ from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.lifecycle.qdrant_probe import find_org_collection, snapshot_counts
 
 
+class _LeaderIdentityProbe:
+    """Stands in for the bench leader clone's /v1/identity/pubkeys.
+
+    `create_org` verifies the org-setup MCP IS the harness leader before
+    registering, so any url-keyed fake factory must serve the leader URL too.
+    """
+
+    def __init__(self, leader: Identity) -> None:
+        self._leader = leader
+
+    def identity_pubkeys(self) -> dict[str, str]:
+        return {
+            "ed25519": self._leader.ed_pubkey_hex,
+            "x25519": "x-leader",
+            "pre_pubkey": "pre-leader",
+        }
+
+
 def _capture_logger(name: str) -> tuple[logging.Logger, io.StringIO]:
     stream = io.StringIO()
     logger = logging.getLogger(name)
@@ -259,7 +277,9 @@ def test_orchestrator_run_m1_executes_expected_sequence_with_injected_fakes(tmp_
         procman=FakeProcman(),
         admin_cli_factory=lambda env: FakeAdminCli(env),
         hub_client=FakeHubClient(),
-        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        mcp_rest_factory=lambda url: (
+            _LeaderIdentityProbe(leader) if url == cfg.leader_mcp_url else FakeMcpRest()
+        ),
         sleep_fn=lambda _seconds: None,
         run_cmd=run_cmd,
     )
@@ -460,7 +480,9 @@ def test_orchestrator_run_m1_reuses_existing_org_membership(tmp_path, monkeypatc
         procman=FakeProcman(),
         admin_cli_factory=lambda env: FakeAdminCli(env),
         hub_client=FakeHubClient(),
-        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        mcp_rest_factory=lambda url: (
+            _LeaderIdentityProbe(leader) if url == cfg.leader_mcp_url else FakeMcpRest()
+        ),
         sleep_fn=lambda _seconds: None,
         run_cmd=run_cmd,
     )
@@ -1003,7 +1025,9 @@ def test_orchestrator_run_m1_awaits_leader_membership_before_seed_keywords(
         procman=FakeProcman(),
         admin_cli_factory=lambda env: FakeAdminCli(env),
         hub_client=FakeHubClient(),
-        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        mcp_rest_factory=lambda url: (
+            _LeaderIdentityProbe(leader) if url == cfg.leader_mcp_url else FakeMcpRest()
+        ),
         sleep_fn=lambda _seconds: None,
         run_cmd=run_cmd,
     )
@@ -1100,7 +1124,9 @@ def test_orchestrator_run_m1_raises_when_leader_membership_never_confirms(
         procman=FakeProcman(),
         admin_cli_factory=lambda env: FakeAdminCli(env),
         hub_client=FakeHubClient(),
-        mcp_rest_factory=lambda _url: FakeMcpRest(),
+        mcp_rest_factory=lambda url: (
+            _LeaderIdentityProbe(leader) if url == cfg.leader_mcp_url else FakeMcpRest()
+        ),
         sleep_fn=lambda _seconds: None,
         run_cmd=run_cmd,
     )
@@ -1111,3 +1137,111 @@ def test_orchestrator_run_m1_raises_when_leader_membership_never_confirms(
     # No keyword seeding happened before the leader membership failure.
     assert all(not c.startswith("add_keyword:") for c in calls)
     assert calls == []
+
+
+def test_lifecycle_config_defaults_leader_mcp_to_the_seed_derived_bench_clone(monkeypatch) -> None:
+    """The default MUST be :4550, never the real host wevibe-mcp on :4450.
+
+    :4450 has no seed support and always loads the interactive keychain
+    identity, so defaulting there mints every fresh org under the wrong leader.
+    """
+    monkeypatch.delenv("WEVIBE_BENCH_LEADER_MCP_URL", raising=False)
+
+    cfg = LifecycleConfig()
+
+    assert cfg.leader_mcp_url == "http://127.0.0.1:4550"
+    assert "4450" not in cfg.leader_mcp_url
+
+
+def _guard_orchestrator(leader: Identity, mcp_rest_factory: Any, monkeypatch, tmp_path) -> Any:
+    contributor = Identity.from_hex("22" * 32)
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_SEED_HEX", leader.seed_hex)
+    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_SEED_HEX", contributor.seed_hex)
+    monkeypatch.setenv("WEVIBE_BENCH_LEADER_KEYSTORE", str(tmp_path / "leader-keystore"))
+    cfg = LifecycleConfig(
+        leader_mcp_url="http://127.0.0.1:4550",
+        contributor_mcp_url="http://127.0.0.1:4551",
+        session_token_path="~/test-session-token",
+        leader_signer_dir="/opt/leader-signer",
+    )
+    logger, _ = _capture_logger("test.lifecycle.orchestrator.identity-guard")
+
+    class FakeHubClient:
+        def member_orgs(self, identity: Identity) -> Any:
+            return []
+
+    def run_cmd(*args, **kwargs):
+        raise AssertionError("register-org must not run when the identity guard fails")
+
+    return LifecycleOrchestrator(
+        cfg=cfg,
+        wevibe_root="/workspace",
+        leader=leader,
+        contributor=contributor,
+        leader_keystore="/tmp/leader.ks",
+        contributor_keystore="/tmp/contrib.ks",
+        leader_wallet="wallet-1",
+        logger=logger,
+        procman=object(),
+        hub_client=FakeHubClient(),
+        mcp_rest_factory=mcp_rest_factory,
+        sleep_fn=lambda _seconds: None,
+        run_cmd=run_cmd,
+    )
+
+
+def test_create_org_refuses_when_org_setup_mcp_serves_a_different_identity(
+    tmp_path, monkeypatch
+) -> None:
+    """A foreign-identity MCP must abort BEFORE register-org.
+
+    Otherwise the org is minted under that MCP's pubkey and the defect only
+    surfaces 30s later as an unrelated-looking membership-poll timeout.
+    """
+    leader = Identity.from_hex("11" * 32)
+    foreign = Identity.from_hex("99" * 32)
+
+    class ForeignMcp:
+        def identity_pubkeys(self) -> dict[str, str]:
+            return {"ed25519": foreign.ed_pubkey_hex}
+
+    orchestrator = _guard_orchestrator(leader, lambda _url: ForeignMcp(), monkeypatch, tmp_path)
+
+    with pytest.raises(RuntimeError, match="does not match the harness leader"):
+        orchestrator.create_org()
+
+
+def test_create_org_refuses_when_org_setup_mcp_identity_is_unreachable(
+    tmp_path, monkeypatch
+) -> None:
+    """Unreachable is a hard failure, not a skip (RUNBOOK §6 VOID-INSTRUMENT)."""
+    leader = Identity.from_hex("11" * 32)
+
+    class UnreachableMcp:
+        def identity_pubkeys(self) -> dict[str, str]:
+            raise ConnectionError("connection refused")
+
+    orchestrator = _guard_orchestrator(leader, lambda _url: UnreachableMcp(), monkeypatch, tmp_path)
+
+    with pytest.raises(RuntimeError, match="identity probe failed"):
+        orchestrator.create_org()
+
+
+def test_create_org_probes_the_leader_mcp_url_and_proceeds_on_identity_match(
+    tmp_path, monkeypatch
+) -> None:
+    """The guard probes leader_mcp_url specifically, and passes on a match."""
+    leader = Identity.from_hex("11" * 32)
+    probed: list[str] = []
+
+    def mcp_rest_factory(url: str) -> Any:
+        probed.append(url)
+        return _LeaderIdentityProbe(leader)
+
+    orchestrator = _guard_orchestrator(leader, mcp_rest_factory, monkeypatch, tmp_path)
+
+    # run_cmd asserts if reached, so getting past the guard is the pass signal.
+    with pytest.raises(AssertionError, match="register-org must not run"):
+        orchestrator.create_org()
+
+    assert probed == ["http://127.0.0.1:4550"]

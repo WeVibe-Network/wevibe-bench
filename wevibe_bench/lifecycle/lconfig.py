@@ -61,9 +61,17 @@ class LifecycleConfig:
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_HUB_URL")
         or "http://127.0.0.1:4440"
     )
+    # The bench leader MCP is the Option-C bench clone on :4550 — the ONLY MCP
+    # whose identity is seed-derived (WEVIBE_IDENTITY_SEED_HEX) and therefore
+    # equal to the harness leader. NEVER default this to :4450: that is the real
+    # host wevibe-mcp, which has no seed support at all and always loads the
+    # interactive keychain identity. `create_org` hands this URL to leader-signer
+    # as WEVIBE_MCP_URL, and /v1/org-setup stamps THAT MCP's pubkey as the org's
+    # leader — so a :4450 default silently mints every fresh org under the wrong
+    # identity, and the harness then never confirms its own membership.
     leader_mcp_url: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_MCP_URL")
-        or "http://127.0.0.1:4450"
+        or "http://127.0.0.1:4550"
     )
     contributor_mcp_url: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_MCP_URL")

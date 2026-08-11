@@ -1,5 +1,5 @@
 # RUNBOOK.md — the operative run card
-**Version:** 7 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v6 (2026-08-07) · **Amended:** 2026-08-10 (WO-MODEL-FLAG): §0/§2 `--model` subject selection + CLI syntax correction (main-parser flags precede the subcommand) · §1/RC-7 operator-selects-model amendment · §6 reasoning posture rewritten self-explanatory — frozen at MAX, with the defensible-claim reasoning · **Amended:** 2026-08-11 (WO-NO-SMOKE, Walter): **all smoke stages removed** — a smoke requires a full session + extraction + approval to prove recall, which can only be done by running a session in full, so a standalone smoke proves nothing and has never worked; delivery is verified **in-band** by the first OFF cell + extraction + the first ON cell's injection-seam values (§2, §6)
+**Version:** 7 · **Authored:** 2026-08-05 · **Status:** OPERATIVE · **Supersedes:** v6 (2026-08-07) · **Amended:** 2026-08-10 (WO-MODEL-FLAG): §0/§2 `--model` subject selection + CLI syntax correction (main-parser flags precede the subcommand) · §1/RC-7 operator-selects-model amendment · §6 reasoning posture rewritten self-explanatory — frozen at MAX, with the defensible-claim reasoning · **Amended:** 2026-08-11 (WO-NO-SMOKE, Walter): **all smoke stages removed** — a smoke requires a full session + extraction + approval to prove recall, which can only be done by running a session in full, so a standalone smoke proves nothing and has never worked; delivery is verified **in-band** by the first OFF cell + extraction + the first ON cell's injection-seam values (§2, §6) · **Amended:** 2026-08-11 (WO-DATA-CENTRAL): new §7 `data/` telemetry sink + 7-day retention (`cleanup_data.py`) — a retention layer, never a source of truth
 
 > **This is the only operative document. Read it and nothing else to operate the benchmark.**
 > Every other document in this repository is history with no authority over what runs. Their binding
@@ -35,7 +35,8 @@ Everything an operator needs to launch a run. Rationale and rules live in the se
 ```bash
 # 1. Preflight — all three must succeed (§7 for bring-up if any fail):
 nc -z 127.0.0.1 4545   # local relay (session + extraction models)
-nc -z 127.0.0.1 4460   # leader clone MCP
+nc -z 127.0.0.1 4550   # leader clone MCP (identity f7733d6e)
+nc -z 127.0.0.1 4451   # contributor clone MCP (identity 5292550d)
 nc -z 127.0.0.1 4440   # hub
 
 # 2. Worker image — rebuild ONLY when docker/worker/ changed since the last build
@@ -51,9 +52,13 @@ docker build -t wevibe-bench-worker:v1 docker/worker
 #    step). Flags before the subcommand are main-parser flags — argparse
 #    rejects them after `run` (verified 2026-08-10: exit 2).
 #    Omit --model and the run uses the neutral auto-resident slug.
-nohup .venv/bin/python scripts/run_cumulative.py --model qwen3.6-35b-a3b-bench \
-  run --until-review --mode off \
-  > runs/off-cell-$(date +%Y%m%dT%H%M%S).log 2>&1 &
+TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
+  --model qwen3.6-35b-a3b-bench run --until-review --mode off \
+  < /dev/null > "runs/off-cell-$TS.log" 2>&1 & disown
+#    `< /dev/null` is MANDATORY: without it zsh suspends the job the instant the
+#    process touches stdin ("suspended (tty input)"), leaving a half-built
+#    manifest and a live container behind. Set TS in the SAME command as the
+#    launch — a separately-pasted $TS is empty in the next command.
 
 # 3a. Model switch mid-campaign: --model changes the roster hash, so the
 #     existing manifest rejects the run ("roster hash drift detected").
@@ -222,7 +227,8 @@ with exit 2 (verified 2026-08-10).
   established `run_m1`/create-org path (seeds keywords + org profile — exactly what the preflight
   gate checks), reusing an existing org as specified or creating an absent one. **No separate manual
   `bootstrap_org_m1.py` run is required before a run.** The leader MCP endpoint comes from
-  `WEVIBE_BENCH_LEADER_MCP_URL` (the run's existing source; live leader clone :4460). Hub :4440.
+  `WEVIBE_BENCH_LEADER_MCP_URL` (the run's existing source; live leader clone **:4550**, NOT :4450 —
+  see §7 "Known failure: org bootstrap"). Hub :4440.
 - The chain assigns fresh-mint org ids. When `--org` names an absent org on a fresh stack, the run
   proceeds with the chain-assigned id returned by creation, reported in the run log as
   `run_cumulative.org_ensured`.
@@ -586,6 +592,14 @@ different health paths and different auth**.
 |---|---|---|---|---|
 | **Hub** | Docker container `wevibe-hub` — the ONE hub, normally already running | `127.0.0.1:4440` | `GET /health` | none |
 | **MCP recall client** | `wevibe-mcp` process, or the bench clone | `127.0.0.1:4450`, clone `:4550` | `GET /v1/health` | bearer token |
+| **Bench leader clone** | managed service — seed-derived identity `f7733d6e` | `127.0.0.1:4550` | `GET /v1/health` (401 = up) | bearer token |
+| **Bench contributor clone** | managed service — seed-derived identity `5292550d` | `127.0.0.1:4451` | `GET /v1/health` (401 = up) | bearer token |
+
+**BOTH bench clones are managed services started by `make redeploy`** (`bench-clone.sh start
+leader|contributor`). The harness CONNECTS to them; it never spawns them — the cumulative run path
+never calls `bring_up()`. `:4450` is the operator's daily-driver host MCP and is **never** part of
+the bench identity path; pointing any bench component at it mints orgs under the operator's keychain
+identity (§7 Cause B).
 
 - **The hub is a container, not a host process.** `ps`/`lsof` finding nothing is **normal** and is
   not evidence the hub is down. Check `GET :4440/health`.
@@ -634,35 +648,114 @@ config while keeping test-mode auto-approve. That is the clean way; changing the
 - Egress is **not** domain-allowlisted — the worker retains general outbound network access. This is
   a known, accepted residual, not an oversight to rediscover.
 
-### Known failure signature — run_m1 leader-membership race
+### Known failure signature — org bootstrap (TWO distinct causes, same symptom)
 
-**Symptom.** A fresh post-wipe first OFF cell fails `run_m1` bootstrap in ~8s with a hub HTTP 403 at
+> **READ BOTH CAUSES BEFORE DEBUGGING.** A fresh-stack org-bootstrap failure has had two entirely
+> separate root causes. Cause A was fixed 2026-08-07; Cause B was fixed 2026-08-11. They present
+> almost identically, and the earlier text here — which said "do NOT re-investigate an identity
+> mismatch … do not re-open this" — actively delayed the Cause-B diagnosis by a full day. That
+> instruction was correct **only** for the narrow claim it disproved (see Cause A) and is NOT a
+> general ban on identity investigation. Full incident record:
+> `wevibe-meta/workspace/reports/1786461718-WO-ORG-BOOTSTRAP-IDENTITY.md`.
+
+#### Cause A — leader-membership sequencing race (FIXED 2026-08-07, commit `e2b4562`)
+
+**Symptom.** Fresh post-wipe first OFF cell fails `run_m1` bootstrap in ~8s with a hub HTTP 403 at
 `seed_keywords`: `{"error":"not a member of this org"}`, arriving ~3ms after `create_org`.
 
-**True root cause (not an identity problem).** A leader-membership sequencing gap in `run_m1`:
-`seed_keywords` fired immediately after `create_org`, with no confirmation that the leader's
-`members.active=true` row existed. The seeded route `POST /v1/orgs/{org}/keywords` is gated by
+**Root cause.** `seed_keywords` fired immediately after `create_org` with no confirmation that the
+leader's `members.active=true` row existed. The route `POST /v1/orgs/{org}/keywords` is gated by
 `RequireVerifiedMembership` (wevibe-server/wevibe-hub/internal/auth/middleware.go:38, 403 at line 62,
-`members.active=true` existence check at lines 55-62). The only membership poll ran for the
-*contributor*, after seeding; the pre-fix code had `create_org`→`seed_keywords` with no poll between
-them.
+existence check at lines 55-62). The only membership poll ran for the *contributor*, after seeding.
 
-**Explicit correction — do NOT re-investigate an identity mismatch.** The initial hypothesis blamed a
-keystore-derived clone identity differing from the seed-derived leader after a wipe. Disproven: the
-clone identity is ENV-derived — `WEVIBE_IDENTITY_SEED_HEX` is injected on both launch paths
-(mcp_process.py:193 harness MCP spawn; preflight.py:54 clone start), both sourced from the same
-`WEVIBE_BENCH_LEADER_SEED_HEX`, and the clone's keystore is only a fallback when the env var is
-absent (scaffold/wevibe-mcp-clone/src/key-store.ts env-first). A wipe regenerating the keystore
-does NOT change the clone identity (seed fp `f534aa02`). Do not re-open this.
+**Narrow disproven hypothesis (still disproven).** That the clone's *keystore-derived* identity
+differs from the seed-derived leader after a wipe. It does not: `WEVIBE_IDENTITY_SEED_HEX` is
+injected on both launch paths (mcp_process.py:193; preflight.py:54), both from
+`WEVIBE_BENCH_LEADER_SEED_HEX`, and the clone keystore is only a fallback when that env var is
+absent. A wipe regenerating the keystore does NOT change the clone identity. **This disproves one
+specific mechanism — it does NOT mean "identity can never be the problem" (see Cause B).**
 
-**Fix (resolved, not an open defect).** Commit `e2b4562` added `poll_leader_membership` between
-`create_org` and `seed_keywords` in `run_m1` (orchestrator.py:622-628), raising a loud
-`RuntimeError("leader membership did not include org_id=...")` before seeding when the leader's
-membership is unconfirmed, plus two regression tests. A silent 403 is now an early, diagnosable
-failure.
+**Fix.** `poll_leader_membership` between `create_org` and `seed_keywords` (orchestrator.py), raising
+`RuntimeError("leader membership did not include org_id=...")` before seeding, plus regression tests.
+A silent 403 became an early, diagnosable failure. **It fixed the symptom's timing, not any identity
+source** — which is exactly why Cause B could still occur and surface through this same message.
 
-**Value.** The next benchmark start recognizes this signature by name and proceeds to the known fix
-instead of re-deriving it.
+#### Cause B — the org was minted under the WRONG MCP's identity (FIXED 2026-08-11)
+
+**Symptom.** `RuntimeError: leader membership did not include org_id=wevibe-org-0` — the Cause-A
+guard firing, ~30 s after `create_org` returned ok. Often preceded by an **unexpected Touch ID
+prompt**.
+
+**Root cause.** `lconfig.py` defaulted `leader_mcp_url` to `:4450` — the **real host wevibe-mcp**,
+which has no seed support and always loads the operator's biometric keychain identity `05c4b8cb…`.
+`create_org` hands that URL to leader-signer as `WEVIBE_MCP_URL`; `POST /v1/org-setup` stamps *that
+MCP's* pubkey as the org leader; the hub writes it as the org's only `members` row. The harness then
+polls for its own membership (`8d46fc08…`, pubkey fp `f7733d6e`) and never finds it.
+
+**Why it hid for weeks.** Every earlier run took the `reuse` path (`phase=reuse`,
+`tx_hash=reuse-existing`) and never called org-setup. The first true fresh-create after a genuine
+wipe triggered it — and the Touch ID prompt appearing "randomly" was the same defect, not a separate
+annoyance.
+
+**Vocabulary trap that misled the earlier diagnosis:** `f534aa02` is `fp(seed_bytes)` and `f7733d6e`
+is `fp(ed_pubkey_bytes)` — **the same leader identity, two different hashed inputs.** Seeing an
+unfamiliar fingerprint does not by itself indicate a different identity. Always state which input a
+fingerprint hashes.
+
+**Fix.** Default is now `:4550` (the seed-derived bench leader clone), plus a fail-fast guard in
+`create_org` that probes `GET /v1/identity/pubkeys` and refuses to register unless the org-setup
+MCP's ed25519 key IS the harness leader's. Unreachable is also a hard failure — a run on an
+unverified seam is VOID-INSTRUMENT (§6).
+
+**Healthy bootstrap looks exactly like this:**
+
+```
+phase=org_setup_mcp_identity_verified mcp_url=http://127.0.0.1:4550 leader_ed_fp=f7733d6e status=ok
+step=create_org status=ok
+step=poll_leader_membership status=ok dur_ms=7
+step=contributor_pubkeys status=ok dur_ms=2
+```
+
+#### Cause C — contributor MCP `:4451` not running (FIXED 2026-08-11)
+
+**Symptom.** `step=contributor_pubkeys err=mcp unreachable for /v1/identity/pubkeys`.
+
+**Root cause.** The cumulative run path **never calls `bring_up()`** — it only connects to MCPs it
+assumes are running. Only `:4550` was a managed service; `:4451` was started by hand. The campaign
+had been silently relying on an **Aug-7 orphan process** that survived every wipe and predated the
+clone dist by days.
+
+**Fix.** `bench-clone.sh` takes a role (`leader`|`contributor`), `make redeploy` starts both, and
+verify-clean checks 11/12 assert BOTH clones' identity fingerprints (`f7733d6e` / `5292550d`).
+`config/bench.env` exports `WEVIBE_IDENTITY_SEED_HEX` globally as the **leader** seed, so the
+contributor start MUST override it per-role or `:4451` silently serves the leader's identity.
+
+**Value.** The next benchmark start recognizes these signatures by name and proceeds to the known
+fix instead of re-deriving it. **Liveness is not identity** — a process being up, a port answering,
+and health returning 200 proved nothing in either Cause B or C.
+
+### data/ — centralized telemetry sink and retention layer
+
+**The problem it solves.** The plugin's observable recall surface (funnel snapshot + plugin error log)
+is container-side under `~/.wevibe` and is destroyed at teardown today. OFF-arm cells strip the plugin
+recall substrate entirely (no org marker, no MCP/hub env, no state mount), so the four diagnostic
+questions (distinct failureKeys, repeats, registry survival across compactions, recall round-trip
+latency) are unanswerable from OFF runs — and even ON-cell telemetry is lost when the container dies.
+
+**Intended propagation contract (dir built for it; export wiring NOT yet implemented).** At cell end
+the harness exports `~/.wevibe`'s `funnel-snapshot.json` + `wevibe-plugin-errors.log` (plus the
+worker-logs capture) host-side into `data/cells/<unix_ts>-<run_label>/`; extraction jobs land under
+`data/extract/<unix_ts>-<job_id>/`. The dir + retention exist; the cell-end export is the next harness
+change.
+
+**`data/` is a TELEMETRY/RETENTION layer, never a source of truth.** RC-5's manifest + status stream
+under `runs/` stay authoritative. `data/` never duplicates or competes with `runs/` content.
+
+**Retention: exactly 7 days** on `data/cells/` and `data/extract/` entries; enforced by
+`scripts/cleanup_data.py` (run fail-open at the start of each run via `_handle_run`;
+`WEVIBE_BENCH_SKIP_CLEANUP=1` disables). It deletes only under `data/cells/` and `data/extract/`; it
+never touches `runs/`. The 7-day window exceeds a full OFF+ON pair, so no scored cell's telemetry is
+aged out mid-campaign.
 
 ---
 

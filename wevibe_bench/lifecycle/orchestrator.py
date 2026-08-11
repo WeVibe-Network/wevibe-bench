@@ -312,11 +312,82 @@ class LifecycleOrchestrator:
         )
         return leader_instance, contributor_instance
 
+    @staticmethod
+    def _pubkey_fp(value: str) -> str:
+        """Fingerprint a pubkey the way the MCP's logger.fp() does.
+
+        Hex-like input is decoded before hashing so Python-side and TS-side
+        fingerprints of the same key agree; anything else is hashed as text.
+        Never raises — this feeds error messages, and a fingerprint helper that
+        throws would mask the very mismatch it is meant to report.
+        """
+        try:
+            return fp(bytes.fromhex(value))
+        except ValueError:
+            return fp(value)
+
+    def _assert_org_setup_mcp_identity(self, trace: str) -> None:
+        """Fail closed unless the org-setup MCP IS the harness leader.
+
+        `create_org` hands `leader_mcp_url` to leader-signer, whose
+        `POST /v1/org-setup` stamps THAT MCP's pubkey as the org's leader, and
+        the hub writes it as the org's sole `members` row. Point it at an MCP
+        with a different identity (the real host wevibe-mcp on :4450 loads the
+        interactive keychain identity and has no seed support) and every fresh
+        org is minted under the wrong leader — the harness then never confirms
+        its own membership, 30s later, as an unrelated-looking poll timeout.
+
+        Unreachable is a failure, not a skip: a run launched on an unverified
+        seam is VOID-INSTRUMENT by construction (RUNBOOK §6).
+        """
+        expected = self._leader.ed_pubkey_hex
+        client = self._mcp_rest_factory(self._cfg.leader_mcp_url)
+        try:
+            payload = client.identity_pubkeys()
+        except Exception as exc:
+            raise RuntimeError(
+                "org-setup MCP identity probe failed for "
+                f"{self._cfg.leader_mcp_url} ({exc}); refusing to register an org "
+                "against an unverified identity. Expected the seed-derived bench "
+                f"leader clone (ed25519 fp {self._pubkey_fp(expected)})."
+            ) from exc
+
+        served = payload.get("ed25519")
+        if not isinstance(served, str) or not served:
+            raise RuntimeError(
+                f"org-setup MCP {self._cfg.leader_mcp_url} returned no ed25519 pubkey: {payload}"
+            )
+
+        if served.lower() != expected.lower():
+            raise RuntimeError(
+                "org-setup MCP identity does not match the harness leader: "
+                f"mcp={self._cfg.leader_mcp_url} "
+                f"mcp_ed_fp={self._pubkey_fp(served)} "
+                f"harness_leader_ed_fp={self._pubkey_fp(expected)}. "
+                "Registering would mint the org under the WRONG leader and the "
+                "membership poll would then time out. Point "
+                "WEVIBE_BENCH_LEADER_MCP_URL at the seed-derived bench leader "
+                "clone (:4550) — never the real host wevibe-mcp (:4450)."
+            )
+
+        self._log(
+            "info",
+            "lifecycle.orchestrator.create_org",
+            trace,
+            "ok",
+            0,
+            phase="org_setup_mcp_identity_verified",
+            mcp_url=self._cfg.leader_mcp_url,
+            leader_ed_fp=self._pubkey_fp(expected),
+        )
+
     def create_org(self) -> str:
         trace = new_trace_id()
         t0 = time.perf_counter_ns()
         self._log("info", "lifecycle.orchestrator.create_org", trace, "ok", 0, phase="start")
         owned = self._resolve_owned_org()
+
+        self._assert_org_setup_mcp_identity(trace)
 
         signer_dir = os.path.expanduser(self._cfg.leader_signer_dir)
         signer_cli = os.path.join(signer_dir, "dist", "cli.js")
