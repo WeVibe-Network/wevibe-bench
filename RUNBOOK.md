@@ -213,6 +213,16 @@ has run, so the bar is correctly placed at the first cell, not at "ever."
 re-baselining. That is a deliberate, declared act — never a casual re-wipe, never a "let's try it".
 A re-baseline wipes the corpus and so is a walk-back (rule 18) — declared, never hidden.
 
+**A failed cell needs an ARCHIVE, not a wipe (2026-08-11).** When a cell dies (`harness_error`, void
+instrument, an aborted launch), the manifest still pins that cell's `sequence_index`, and
+`build_off_order` emits exactly one OFF slot per roster entry — so a one-model roster has no second
+OFF slot to run. The correct move is the §0 step 3a archive, which costs nothing measurable:
+`mv runs/cumulative runs/cumulative.<why>-<date>`. **This is NOT a wipe and does not touch the server
+corpus**; the wipe rules above still govern that. Do not reach for a wipe because a cell failed —
+check whether the corpus is actually non-empty first (`memory_standing`, `extracted_sessions`,
+`pending_submissions` in `wevibe_hub`). A cell that died before extraction committed anything leaves
+the corpus empty, so a wipe would destroy nothing AND still be barred.
+
 **BENCH `MODE=on|off`** — one cell. See §3.
 
 **`--org`** — a first-class input to the run command, with mode-dependent requirement.
@@ -962,6 +972,7 @@ Fixed defects are not listed. They are in git.
 | **D-KV-PEAK-UNKNOWN** | 🟢 CURIOSITY | Peak resident footprint at full context is unknown. Not a threat given headroom. | nothing |
 | **D-EMISSIONS-INERT-KEEPERS** | 🟡 OPEN | The emissions module carries an injected serve keeper and reputation keeper (`wevibe-chain/x/emissions/types/expected_keepers.go`, wired at `keeper/keeper.go:35-47`) whose methods are never invoked outside tests — inert today, and exactly the seam an accidental change would activate. Serve credit touches no economics: emissions qualify contributors on approvals only (`x/emissions/keeper/keeper.go:233`). Recorded 2026-08-07 (WO-CANON-1); cross-posted to RECALL-PIVOT-SPEC §8.7 F5. | nothing today — silent-economics drift if activated unnoticed |
 | **D-INTEGRATION-SUITE-QUARANTINE** | 🟡 OPEN — post-campaign | The wevibe-meta integration suite is scoped out of the pre-campaign TEST stage (§2): it POSTs `/v1/test/reset`, a route the hub build does not register (`cmd/wevibe-hub/main.go:390-397` vs `wevibe-meta/tests/lib/hub-client.ts:95`), and its mutating e2e tests would write orgs and memories to the live campaign hub and chain — the same hazard class as a second wipe. The reset route must not be registered to accommodate it. Restored behind a guard after the campaign (Walter, 2026-08-07). | nothing while quarantined — pre-campaign TEST is the bench pytest suite |
+| **D-SERVE-MESSAGE-500** | 🟡 OPEN — intermittent, cell-voiding | `GET /session/{id}/message` on the worker serve intermittently returns **HTTP 500**, which the serve-drive path reports as `status=metrics_error` and meters as `turns=0`; the phase is then correctly declared `harness_error` rather than gating a half-written worktree. Root cause is inside opencode, not the harness: `EffectDrizzleQueryError: Failed query: select … from "part" where "message_id" in (?×36)` (worker `opencode.log`, 2026-08-11T21:46:57Z). Observed ONCE, on the 14:35 cell at the chunk-1→2 boundary; the 14:55 cell cleared the same boundary with `turns=32`, so it is **intermittent, not a structural chunk-2 defect**. A TUI attach hits the same endpoint and was in flight at the failure — **contribution neither established nor excluded**. Until characterised, prefer the dashboard over attaching to a live cell. | any cell, intermittently — voids the cell loudly, never silently |
 | **D-RECALL-SELECTION-BIAS** | 🟡 OPEN — known, stated limitation | Recall fires only after a repeat — the second failure under the same stable `failureKey` while still red — so every serve is conditioned on an already-hard problem. Standing therefore measures **"works on stuck problems," not "works."** Defensible, and arguably the population that matters, but a further departure from the sim's uniform-serving assumption (recorded 2026-08-08, WO-RT-O6; claim and limit travel together — the §1/BENCHMARK-DIARY §2.4 dual-carriage principle). | every standing/recall conclusion — disclosed, not blocking |
 
 **Memory is not a constraint — CLOSED, do not re-investigate.** Zero swap, ~211 GB wired headroom.

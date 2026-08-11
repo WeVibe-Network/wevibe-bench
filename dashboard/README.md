@@ -158,7 +158,13 @@ Written to be run by anyone, out of the box, without wrecking their machine:
   TCP. Handing a read-only dashboard control of the host docker daemon in order
   to read four tables is an absurd trade, so it isn't made.
 - **Host-only port by default.** `WEVIBE_BIND_HOST=0.0.0.0` to expose on the
-  LAN — a deliberate act.
+  LAN — a deliberate act. That reaches your local network only: an RFC1918
+  address is not routable from the internet, so it exposes nothing outward
+  unless you separately add a router port-forward. Verified surface when
+  exposed: `POST → 405`, traversal → `404`, non-allowlisted file → `404`,
+  `touch /bench/…` → `Read-only file system`, container `uid=1000(node)`.
+  Anyone already on the LAN can read gate ids, token counts and run metadata —
+  no plaintext, no keys.
 - **Tail-bounded reads** (256KB). A six-hour log costs the same as a fresh one.
 - **Fixed static allowlist** — no dynamic path resolution, so traversal is
   impossible by construction.

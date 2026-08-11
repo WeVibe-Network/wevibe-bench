@@ -236,10 +236,49 @@ Attach:
 
 ```bash
 opencode attach http://127.0.0.1:4096 --session <ses_...>
+opencode attach http://127.0.0.1:4096 -c            # or: continue the last session
 ```
 
 **`--session` is not optional.** Without it the TUI opens its own new-session view
-instead of the live worker session (`serve_client.py:600-608`).
+instead of the live worker session (`serve_client.py:600-608`). `-s` is the short
+form and `-c` continues the last session — there is only ever one session on
+`:4096`, so `-c` is the typo-proof route.
+
+**The session id cannot be chosen.** `POST /session` accepts `{ parentID?, title? }`
+only; the id is server-generated (`serve_client.py:381-388`). A mistyped id fails with
+"session no longer exists" — that message means the id is wrong, NOT that the run died.
+Check the run is alive separately: `ps aux | grep run_cumulative` and
+`docker ps --filter name=wevibe-bench-cell`.
+
+**Attaching to a LIVE cell carries a risk (D-SERVE-MESSAGE-500).** The TUI reads
+`GET /session/{id}/message` — the same endpoint whose intermittent HTTP 500 voided the
+14:35 cell on 2026-08-11. Contribution is neither established nor excluded. **Prefer the
+dashboard** (below): it is read-only, never touches the serve, and shows the same
+progress.
+
+### The dashboard — the safe way to watch
+
+```bash
+cd wevibe-bench/dashboard && docker compose up -d      # → http://localhost:7717
+```
+
+Read-only over run artifacts. It never talks to the worker serve or any MCP, so it
+cannot perturb a cell.
+
+**Watching from a phone/tablet on your LAN:**
+
+```bash
+WEVIBE_BIND_HOST=0.0.0.0 docker compose up -d
+ipconfig getifaddr en0      # → e.g. 192.168.50.140, then open http://<that>:7717
+```
+
+This exposes the board **to your local network only** — an RFC1918 address is not
+routable from the internet, so this does not expose anything to outside traffic unless
+you separately add a router port-forward for 7717. The surface is GET-only (`POST` →
+`405`), a fixed static allowlist (no path traversal), the repo mount is `:ro`, the
+container runs non-root, and no docker socket is mounted. What anyone already on your
+Wi-Fi can then see: gate ids, token counts, run metadata — no memory plaintext and no
+keys (`hub-db` ships disabled). Revert with a plain `docker compose up -d`.
 
 ### Confirm the org bootstrap cleared
 
