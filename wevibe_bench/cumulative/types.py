@@ -34,8 +34,6 @@ ON_ONLY_TELEMETRY_SEAMS: frozenset[str] = frozenset(
         "injected_block_chars",
         "injected_block_est_tokens",
         "recall_fired_total",
-        "recall_fired_user_message",
-        "recall_fired_tool_failure",
         "recall_returned_total",
         "recall_returned_count_sum",
         "no_keywords_count",
@@ -285,8 +283,6 @@ class ProgressVector:
     injected_block_chars: int | None = None
     injected_block_est_tokens: int | None = None
     recall_fired_total: int | None = None
-    recall_fired_user_message: int | None = None
-    recall_fired_tool_failure: int | None = None
     recall_returned_total: int | None = None
     recall_returned_count_sum: int | None = None
     no_keywords_count: int | None = None
@@ -335,8 +331,6 @@ class ProgressVector:
                 "injected_block_chars": self.injected_block_chars,
                 "injected_block_est_tokens": self.injected_block_est_tokens,
                 "recall_fired_total": self.recall_fired_total,
-                "recall_fired_user_message": self.recall_fired_user_message,
-                "recall_fired_tool_failure": self.recall_fired_tool_failure,
                 "recall_returned_total": self.recall_returned_total,
                 "recall_returned_count_sum": self.recall_returned_count_sum,
                 "no_keywords_count": self.no_keywords_count,
@@ -375,8 +369,6 @@ class ProgressVector:
                 "injected_block_chars": self.injected_block_chars,
                 "injected_block_est_tokens": self.injected_block_est_tokens,
                 "recall_fired_total": self.recall_fired_total,
-                "recall_fired_user_message": self.recall_fired_user_message,
-                "recall_fired_tool_failure": self.recall_fired_tool_failure,
                 "recall_returned_total": self.recall_returned_total,
                 "recall_returned_count_sum": self.recall_returned_count_sum,
                 "no_keywords_count": self.no_keywords_count,
@@ -415,8 +407,6 @@ class ProgressVector:
             "injected_block_chars": self.injected_block_chars,
             "injected_block_est_tokens": self.injected_block_est_tokens,
             "recall_fired_total": self.recall_fired_total,
-            "recall_fired_user_message": self.recall_fired_user_message,
-            "recall_fired_tool_failure": self.recall_fired_tool_failure,
             "recall_returned_total": self.recall_returned_total,
             "recall_returned_count_sum": self.recall_returned_count_sum,
             "no_keywords_count": self.no_keywords_count,
@@ -469,8 +459,6 @@ class ProgressVector:
             injected_block_chars=_optional_int(d.get("injected_block_chars")),
             injected_block_est_tokens=_optional_int(d.get("injected_block_est_tokens")),
             recall_fired_total=_optional_int(d.get("recall_fired_total")),
-            recall_fired_user_message=_optional_int(d.get("recall_fired_user_message")),
-            recall_fired_tool_failure=_optional_int(d.get("recall_fired_tool_failure")),
             recall_returned_total=_optional_int(d.get("recall_returned_total")),
             recall_returned_count_sum=_optional_int(d.get("recall_returned_count_sum")),
             no_keywords_count=_optional_int(d.get("no_keywords_count")),

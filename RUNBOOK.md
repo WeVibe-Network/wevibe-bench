@@ -742,11 +742,14 @@ recall substrate entirely (no org marker, no MCP/hub env, no state mount), so th
 questions (distinct failureKeys, repeats, registry survival across compactions, recall round-trip
 latency) are unanswerable from OFF runs — and even ON-cell telemetry is lost when the container dies.
 
-**Intended propagation contract (dir built for it; export wiring NOT yet implemented).** At cell end
-the harness exports `~/.wevibe`'s `funnel-snapshot.json` + `wevibe-plugin-errors.log` (plus the
-worker-logs capture) host-side into `data/cells/<unix_ts>-<run_label>/`; extraction jobs land under
-`data/extract/<unix_ts>-<job_id>/`. The dir + retention exist; the cell-end export is the next harness
-change.
+**Propagation contract (LIVE).** At cell end the harness exports the worktree's
+`.wevibe/state/funnel-snapshot.json` + `.wevibe/logs/wevibe-plugin-errors.log` host-side into
+`data/cells/<unix_ts>-<run_label>/` (`_export_cell_telemetry`, `wevibe_bench/adapters/backgammon.py`).
+It runs for **BOTH arms** — an OFF cell is the baseline the ON arm is measured against, so exporting
+only on injection-record cells would rebuild the blind spot this sink exists to close. Fail-open by
+contract: a missing surface is a silent no-op and an unwritable sink is logged and swallowed, so
+telemetry export can never fail a scored cell. Extraction jobs land under
+`data/extract/<unix_ts>-<job_id>/` (extraction-side wiring still pending).
 
 **`data/` is a TELEMETRY/RETENTION layer, never a source of truth.** RC-5's manifest + status stream
 under `runs/` stay authoritative. `data/` never duplicates or competes with `runs/` content.

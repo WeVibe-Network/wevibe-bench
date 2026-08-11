@@ -304,8 +304,6 @@ def test_progress_vector_construction_does_not_report_late_populated_seams() -> 
         injected_block_chars=120,
         injected_block_est_tokens=30,
         recall_fired_total=2,
-        recall_fired_user_message=1,
-        recall_fired_tool_failure=1,
         recall_returned_total=2,
         recall_returned_count_sum=2,
         no_keywords_count=0,
@@ -335,8 +333,6 @@ def test_progress_vector_to_dict_reports_unresolved_late_on_seams() -> None:
         injected_block_chars=80,
         injected_block_est_tokens=20,
         recall_fired_total=1,
-        recall_fired_user_message=1,
-        recall_fired_tool_failure=0,
         recall_returned_total=1,
         recall_returned_count_sum=1,
         no_keywords_count=0,
@@ -707,8 +703,6 @@ def _make_backgammon_cell_result(**overrides: Any) -> BackgammonCellResult:
 def test_progress_from_cell_result_maps_all_recall_serve_telemetry_fields() -> None:
     result = _make_backgammon_cell_result(
         recall_fired_total=5,
-        recall_fired_user_message=2,
-        recall_fired_tool_failure=3,
         recall_returned_total=4,
         recall_returned_count_sum=9,
         no_keywords_count=1,
@@ -720,8 +714,6 @@ def test_progress_from_cell_result_maps_all_recall_serve_telemetry_fields() -> N
     progress = progress_from_cell_result(result)
 
     assert progress.recall_fired_total == 5
-    assert progress.recall_fired_user_message == 2
-    assert progress.recall_fired_tool_failure == 3
     assert progress.recall_returned_total == 4
     assert progress.recall_returned_count_sum == 9
     assert progress.no_keywords_count == 1
@@ -781,8 +773,6 @@ def test_progress_from_cell_result_coalesces_injected_count_result_then_cell() -
 def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_only() -> None:
     result = _make_backgammon_cell_result(
         recall_fired_total=None,
-        recall_fired_user_message=None,
-        recall_fired_tool_failure=None,
         recall_returned_total=None,
         recall_returned_count_sum=None,
         no_keywords_count=None,
@@ -795,8 +785,6 @@ def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_onl
     progress = progress_from_cell_result(result)
 
     assert progress.recall_fired_total is None
-    assert progress.recall_fired_user_message is None
-    assert progress.recall_fired_tool_failure is None
     assert progress.recall_returned_total is None
     assert progress.recall_returned_count_sum is None
     assert progress.no_keywords_count is None
@@ -806,8 +794,6 @@ def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_onl
     assert progress.served_confirmed is None
 
     assert "recall_fired_total" in progress.missing_telemetry_seams
-    assert "recall_fired_user_message" in progress.missing_telemetry_seams
-    assert "recall_fired_tool_failure" in progress.missing_telemetry_seams
     assert "recall_returned_total" in progress.missing_telemetry_seams
     assert "recall_returned_count_sum" in progress.missing_telemetry_seams
     assert "no_keywords_count" in progress.missing_telemetry_seams
@@ -827,8 +813,6 @@ def test_progress_from_cell_result_preserves_none_and_registers_funnel_seams_onl
 def test_progress_vector_round_trip_preserves_recall_funnel_fields() -> None:
     vector = ProgressVector(
         recall_fired_total=8,
-        recall_fired_user_message=5,
-        recall_fired_tool_failure=3,
         recall_returned_total=6,
         recall_returned_count_sum=12,
         no_keywords_count=2,
@@ -847,8 +831,6 @@ def test_progress_vector_round_trip_preserves_recall_funnel_fields() -> None:
 
     assert restored.to_dict() == payload
     assert restored.recall_fired_total == 8
-    assert restored.recall_fired_user_message == 5
-    assert restored.recall_fired_tool_failure == 3
     assert restored.recall_returned_total == 6
     assert restored.recall_returned_count_sum == 12
     assert restored.no_keywords_count == 2

@@ -8,6 +8,20 @@ and prevents serial tests from running under xdist parallelism.
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_telemetry_sink(tmp_path_factory, monkeypatch):
+    """Never let a test write into the REAL `data/` telemetry sink.
+
+    Cell-path tests exercise `_export_cell_telemetry`, which defaults to the
+    repo's `data/` dir. Without this, suite runs deposit fixture residue
+    (`sid=ses_delivery`, ...) into real campaign telemetry and the 7-day
+    retention reaper then treats it as run data. Redirect every test to a
+    per-session tmp sink.
+    """
+    sink = tmp_path_factory.mktemp("wevibe-bench-data-sink")
+    monkeypatch.setenv("WEVIBE_BENCH_DATA_DIR", str(sink))
+
+
 def pytest_report_header(config):
     """Print usage guidance on every test run."""
     lines = []

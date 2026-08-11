@@ -154,8 +154,6 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
     )
 
     recall_fired_total = _optional_int(_field(result, "recall_fired_total"))
-    recall_fired_user_message = _optional_int(_field(result, "recall_fired_user_message"))
-    recall_fired_tool_failure = _optional_int(_field(result, "recall_fired_tool_failure"))
     recall_returned_total = _optional_int(_field(result, "recall_returned_total"))
     recall_returned_count_sum = _optional_int(_field(result, "recall_returned_count_sum"))
     no_keywords_count = _optional_int(_field(result, "no_keywords_count"))
@@ -212,8 +210,6 @@ def progress_from_cell_result(result: Any, *, cell: Any | None = None) -> Progre
         injected_block_chars=_optional_int(_field(result, "injected_block_chars")),
         injected_block_est_tokens=_optional_int(_field(result, "injected_block_est_tokens")),
         recall_fired_total=recall_fired_total,
-        recall_fired_user_message=recall_fired_user_message,
-        recall_fired_tool_failure=recall_fired_tool_failure,
         recall_returned_total=recall_returned_total,
         recall_returned_count_sum=recall_returned_count_sum,
         no_keywords_count=no_keywords_count,

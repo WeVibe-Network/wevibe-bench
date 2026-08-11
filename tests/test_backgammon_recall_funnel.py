@@ -11,22 +11,43 @@ def _write_plugin_log(worktree: Path, contents: str) -> None:
     log_path.write_text(contents, encoding="utf-8")
 
 
-def test_scan_recall_funnel_counts_mixed_fire_triggers(tmp_path: Path) -> None:
+def test_scan_recall_funnel_counts_repeat_failure_fire_triggers(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
     _write_plugin_log(
         worktree,
-        "recall_fired trigger=user_message sid=s1\n"
-        "recall_fired trigger=tool_failure sid=s1\n"
-        "recall_fired trigger=tool_failure sid=s2\n",
+        "recall_fired trigger=repeat_failure sid=s1\n"
+        "recall_fired trigger=repeat_failure sid=s1\n"
+        "recall_fired trigger=repeat_failure sid=s2\n",
     )
 
     scan = _scan_recall_funnel(worktree)
 
     assert scan is not None
     assert scan.recall_fired_total == 3
-    assert scan.recall_fired_user_message == 1
-    assert scan.recall_fired_tool_failure == 2
+
+
+def test_scan_recall_funnel_ignores_retired_trigger_vocabulary(tmp_path: Path) -> None:
+    """Regression: the pre-WO-RT per-prompt trigger names are retired.
+
+    `RecallTrigger` (wevibe-opencode-plugin/plugins/wevibe-plugin.ts:109) is the single
+    value `repeat_failure`. The scanner previously matched ONLY `user_message|tool_failure`,
+    so `recall_fired_total` read 0 for every real fire — a silent T8 blind seam. These
+    retired names must never resurrect a count.
+    """
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True, exist_ok=True)
+    _write_plugin_log(
+        worktree,
+        "recall_fired trigger=user_message sid=s1\n"
+        "recall_fired trigger=tool_failure sid=s2\n",
+    )
+
+    scan = _scan_recall_funnel(worktree)
+
+    assert scan is not None
+    assert scan.recall_fired_total == 0
 
 
 def test_scan_recall_funnel_counts_returned_and_no_keywords(tmp_path: Path) -> None:
@@ -103,7 +124,7 @@ def test_scan_recall_funnel_parses_prefixed_physical_lines_same_as_bare(tmp_path
     bare_worktree.mkdir(parents=True, exist_ok=True)
     _write_plugin_log(
         bare_worktree,
-        "recall_fired trigger=user_message sid=s1\n"
+        "recall_fired trigger=repeat_failure sid=s1\n"
         "recall_returned status=200 count=1 reason_code=none dur_ms=9 error=none\n"
         "[inject] injected count=1 block_chars=600 block_tokens=150 top_k=3 sid=s1 newly_served=1 injected_once=1 budget_remaining=0 cadence=once\n"
         "[serve] upsert cid=cid-1 sid=s1\n",
@@ -113,7 +134,7 @@ def test_scan_recall_funnel_parses_prefixed_physical_lines_same_as_bare(tmp_path
     prefixed_worktree.mkdir(parents=True, exist_ok=True)
     _write_plugin_log(
         prefixed_worktree,
-        "2026-07-26T12:00:00Z [INFO] trace=1a2b3c4d recall_fired trigger=user_message sid=s1\n"
+        "2026-07-26T12:00:00Z [INFO] trace=1a2b3c4d recall_fired trigger=repeat_failure sid=s1\n"
         "2026-07-26T12:00:01Z [INFO] trace=1a2b3c4d recall_returned status=200 count=1 reason_code=none dur_ms=9 error=none\n"
         "2026-07-26T12:00:02Z [INFO] trace=1a2b3c4d [inject] injected count=1 block_chars=600 block_tokens=150 top_k=3 sid=s1 newly_served=1 injected_once=1 budget_remaining=0 cadence=once\n"
         "2026-07-26T12:00:03Z [INFO] trace=1a2b3c4d [serve] upsert cid=cid-1 sid=s1\n",
@@ -121,8 +142,6 @@ def test_scan_recall_funnel_parses_prefixed_physical_lines_same_as_bare(tmp_path
 
     expected = RecallFunnelScan(
         recall_fired_total=1,
-        recall_fired_user_message=1,
-        recall_fired_tool_failure=0,
         recall_returned_total=1,
         recall_returned_count_sum=1,
         no_keywords_count=0,
@@ -160,9 +179,9 @@ def test_scan_recall_funnel_has_one_to_one_fire_return_totals(tmp_path: Path) ->
     worktree.mkdir(parents=True, exist_ok=True)
     _write_plugin_log(
         worktree,
-        "2026-07-26T12:05:00Z [INFO] trace=feedbabe recall_fired trigger=user_message sid=s1\n"
+        "2026-07-26T12:05:00Z [INFO] trace=feedbabe recall_fired trigger=repeat_failure sid=s1\n"
         "2026-07-26T12:05:01Z [INFO] trace=feedbabe recall_returned status=200 count=2 reason_code=none dur_ms=10 error=none\n"
-        "2026-07-26T12:05:02Z [INFO] trace=feedbabe recall_fired trigger=tool_failure sid=s1\n"
+        "2026-07-26T12:05:02Z [INFO] trace=feedbabe recall_fired trigger=repeat_failure sid=s1\n"
         "2026-07-26T12:05:03Z [INFO] trace=feedbabe recall_returned status=cache count=1 reason_code=cache_hit dur_ms=2 error=none\n",
     )
 
@@ -178,9 +197,9 @@ def test_scan_recall_funnel_realistic_combined_log_sample_output(tmp_path: Path)
     worktree.mkdir(parents=True, exist_ok=True)
     _write_plugin_log(
         worktree,
-        "2026-07-26T12:10:00Z [INFO] trace=aa11bb22 recall_fired trigger=user_message sid=s1\n"
+        "2026-07-26T12:10:00Z [INFO] trace=aa11bb22 recall_fired trigger=repeat_failure sid=s1\n"
         "2026-07-26T12:10:01Z [INFO] trace=aa11bb22 recall_returned status=200 count=2 reason_code=none dur_ms=14 error=none\n"
-        "2026-07-26T12:10:02Z [INFO] trace=cc33dd44 recall_fired trigger=tool_failure sid=s1\n"
+        "2026-07-26T12:10:02Z [INFO] trace=cc33dd44 recall_fired trigger=repeat_failure sid=s1\n"
         "2026-07-26T12:10:03Z [INFO] trace=cc33dd44 recall_returned status=200 count=0 reason_code=no_keywords dur_ms=7 error=none\n"
         "2026-07-26T12:10:04Z [INFO] trace=cc33dd44 [inject] injected count=3 block_chars=1800 block_tokens=450 top_k=5 sid=s1 newly_served=3 injected_once=3 budget_remaining=120 cadence=once\n"
         "2026-07-26T12:10:05Z [INFO] trace=cc33dd44 [inject] restored count=9 block_chars=5400 sid=s1 cadence=once compaction_restores=1\n"
@@ -194,8 +213,6 @@ def test_scan_recall_funnel_realistic_combined_log_sample_output(tmp_path: Path)
 
     expected = RecallFunnelScan(
         recall_fired_total=2,
-        recall_fired_user_message=1,
-        recall_fired_tool_failure=1,
         recall_returned_total=2,
         recall_returned_count_sum=2,
         no_keywords_count=1,

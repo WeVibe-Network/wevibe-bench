@@ -370,8 +370,6 @@ def _scan_injected_block_chars(worktree: Path) -> int | None:
 @dataclass(frozen=True)
 class RecallFunnelScan:
     recall_fired_total: int = 0
-    recall_fired_user_message: int = 0
-    recall_fired_tool_failure: int = 0
     recall_returned_total: int = 0
     recall_returned_count_sum: int = 0
     no_keywords_count: int = 0
@@ -388,9 +386,7 @@ def _scan_recall_funnel(worktree: Path) -> RecallFunnelScan | None:
     except (FileNotFoundError, OSError, UnicodeDecodeError):
         return None
 
-    fired_matches = re.findall(r"\brecall_fired\s+trigger=(user_message|tool_failure)\b", payload)
-    recall_fired_user_message = sum(1 for trigger in fired_matches if trigger == "user_message")
-    recall_fired_tool_failure = sum(1 for trigger in fired_matches if trigger == "tool_failure")
+    fired_matches = re.findall(r"\brecall_fired\s+trigger=repeat_failure\b", payload)
 
     returned_matches = re.findall(
         r"\brecall_returned\s+status=\S+\s+count=(\d+)\s+reason_code=(\S+)\s+dur_ms=\d+\s+error=",
@@ -407,8 +403,6 @@ def _scan_recall_funnel(worktree: Path) -> RecallFunnelScan | None:
 
     return RecallFunnelScan(
         recall_fired_total=len(fired_matches),
-        recall_fired_user_message=recall_fired_user_message,
-        recall_fired_tool_failure=recall_fired_tool_failure,
         recall_returned_total=len(returned_matches),
         recall_returned_count_sum=recall_returned_count_sum,
         no_keywords_count=no_keywords_count,
@@ -417,6 +411,40 @@ def _scan_recall_funnel(worktree: Path) -> RecallFunnelScan | None:
         served_failed=served_failed,
         served_confirmed=served_attempted - served_failed,
     )
+
+
+def _export_cell_telemetry(worktree: Path, run_label: str) -> Path | None:
+    """Copy the plugin's observable recall surface host-side before teardown.
+
+    The plugin writes its funnel snapshot and error log INSIDE the cell worktree
+    under ``.wevibe/``, which is destroyed at ``docker rm``. This copies both
+    host-side into ``data/cells/<unix_ts>-<run_label>/`` so the recall telemetry
+    survives the container.
+
+    FAIL-OPEN by contract: telemetry export must never fail a cell. Any error is
+    logged and swallowed, and the function returns None. ``data/`` is a
+    telemetry/retention layer only -- ``runs/`` (RC-5) stays authoritative, and
+    this never writes there.
+    """
+    sources = {
+        "funnel-snapshot.json": worktree / ".wevibe" / "state" / "funnel-snapshot.json",
+        "plugin-errors.log": worktree / ".wevibe" / "logs" / "wevibe-plugin-errors.log",
+    }
+    present = {name: path for name, path in sources.items() if path.is_file()}
+    if not present:
+        return None
+
+    try:
+        override = os.environ.get("WEVIBE_BENCH_DATA_DIR", "").strip()
+        data_dir = Path(override) if override else Path(__file__).resolve().parents[2] / "data"
+        dest = data_dir / "cells" / f"{int(time.time())}-{run_label}"
+        dest.mkdir(parents=True, exist_ok=True)
+        for name, path in present.items():
+            shutil.copy2(path, dest / name)
+        return dest
+    except (OSError, shutil.Error) as exc:
+        _LOG.warning("telemetry export failed for run_label=%s: %s", run_label, exc)
+        return None
 
 
 def _scan_funnel_snapshot(worktree: Path) -> dict[str, dict[str, int | None]] | None:
@@ -531,8 +559,6 @@ class BackgammonCellResult:
     injected_block_chars: int | None = None
     injected_block_est_tokens: int | None = None
     recall_fired_total: int | None = None
-    recall_fired_user_message: int | None = None
-    recall_fired_tool_failure: int | None = None
     recall_returned_total: int | None = None
     recall_returned_count_sum: int | None = None
     no_keywords_count: int | None = None
@@ -1886,12 +1912,6 @@ class BackgammonRunner(AgentRunner):
             funnel = _scan_recall_funnel(worktree)
             funnel_snapshot = _scan_funnel_snapshot(worktree)
             recall_fired_total = funnel.recall_fired_total if funnel is not None else None
-            recall_fired_user_message = (
-                funnel.recall_fired_user_message if funnel is not None else None
-            )
-            recall_fired_tool_failure = (
-                funnel.recall_fired_tool_failure if funnel is not None else None
-            )
             recall_returned_total = funnel.recall_returned_total if funnel is not None else None
             recall_returned_count_sum = (
                 funnel.recall_returned_count_sum if funnel is not None else None
@@ -1907,8 +1927,6 @@ class BackgammonRunner(AgentRunner):
             injected_block_est_tokens = None
             funnel_snapshot = None
             recall_fired_total = None
-            recall_fired_user_message = None
-            recall_fired_tool_failure = None
             recall_returned_total = None
             recall_returned_count_sum = None
             no_keywords_count = None
@@ -1916,6 +1934,16 @@ class BackgammonRunner(AgentRunner):
             served_attempted = None
             served_failed = None
             served_confirmed = None
+        # Export the plugin's recall surface host-side for BOTH arms, before the
+        # container is torn down. OFF cells strip the recall substrate, so their
+        # telemetry is exactly the baseline the ON arm is compared against --
+        # exporting only on injection-record cells would rebuild the very blind
+        # spot data/ exists to close. Fail-open: never fails a cell.
+        exported_to = _export_cell_telemetry(worktree, run_label)
+        if exported_to is not None:
+            self._progress(
+                f"PROGRESS run_label={run_label} step=telemetry-export dest={exported_to}"
+            )
         self._progress(
             f"PROGRESS run_label={run_label} step=delivery-scan delivery={delivery} "
             f"memory_mode={self.memory_mode}"
@@ -1948,8 +1976,6 @@ class BackgammonRunner(AgentRunner):
             injected_block_chars=injected_block_chars,
             injected_block_est_tokens=injected_block_est_tokens,
             recall_fired_total=recall_fired_total,
-            recall_fired_user_message=recall_fired_user_message,
-            recall_fired_tool_failure=recall_fired_tool_failure,
             recall_returned_total=recall_returned_total,
             recall_returned_count_sum=recall_returned_count_sum,
             no_keywords_count=no_keywords_count,

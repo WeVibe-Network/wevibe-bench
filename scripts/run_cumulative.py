@@ -1767,6 +1767,17 @@ def _decision_template_for_session(
 
 
 def _handle_run(args: argparse.Namespace) -> int:
+    # Fail-open telemetry retention (data/ is a retention layer, never a source
+    # of truth; a cleanup failure must never stop a run). Skip with
+    # WEVIBE_BENCH_SKIP_CLEANUP=1.
+    try:
+        if os.environ.get("WEVIBE_BENCH_SKIP_CLEANUP", "") != "1":
+            from cleanup_data import run_cleanup  # noqa: PLC0415 -- fail-open
+
+            _removed = run_cleanup()
+            _LOG.info("run_cumulative telemetry cleanup done; removed=%s", _removed)
+    except Exception as _cleanup_exc:  # noqa: BLE001 -- fail-open, never break a run
+        _LOG.warning("run_cumulative telemetry cleanup failed (fail-open): %r", _cleanup_exc)
     if not bool(args.until_review):
         raise RuntimeError("run requires --until-review")
 
