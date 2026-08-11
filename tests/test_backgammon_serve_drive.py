@@ -901,7 +901,11 @@ def test_chunked_pass_sends_all_chunks_in_order_and_meters_deltas(tmp_path: Path
     assert stats.chunk_reports[1]["compaction"] is None
 
 
-def test_chunked_pass_marker_missing_nudges_to_budget_then_fails(tmp_path: Path) -> None:
+def test_chunked_pass_marker_missing_nudges_until_the_marker_lands(tmp_path: Path) -> None:
+    """WO-NUDGE-INF-1 (Walter 2026-08-11): a missing chunk marker is a stall,
+    not a verdict. The harness re-nudges with the chunking reminder past the
+    old budget of 3 until the marker lands, and the attempt is never failed
+    for having needed nudges."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
     client.metrics_script = [
@@ -909,12 +913,16 @@ def test_chunked_pass_marker_missing_nudges_to_budget_then_fails(tmp_path: Path)
         _metrics(1, 5, 2), _metrics(2, 6, 3),     # nudge-1 baseline + end
         _metrics(2, 6, 3), _metrics(3, 7, 4),     # nudge-2 baseline + end
         _metrics(3, 7, 4), _metrics(4, 8, 5),     # nudge-3 baseline + end
+        _metrics(4, 8, 5), _metrics(5, 9, 6),     # nudge-4 (past old budget)
+        _metrics(5, 9, 6), _metrics(6, 10, 7),    # chunk-2 baseline + end
     ]
     client.assistant_texts = [
         "done but no marker",
         "still no marker",
         "no marker again",
         "refuses to mark",
+        "CHUNK FINISHED",      # lands on the 4th nudge
+        "CHUNK FINISHED",      # chunk 2
     ]
     cell = _FakeCell()
 
@@ -926,16 +934,15 @@ def test_chunked_pass_marker_missing_nudges_to_budget_then_fails(tmp_path: Path)
         run_label="cell-nomarker",
     )
 
-    # Chunk 2 never sent; chunk 1 + three nudges (the default budget); loud
-    # marker failure.
+    # Chunk 1 + four nudges (one past the old budget) + chunk 2 — no failure.
     sent = [text for _, text in client.sent_prompts]
     assert sent[0] == "CHUNK ONE"
-    assert len(sent) == 4
-    assert "CHUNK TWO" not in sent
-    assert stats.exit_code == 1
-    assert stats.killed_reason == "chunk_marker_missing"
-    assert stats.chunk_reports[-1]["nudges"] == 3
-    assert client.summarize_calls == []
+    assert "CHUNK TWO" in sent
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.chunk_reports[0]["nudges"] == 4
+    assert stats.chunk_reports[0]["marker"] is True
+    assert all(r["marker"] for r in stats.chunk_reports)
 
 
 def test_chunked_pass_marker_detected_before_or_after_discovery_block(
@@ -975,7 +982,8 @@ def test_chunked_pass_prior_chunk_marker_never_satisfies_later_chunk(
     tmp_path: Path,
 ) -> None:
     """The watermark isolates each chunk: chunk 1's marker is in the
-    transcript forever, but chunk 2 must produce its OWN marker."""
+    transcript forever, but chunk 2 must produce its OWN marker — chunk 1's
+    marker never satisfies it, so chunk 2 is nudged until it marks itself."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
     client.metrics_script = [
@@ -983,14 +991,12 @@ def test_chunked_pass_prior_chunk_marker_never_satisfies_later_chunk(
         _metrics(1, 5, 2), _metrics(2, 7, 3),     # chunk-2 baseline + end
         _metrics(2, 7, 3), _metrics(3, 9, 4),     # nudge-1 baseline + end
         _metrics(3, 9, 4), _metrics(4, 11, 5),    # nudge-2 baseline + end
-        _metrics(4, 11, 5), _metrics(5, 13, 6),   # nudge-3 baseline + end
     ]
     client.assistant_texts = [
         "scaffold done. CHUNK FINISHED",
         "no marker from chunk two",
         "still no marker",
-        "no marker again",
-        "refuses to mark",
+        "ok now: CHUNK FINISHED",
     ]
     cell = _FakeCell()
 
@@ -1002,10 +1008,12 @@ def test_chunked_pass_prior_chunk_marker_never_satisfies_later_chunk(
         run_label="cell-prior",
     )
 
-    assert stats.exit_code == 1
-    assert stats.killed_reason == "chunk_marker_missing"
+    # Chunk 1's marker did NOT satisfy chunk 2: chunk 2 needed two nudges of
+    # its own before its own marker landed.
+    assert stats.exit_code == 0
     assert stats.chunk_reports[0]["marker"] is True
-    assert stats.chunk_reports[1]["nudges"] == 3
+    assert stats.chunk_reports[1]["nudges"] == 2
+    assert stats.chunk_reports[1]["marker"] is True
 
 
 def test_chunked_pass_self_fired_compaction_skips_backstop(tmp_path: Path) -> None:
@@ -1217,8 +1225,9 @@ _LOOP_METRICS = {
 
 _FINALIZE_METRICS = {
     # The relay 30s stream-finalize watchdog kill (WO-FINALIZE-REC-1): the
-    # turn's tokens burned, the kill text lands in info.error, and the turn
-    # STILL counts toward scoring turns (only guard kills are excluded).
+    # turn's tokens burned, the kill text lands in info.error, and the turn is
+    # EXCLUDED from scoring turns (WO-NUDGE-INF-1 — same treatment as a guard
+    # kill, so unbounded recovery cannot inflate the measurement).
     "turns": 5,
     "input_tokens": 100,
     "output_tokens": 40,
@@ -1379,23 +1388,28 @@ def test_serve_drive_stale_loop_error_from_prior_phase_not_reclassified(
     assert cell.kill_calls == 0
 
 
-def test_serve_drive_loop_guard_exhaustion_is_loud_exit1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_serve_drive_loop_guard_nudges_are_unbounded(
+    tmp_path: Path,
 ) -> None:
-    """Budget exhausted with the guard still tripping: loud exit 1 with a
-    distinct killed_reason — the phase must not read as completed work (gates
-    on an unrepaired worktree was the 2026-08-10 failure shape)."""
-    monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "1")
+    """WO-NUDGE-INF-1 (Walter 2026-08-11): a guard kill that keeps repeating is
+    nudged for as long as it repeats — no budget, no exhaustion kill. The old
+    behaviour (2 nudges then loud exit 1 / loop_guard_exhausted) voided a run
+    for behaviour that is normal under measurement."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
     client.assistant_terminal_script = [
         {"info_error": _LOOP_SIG},
         {"info_error": _LOOP_SIG},
+        {"info_error": _LOOP_SIG},
+        {"info_error": _LOOP_SIG},
     ]
     client.metrics_script = [
         dict(_ZERO_METRICS),   # baseline
-        dict(_LOOP_METRICS),   # loop kill -> nudge fired (budget spent)
-        dict(_LOOP_METRICS),   # nudge re-loops -> exhausted
+        dict(_LOOP_METRICS),   # loop kill -> nudge 1
+        dict(_LOOP_METRICS),   # re-loops -> nudge 2 (old budget ended HERE)
+        dict(_LOOP_METRICS),   # re-loops -> nudge 3
+        dict(_LOOP_METRICS),   # re-loops -> nudge 4
+        _metrics(9, 200, 90, guard_aborted=1),  # finally recovers
     ]
     cell = _FakeCell()
 
@@ -1408,51 +1422,64 @@ def test_serve_drive_loop_guard_exhaustion_is_loud_exit1(
         phase="feedback-1",
     )
 
-    assert stats.exit_code == 1
-    assert stats.killed_reason == "loop_guard_exhausted"
-    assert stats.recovery_nudges == 1
-    # The looped turns' tokens stay metered even on the loud exit; the two
-    # guard-killed turns are excluded from scoring (5 metered - 1 aborted).
-    assert stats.turns == 4
+    # Four nudges past the old budget of 2, then a clean phase.
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.recovery_nudges == 4
+    sent = [text for _, text in client.sent_prompts]
+    assert sent == ["fix the gates"] + [_LOOP_RECOVERY_NUDGE] * 4
+    # Every killed turn is retry-linked — none left dangling as an unretried
+    # anomaly, which is what an exhaustion exit used to produce.
+    assert len(stats.turn_anomalies) == 4
+    assert all(a["retried"] is True for a in stats.turn_anomalies)
+    assert all(a["retry_kind"] == "harness_resume" for a in stats.turn_anomalies)
+    # Tokens stay fully metered across unbounded recovery (real burn shown).
+    assert stats.output_tokens == 90
+    # …and the nudges never inflate the measurement: 9 metered turns less the
+    # excluded guard-killed turn.
+    assert stats.turns == 8
     assert stats.guard_aborted_turns == 1
-    assert len(stats.turn_anomalies) == 2
-    first, second = stats.turn_anomalies
-    assert first["terminal"] == TURN_TERMINAL_GUARD_ABORT
-    assert first["retried"] is True
-    assert first["retry_kind"] == "harness_resume"
-    assert second["terminal"] == TURN_TERMINAL_GUARD_ABORT
-    assert second["retried"] is False
-    assert second["retry_kind"] is None
 
 
-def test_serve_drive_loop_guard_budget_zero_disables_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_serve_drive_nudges_never_inflate_scoring_turns(
+    tmp_path: Path,
 ) -> None:
-    """Budget "0" = pre-fix posture: anomaly recorded (unretried), no nudge,
-    exit 0 — the A/B off-switch, not the default."""
-    monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "0")
+    """WO-NUDGE-INF-1: unbounded nudging must not buy the model turns. Every
+    recovered (guard- or finalize-killed) turn is subtracted from scoring turns,
+    so a phase nudged N times scores exactly what an un-nudged phase scores —
+    while its tokens stay on the meter."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
-    client.assistant_terminal_script = [{"info_error": _LOOP_SIG}]
-    client.metrics_script = [dict(_ZERO_METRICS), dict(_LOOP_METRICS)]
+    client.assistant_terminal_script = [
+        {"info_error": _FIN_SIG},
+        {"info_error": _LOOP_SIG},
+    ]
+    client.metrics_script = [
+        dict(_ZERO_METRICS),      # baseline
+        dict(_FINALIZE_METRICS),  # finalize kill -> nudge
+        dict(_LOOP_METRICS),      # guard kill   -> nudge
+        _metrics(10, 220, 100, guard_aborted=1, finalize=1),  # recovered
+    ]
     cell = _FakeCell()
 
     stats = runner._run_opencode_serve(
         active_cell=cell,
         serve_client=client,
-        session_id="ses_loop_off",
+        session_id="ses_noinflate",
         prompt="fix the gates",
-        run_label="cell-loop-off",
+        run_label="cell-noinflate",
         phase="feedback-1",
     )
 
     assert stats.exit_code == 0
-    assert stats.killed_reason is None
-    assert stats.recovery_nudges == 0
-    assert [text for _, text in client.sent_prompts] == ["fix the gates"]
-    assert len(stats.turn_anomalies) == 1
-    assert stats.turn_anomalies[0]["terminal"] == TURN_TERMINAL_GUARD_ABORT
-    assert stats.turn_anomalies[0]["retried"] is False
+    assert stats.recovery_nudges == 2
+    # 10 metered turns - 1 guard-killed - 1 finalize-killed = 8 scoring turns.
+    assert stats.turns == 8
+    assert stats.guard_aborted_turns == 1
+    assert stats.finalize_timeout_turns == 1
+    # Exclusions are reported, never silent; tokens are never hidden.
+    assert stats.output_tokens == 100
+    assert stats.input_tokens == 220
 
 
 def test_run_cell_attempt_loop_guard_recovery_on_repair_leg(tmp_path: Path) -> None:
@@ -1582,15 +1609,16 @@ def test_chunked_pass_loop_guard_recovery_inside_chunk(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# WO-FINALIZE-REC-1 (Walter 2026-08-10): finalize-watchdog kills get bounded
-# recovery too — with the RESUME nudge, never the anti-repetition nudge.
+# WO-FINALIZE-REC-1 (Walter 2026-08-10): finalize-watchdog kills get recovery
+# too — with the RESUME nudge, never the anti-repetition nudge.
+# WO-NUDGE-INF-1 (Walter 2026-08-11): that recovery is unbounded.
 # ---------------------------------------------------------------------------
 def test_serve_drive_finalize_timeout_recovers_with_resume_nudge(tmp_path: Path) -> None:
     """A relay finalize-watchdog kill is classified
     transport_error/stream_finalize_timeout and re-driven with the resume
     nudge (the turn was cut off, NOT looping — the anti-repetition nudge
-    would be the wrong instruction). The killed turn still counts toward
-    scoring turns (only guard kills are excluded)."""
+    would be the wrong instruction). The killed turn is excluded from scoring
+    turns (WO-NUDGE-INF-1), exactly as a guard-killed turn is."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
     client.assistant_terminal_script = [{"info_error": _FIN_SIG}]
@@ -1615,8 +1643,11 @@ def test_serve_drive_finalize_timeout_recovers_with_resume_nudge(tmp_path: Path)
     assert stats.exit_code == 0
     assert stats.killed_reason is None
     assert stats.recovery_nudges == 1
-    # No turn exclusion: finalize-killed turns still count (8 scoring).
-    assert stats.turns == 8
+    # WO-NUDGE-INF-1: the finalize-killed turn is EXCLUDED from scoring turns
+    # (8 metered - 1 finalize-killed), so recovery cannot inflate the
+    # measurement; the exclusion is carried, never silent.
+    assert stats.turns == 7
+    assert stats.finalize_timeout_turns == 1
     assert stats.guard_aborted_turns == 0
     assert len(stats.turn_anomalies) == 1
     anomaly = stats.turn_anomalies[0]
@@ -1627,22 +1658,26 @@ def test_serve_drive_finalize_timeout_recovers_with_resume_nudge(tmp_path: Path)
     assert cell.kill_calls == 0
 
 
-def test_serve_drive_finalize_timeout_exhaustion_is_loud_exit1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_serve_drive_finalize_timeout_exhaustion_never_kills_the_phase(
+    tmp_path: Path,
 ) -> None:
-    """Shared budget exhausted on repeated finalize kills: loud exit 1 with
-    its own killed_reason — never reads as completed work."""
-    monkeypatch.setenv("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET", "1")
+    """WO-NUDGE-INF-1 replays the 2026-08-11 incident: phase initial-chunk-6
+    took THREE consecutive finalize kills. Under the old budget of 2 the third
+    exhausted recovery -> stream_finalize_exhausted -> gates ran on partial work
+    and the run died. Unbounded now: the third kill is nudged like the first."""
     runner = _make_runner(tmp_path)
     client = _FakeServeClient()
     client.assistant_terminal_script = [
         {"info_error": _FIN_SIG},
         {"info_error": _FIN_SIG},
+        {"info_error": _FIN_SIG},
     ]
     client.metrics_script = [
         dict(_ZERO_METRICS),      # baseline
-        dict(_FINALIZE_METRICS),  # finalize kill -> nudge fired (budget spent)
-        dict(_FINALIZE_METRICS),  # nudge dies the same way -> exhausted
+        dict(_FINALIZE_METRICS),  # kill 1 -> nudge 1
+        dict(_FINALIZE_METRICS),  # kill 2 -> nudge 2 (old budget ended HERE)
+        dict(_FINALIZE_METRICS),  # kill 3 -> nudge 3 (was: exhausted, exit 1)
+        _metrics(9, 200, 90, finalize=1),  # recovers
     ]
     cell = _FakeCell()
 
@@ -1652,15 +1687,16 @@ def test_serve_drive_finalize_timeout_exhaustion_is_loud_exit1(
         session_id="ses_fin_x",
         prompt="fix the gates",
         run_label="cell-fin-x",
-        phase="feedback-1",
+        phase="initial-chunk-6",
     )
 
-    assert stats.exit_code == 1
-    assert stats.killed_reason == "stream_finalize_exhausted"
-    assert stats.recovery_nudges == 1
-    assert len(stats.turn_anomalies) == 2
-    first, second = stats.turn_anomalies
-    assert first["reason"] == "stream_finalize_timeout"
-    assert first["retried"] is True
-    assert second["retried"] is False
-    assert second["retry_kind"] is None
+    assert stats.exit_code == 0
+    assert stats.killed_reason is None
+    assert stats.recovery_nudges == 3
+    assert len(stats.turn_anomalies) == 3
+    assert all(a["reason"] == "stream_finalize_timeout" for a in stats.turn_anomalies)
+    assert all(a["retried"] is True for a in stats.turn_anomalies)
+    # True burn is never hidden, and the nudges bought no scoring turns.
+    assert stats.output_tokens == 90
+    assert stats.turns == 8
+    assert stats.finalize_timeout_turns == 1

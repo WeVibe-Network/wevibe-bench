@@ -262,8 +262,8 @@ the one serve session. Per chunk: drive → marker scan → compaction → next 
 - **Marker scan is watermark-windowed.** The harness watermarks the message list before each chunk
   and scans only what THAT chunk produced for `CHUNK FINISHED` — the worker emits the marker and
   its `WEVIBE_DISCOVERY` block in either order, sometimes in separate assistant messages, so a
-  tail-only check misdetects. A missing marker is a stall: the harness nudges
-  (`WEVIBE_BENCH_CHUNK_NUDGE_BUDGET`, default 3), then fails loudly `chunk_marker_missing`.
+  tail-only check misdetects. A missing marker is a stall, not a verdict: the harness re-nudges
+  with the chunking reminder **without limit** until the marker lands (WO-NUDGE-INF-1).
 - **Inter-chunk compaction.** Chunks 1–5 instruct the worker to call its `self_compact` tool
   (baked plugin `plugins/self-compact.ts`, arm-on-idle → `session.summarize`, autocontinue always
   suppressed — the harness sends the next chunk itself). The harness watches for the compaction
@@ -276,14 +276,24 @@ the one serve session. Per chunk: drive → marker scan → compaction → next 
   `~/.config/opencode` stack (workspace `AGENTS.md` §0.1). "Compact after every chunk / at end of
   turn" is bench-harness pacing and must never be ported into daily-driver agents; the two instances
   share nothing but the binary name.
+- **Nudges are UNBOUNDED and never void a run (WO-NUDGE-INF-1, Walter 2026-08-11).** Stalls, loops,
+  oversized generations, and ignored chunking rules are NORMAL agentic behaviour under measurement —
+  the price of benchmarking, not a fault that invalidates it. Every nudge path is uncapped: the
+  transport recovery nudge (loop-guard + finalize-watchdog kills), the chunk-marker nudge, and the
+  zero-tool resume. There is no budget env var and no exhaustion kill; `loop_guard_exhausted`,
+  `stream_finalize_exhausted`, and `chunk_marker_missing` no longer exist. The only remaining
+  zero-tool honest-fail is a turn with no resumable session id — an unaddressable transport dead
+  end. **Consequence to plan for:** a permanently wedged relay is no longer self-terminating, so
+  hang detection is the operator's / poller's job on the status stream, never a nudge cap.
 - **Relay-killed turns are recovered, never scored.** A relay loop-guard kill (`guard_abort`) or
-  stream-finalize-watchdog kill is metered (tokens burned; guard kills excluded from scoring
-  turns), then re-driven with a bounded nudge (`WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET`, default 2;
-  anti-repetition for a loop kill, resume for a finalize kill); exhaustion is a loud exit 1
-  (`loop_guard_exhausted` / `stream_finalize_exhausted`). The anomaly classification is
-  **watermark-windowed** like the marker scan: a killed message's `info.error` persists in the
-  transcript forever, so each drive classifies only the messages produced since the last
-  classification point — a stale kill can never re-trip a recovered, completed drive
+  stream-finalize-watchdog kill is metered (tokens burned — true burn is never hidden), then
+  re-driven (anti-repetition nudge for a loop kill, resume nudge for a finalize kill). **Both**
+  kinds of killed turn are subtracted from scoring turns and reported on `guard_aborted_turns` /
+  `finalize_timeout_turns` — that exclusion is what keeps unbounded nudging from inflating the
+  measurement: a phase nudged N times scores exactly what an un-nudged phase scores. The anomaly
+  classification is **watermark-windowed** like the marker scan: a killed message's `info.error`
+  persists in the transcript forever, so each drive classifies only the messages produced since the
+  last classification point — a stale kill can never re-trip a recovered, completed drive
   (2026-08-10 chunk-2 defect).
 
 Attempts 2+ remain the error-only feedback loop.

@@ -11,7 +11,6 @@ import pytest
 
 from wevibe_bench.adapters.backgammon import (
     BackgammonRunner,
-    MAX_ZERO_TOOL_RESUMES,
     ZERO_TOOL_RESUME_NUDGE,
     _OpencodeRunStats,
 )
@@ -206,16 +205,23 @@ def test_run_opencode_records_length_finish_as_truncation(tmp_path: Path) -> Non
     assert any("step=TRUNCATION" in line and "reason=length" in line for line in progress_lines)
 
 
-def test_zero_tool_resume_is_bounded_and_honest_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_zero_tool_resume_is_unbounded_until_tools_are_used(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """WO-NUDGE-INF-1 (Walter 2026-08-11): a zero-tool turn is a stall, not a
+    verdict. The nudge repeats for as long as the turn comes back tool-less —
+    past the old cap of 2 — and the run continues the moment tools are used."""
     progress_lines: list[str] = []
     runner = _make_runner(tmp_path, progress=progress_lines.append)
     fake_cell = _FakeCell()
 
-    # Always ends with a zero-tool turn: initial + each bounded resume.
+    # Five consecutive zero-tool turns (well past the old cap), then a turn
+    # that finally uses tools.
     scripted_stats = [
         _stats(session_id="sess-ztr", terminal_zero_tool_turn=True),
         _stats(session_id="sess-ztr", terminal_zero_tool_turn=True),
         _stats(session_id="sess-ztr", terminal_zero_tool_turn=True),
+        _stats(session_id="sess-ztr", terminal_zero_tool_turn=True),
+        _stats(session_id="sess-ztr", terminal_zero_tool_turn=True),
+        _stats(session_id="sess-ztr", terminal_zero_tool_turn=False),
     ]
 
     run_calls: list[dict[str, Any]] = []
@@ -233,7 +239,7 @@ def test_zero_tool_resume_is_bounded_and_honest_fails(monkeypatch: pytest.Monkey
         worktree=tmp_path,
         events_path=tmp_path / "events.jsonl",
         env=os.environ.copy(),
-        run_label="bounded",
+        run_label="unbounded",
         phase="initial",
         fallback_session_id=None,
         prior_cost_usd=0.0,
@@ -241,19 +247,21 @@ def test_zero_tool_resume_is_bounded_and_honest_fails(monkeypatch: pytest.Monkey
         stdin_text="BIG ORIGINAL PROMPT",
     )
 
-    assert result.zero_tool_resumes == MAX_ZERO_TOOL_RESUMES
-    assert result.zero_tool_turn_honest_fail is True
-    assert result.terminal_zero_tool_turn is True
-    assert len(run_calls) == MAX_ZERO_TOOL_RESUMES + 1
+    # Five nudges — three past the old cap — and no honest-fail verdict.
+    assert result.zero_tool_resumes == 5
+    assert result.zero_tool_turn_honest_fail is False
+    assert result.terminal_zero_tool_turn is False
+    assert len(run_calls) == 6
     assert any("step=zero-tool-turn-resume" in line for line in progress_lines)
-    assert any("outcome=honest-fail" in line for line in progress_lines)
+    assert any("budget=unbounded" in line for line in progress_lines)
+    assert not any("outcome=honest-fail" in line for line in progress_lines)
 
     # Resume invocations are session-bound and nudged, never original prompt.
     resume_calls = run_calls[1:]
     assert all(call["stdin_text"] == ZERO_TOOL_RESUME_NUDGE for call in resume_calls)
     assert all(call["stdin_text"] != "BIG ORIGINAL PROMPT" for call in resume_calls)
 
-    assert len(fake_cell.inner_calls) == MAX_ZERO_TOOL_RESUMES + 1
+    assert len(fake_cell.inner_calls) == 6
     for idx, argv in enumerate(fake_cell.inner_calls[1:], start=1):
         assert argv[:2] == ["opencode", "run"]
         assert "--session" in argv
@@ -263,6 +271,46 @@ def test_zero_tool_resume_is_bounded_and_honest_fails(monkeypatch: pytest.Monkey
         assert "--model" not in argv
         assert "--agent" not in argv
         assert argv.count("--session") == 1, f"resume call {idx} malformed: {argv}"
+
+
+def test_zero_tool_honest_fail_only_when_no_resumable_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """WO-NUDGE-INF-1: with the cap gone, the ONLY honest fail left is a
+    zero-tool turn the harness cannot address at all — no session id to resume
+    into. That is a transport dead end, not "the model ran out of nudges"."""
+    progress_lines: list[str] = []
+    runner = _make_runner(tmp_path, progress=progress_lines.append)
+    fake_cell = _FakeCell()
+
+    run_calls: list[dict[str, Any]] = []
+
+    def _fake_run_opencode(**kwargs: Any) -> _OpencodeRunStats:
+        run_calls.append(kwargs)
+        return _stats(session_id=None, terminal_zero_tool_turn=True)
+
+    monkeypatch.setattr(runner, "_run_opencode", _fake_run_opencode)
+
+    result = runner._run_opencode_with_zero_tool_resumes(
+        active_cell=fake_cell,
+        initial_inner=["opencode", "run", "--dir", "/work", "--format", "json"],
+        pure=False,
+        worktree=tmp_path,
+        events_path=tmp_path / "events.jsonl",
+        env=os.environ.copy(),
+        run_label="no-session",
+        phase="initial",
+        fallback_session_id=None,
+        prior_cost_usd=0.0,
+        kill_hook=None,
+        stdin_text="BIG ORIGINAL PROMPT",
+    )
+
+    assert result.zero_tool_resumes == 0
+    assert result.zero_tool_turn_honest_fail is True
+    assert len(run_calls) == 1
+    assert any(
+        "outcome=honest-fail" in line and "reason=no_resumable_session_id" in line
+        for line in progress_lines
+    )
 
 
 def test_zero_tool_resume_not_used_when_turn_has_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

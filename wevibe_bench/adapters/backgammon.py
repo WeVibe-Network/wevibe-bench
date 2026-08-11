@@ -66,11 +66,13 @@ _LOG = logging.getLogger(__name__)
 # harness advances to the next chunk only when the marker appears in the
 # messages produced by THAT chunk (watermark-windowed scan — the worker emits
 # the marker and its WEVIBE_DISCOVERY block in either order, sometimes across
-# separate assistant messages). A missing marker is a stall: the harness
-# nudges up to WEVIBE_BENCH_CHUNK_NUDGE_BUDGET times (default 3), then fails
-# the attempt loudly (killed_reason=chunk_marker_missing). Between chunks the
-# worker self-compacts (self_compact tool); the harness watches for the
-# compaction evidence and fires a backstop summarize when none materializes.
+# separate assistant messages). A missing marker is a stall, not a verdict:
+# WO-NUDGE-INF-1 (Walter 2026-08-11) makes the marker nudge UNBOUNDED — the
+# harness re-nudges with the chunking reminder until the marker lands, and the
+# attempt is never failed for having needed nudges. Nudge turns are excluded
+# from scoring turns; their tokens stay metered. Between chunks the worker
+# self-compacts (self_compact tool); the harness watches for the compaction
+# evidence and fires a backstop summarize when none materializes.
 CHUNK_MARKER = "CHUNK FINISHED"
 
 # Harness-declared verification/test commands for the backgammon task.
@@ -137,7 +139,12 @@ _RESERVATION_SAFETY_FACTOR = 1.10
 _HARNESS_LIMIT_REASONS = {"run_timeout", "max_steps_per_attempt", "token_cap"}
 _PROXY_CHECKPOINT_ENV = "WEVIBE_BENCH_PROXY_CHECKPOINT"
 _REASONING_EFFORT_ENV = "WEVIBE_BENCH_REASONING_EFFORT"
-MAX_ZERO_TOOL_RESUMES = 2
+# WO-NUDGE-INF-1 (Walter 2026-08-11): nudges are UNBOUNDED. A zero-tool turn is
+# a stall, not a verdict — the harness re-nudges for as long as the turn keeps
+# coming back tool-less. The only exit from the resume loop is a turn that
+# actually used tools (or a missing session id, which is a transport failure,
+# not a model outcome). Nudge turns are excluded from scoring turns; their
+# tokens stay metered.
 ZERO_TOOL_RESUME_NUDGE = "Continue. Edit files with tools — do not explain."
 _FILE_WRITE_TOOL_NAMES = frozenset({"write", "edit", "apply_patch", "multi_edit"})
 
@@ -163,11 +170,17 @@ _HOLD_UI_HEARTBEAT_S = 30.0
 # the looped turn as completed work (2026-08-10 live cell: a loop kill on the
 # repair leg metered as a turn, no recovery, gates ran on an unrepaired
 # worktree). WO-FINALIZE-REC-1 (Walter 2026-08-10): the relay's 30s
-# stream-finalize watchdog kill gets the same bounded recovery, with a
-# resume-style nudge (the turn was cut off, not looping). One shared per-phase
-# budget: WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET (default 2); "0" disables
-# recovery (pre-fix behavior). Neither nudge restates the original prompt —
-# for a loop kill, the same prompt into the same context is the loop's fuel.
+# stream-finalize watchdog kill gets the same recovery, with a resume-style
+# nudge (the turn was cut off, not looping).
+# WO-NUDGE-INF-1 (Walter 2026-08-11): the recovery is UNBOUNDED — no budget, no
+# exhaustion kill. Stalls, loops, and oversized generations are NORMAL agentic
+# behaviour under measurement; the harness keeps nudging with the chunking
+# reminder for as long as the kill keeps repeating, and a nudged phase is never
+# voided for having been nudged. Nudge turns are excluded from scoring turns
+# (see scoring_turns in _run_opencode_serve) so recovery cannot inflate the
+# measurement; their tokens stay fully metered — real burn is never hidden.
+# Neither nudge restates the original prompt — for a loop kill, the same prompt
+# into the same context is the loop's fuel.
 # Applies to every serve-driven phase (chunked building leg AND repair leg
 # alike — RC-4: no mode branch). The proxy guard itself is never reconfigured.
 # The chunking reminder (Walter 2026-08-10): the finalize kills that day were
@@ -511,14 +524,18 @@ class _OpencodeRunStats:
     # their measured wall-clock is real cost and lands here.
     unmetered_turns: int = 0
     unmetered_turn_wall_s: float = 0.0
-    # WO-LOOPREC-1/FINALIZE-REC-1: bounded recovery nudges this invocation
-    # fired after relay loop-guard kills or finalize-watchdog kills (serve
-    # path only; see _LOOP_RECOVERY_NUDGE/_FINALIZE_RECOVERY_NUDGE).
+    # WO-LOOPREC-1/FINALIZE-REC-1: recovery nudges this invocation fired after
+    # relay loop-guard kills or finalize-watchdog kills (serve path only; see
+    # _LOOP_RECOVERY_NUDGE/_FINALIZE_RECOVERY_NUDGE). WO-NUDGE-INF-1: unbounded.
     recovery_nudges: int = 0
     # WO-TURNACCT-1 (Walter 2026-08-10): guard-killed turns NEVER count toward
     # scoring turns. ``turns`` already excludes them; their count is carried
     # here so the exclusion is reported, never silent. Tokens stay metered.
     guard_aborted_turns: int = 0
+    # WO-NUDGE-INF-1 (Walter 2026-08-11): finalize-killed turns are excluded
+    # from scoring turns on the same grounds and counted here for the same
+    # reason — the exclusion is reported, never silent. Tokens stay metered.
+    finalize_timeout_turns: int = 0
 
 
 @dataclass(frozen=True)
@@ -583,6 +600,11 @@ class BackgammonCellResult:
     # WO-TURNACCT-1 (Walter 2026-08-10): relay guard-killed turns, excluded
     # from ``turns`` (scoring) but never silently dropped — counted here.
     guard_aborted_turns: int = 0
+    # WO-NUDGE-INF-1 (Walter 2026-08-11): relay finalize-killed turns, excluded
+    # from ``turns`` (scoring) on the same grounds and counted here for the same
+    # reason. With unbounded nudging these are the turns recovery re-drove; the
+    # count is what proves the nudges did not inflate the measurement.
+    finalize_timeout_turns: int = 0
     unmetered_turns: int = 0
     unmetered_turn_wall_s: float = 0.0
     contention: ContentionCovariates | None = None
@@ -1997,6 +2019,12 @@ class BackgammonRunner(AgentRunner):
                 for record in turn_anomalies_all
                 if record.get("terminal") == TURN_TERMINAL_GUARD_ABORT
             ),
+            finalize_timeout_turns=sum(
+                1
+                for record in turn_anomalies_all
+                if record.get("terminal") == TURN_TERMINAL_TRANSPORT_ERROR
+                and record.get("reason") == REASON_STREAM_FINALIZE_TIMEOUT
+            ),
             unmetered_turns=unmetered_turns_total,
             unmetered_turn_wall_s=unmetered_turn_wall_total,
             worker_image_fingerprint=worker_image_identity,
@@ -2036,14 +2064,14 @@ class BackgammonRunner(AgentRunner):
         budget_stop_detected_any = bool(aggregate.budget_stop_detected)
         budget_stop_signature = aggregate.budget_stop_signature
 
-        while current.terminal_zero_tool_turn and resume_count < MAX_ZERO_TOOL_RESUMES:
+        while current.terminal_zero_tool_turn:
             resume_session_id = current.session_id or aggregate.session_id or fallback_session_id
             if not resume_session_id:
                 break
             resume_count += 1
             self._progress(
                 f"PROGRESS run_label={run_label} step=zero-tool-turn-resume phase={phase} "
-                f"resume={resume_count}/{MAX_ZERO_TOOL_RESUMES} session_id={resume_session_id}"
+                f"resume={resume_count} budget=unbounded session_id={resume_session_id}"
             )
             resume_inner = [
                 "opencode",
@@ -2100,11 +2128,16 @@ class BackgammonRunner(AgentRunner):
             )
             current = resumed
 
+        # WO-NUDGE-INF-1: the resume loop above is unbounded, so a still-terminal
+        # zero-tool turn HERE means the loop broke for the only other reason —
+        # no session id to resume into. That is an unnudgeable dead end (the
+        # harness cannot address the worker at all), never "the model ran out of
+        # nudges".
         honest_fail = bool(aggregate.terminal_zero_tool_turn)
         if honest_fail:
             self._progress(
                 f"PROGRESS run_label={run_label} step=zero-tool-turn outcome=honest-fail phase={phase} "
-                f"resumes={resume_count}/{MAX_ZERO_TOOL_RESUMES}"
+                f"resumes={resume_count} reason=no_resumable_session_id"
             )
 
         return _OpencodeRunStats(
@@ -2520,14 +2553,13 @@ class BackgammonRunner(AgentRunner):
 
         WO-LOOPREC-1: a relay loop-guard kill (``relay_loop_detected`` in the
         persisted assistant ``info.error``) is classified ``guard_abort`` and
-        re-driven with the bounded anti-repetition nudge. WO-FINALIZE-REC-1: a
-        relay finalize-watchdog kill is classified
+        re-driven with the anti-repetition nudge. WO-FINALIZE-REC-1: a relay
+        finalize-watchdog kill is classified
         ``transport_error/stream_finalize_timeout`` and re-driven with the
-        resume nudge. One shared per-phase budget (env
-        ``WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET``, default 2; 0 disables).
-        Exhaustion is a loud exit 1 (``loop_guard_exhausted`` /
-        ``stream_finalize_exhausted``) — a killed phase never reads as
-        completed work.
+        resume nudge. WO-NUDGE-INF-1: both recoveries are UNBOUNDED — no
+        budget, no exhaustion kill. A killed turn never reads as completed
+        work because it is subtracted from ``turns`` (scoring), not because
+        the phase is failed; its tokens stay metered.
         """
         if kill_hook is None:
             kill_hook = active_cell.kill_worker_processes
@@ -2568,7 +2600,10 @@ class BackgammonRunner(AgentRunner):
         # every cumulative read. Classifying on the cumulative read re-trips
         # the SAME kill after a successful recovery — the live chunk-2 drive
         # recovered, landed CHUNK FINISHED, and was still classified
-        # guard_abort twice more (loop_guard_exhausted, void cell). The
+        # guard_abort twice more, which under the then-current nudge budget
+        # exhausted it and voided the cell (that exhaustion kill is gone —
+        # WO-NUDGE-INF-1 — but a stale re-classification would still burn
+        # unbounded nudges on a kill that already recovered). The
         # classification surface is therefore WINDOWED to messages at/after
         # this watermark, and the watermark advances past each classified kill
         # before the recovery nudge re-drives. Metering deltas above are
@@ -2580,16 +2615,20 @@ class BackgammonRunner(AgentRunner):
 
         # WO-LOOPREC-1/FINALIZE-REC-1 transport recovery: a guard-killed or
         # finalize-killed turn is metered (its tokens burned) but must NOT read
-        # as completed work. When the terminal classification is recoverable
-        # and budget remains, mark the anomaly retried and re-drive the phase —
-        # anti-repetition nudge for a guard kill (never the original prompt:
-        # the same prompt into the same context is the loop's fuel), resume
-        # nudge for a finalize kill. Budget exhausted with the kill repeating
-        # -> loud exit 1: the phase produced no completed work, and proceeding
-        # would re-create the 2026-08-10 defect (gates against an unrepaired
-        # worktree). Budget "0" disables recovery entirely (pre-fix posture:
-        # anomaly recorded, exit 0).
-        recovery_nudge_budget = int(os.environ.get("WEVIBE_BENCH_RECOVERY_NUDGE_BUDGET") or "2")
+        # as completed work. When the terminal classification is recoverable,
+        # mark the anomaly retried and re-drive the phase — anti-repetition
+        # nudge for a guard kill (never the original prompt: the same prompt
+        # into the same context is the loop's fuel), resume nudge for a finalize
+        # kill.
+        # WO-NUDGE-INF-1 (Walter 2026-08-11): UNBOUNDED. There is no budget and
+        # no exhaustion kill — a repeating kill is re-nudged for as long as it
+        # repeats, because stalling and looping are normal agentic behaviour
+        # under measurement, not a bench-voiding fault. The measurement is
+        # protected on the other side instead: every recovered turn is
+        # subtracted from scoring turns below, so no number of nudges can
+        # inflate turns/phases, while the tokens they burn stay fully metered.
+        # Non-termination is therefore possible by design; a wedged relay is
+        # caught by the operator/poller watching the log, not by voiding the run.
         recovery_nudges = 0
         prompt_to_send = prompt
         turn_anomaly_list: list[dict[str, Any]] = []
@@ -2782,51 +2821,33 @@ class BackgammonRunner(AgentRunner):
                     mapped_terminal == TURN_TERMINAL_TRANSPORT_ERROR
                     and str(reason or "") == REASON_STREAM_FINALIZE_TIMEOUT
                 )
-                if (
-                    recoverable
-                    and killed_reason is None
-                    and exit_code == 0
-                    and recovery_nudge_budget > 0
-                ):
-                    if recovery_nudges < recovery_nudge_budget:
-                        anomaly_record["retried"] = True
-                        anomaly_record["retry_kind"] = "harness_resume"
-                        recovery_nudges += 1
-                        self._progress(
-                            f"PROGRESS run_label={run_label} step=transport-recovery "
-                            f"phase={phase} terminal={mapped_terminal} action=nudge "
-                            f"nudge={recovery_nudges} "
-                            f"budget={recovery_nudge_budget} session_id={session_id}"
-                        )
-                        prompt_to_send = (
-                            _LOOP_RECOVERY_NUDGE
-                            if mapped_terminal == TURN_TERMINAL_GUARD_ABORT
-                            else _FINALIZE_RECOVERY_NUDGE
-                        )
-                        # Advance the classification window PAST the kill just
-                        # classified: the persisted error never leaves the
-                        # transcript, so without this the post-nudge read
-                        # re-classifies the same kill (see the watermark note
-                        # at phase baseline). A failed probe keeps the old
-                        # watermark — a stuck window re-trips LOUD, never
-                        # silently clean.
-                        try:
-                            class_watermark = len(serve_client.get_messages(session_id))
-                        except ServeClientError:
-                            pass
-                        continue
-                    exit_code = 1
-                    killed_reason = (
-                        "loop_guard_exhausted"
-                        if mapped_terminal == TURN_TERMINAL_GUARD_ABORT
-                        else "stream_finalize_exhausted"
-                    )
+                if recoverable and killed_reason is None and exit_code == 0:
+                    anomaly_record["retried"] = True
+                    anomaly_record["retry_kind"] = "harness_resume"
+                    recovery_nudges += 1
                     self._progress(
                         f"PROGRESS run_label={run_label} step=transport-recovery "
-                        f"phase={phase} terminal={mapped_terminal} action=exhausted "
-                        f"budget={recovery_nudge_budget} "
-                        f"session_id={session_id}"
+                        f"phase={phase} terminal={mapped_terminal} action=nudge "
+                        f"nudge={recovery_nudges} "
+                        f"budget=unbounded session_id={session_id}"
                     )
+                    prompt_to_send = (
+                        _LOOP_RECOVERY_NUDGE
+                        if mapped_terminal == TURN_TERMINAL_GUARD_ABORT
+                        else _FINALIZE_RECOVERY_NUDGE
+                    )
+                    # Advance the classification window PAST the kill just
+                    # classified: the persisted error never leaves the
+                    # transcript, so without this the post-nudge read
+                    # re-classifies the same kill (see the watermark note
+                    # at phase baseline). A failed probe keeps the old
+                    # watermark — a stuck window re-trips LOUD, never
+                    # silently clean.
+                    try:
+                        class_watermark = len(serve_client.get_messages(session_id))
+                    except ServeClientError:
+                        pass
+                    continue
             break
 
         turn_anomalies: tuple[dict[str, Any], ...] = tuple(turn_anomaly_list)
@@ -2842,6 +2863,7 @@ class BackgammonRunner(AgentRunner):
         d_reasoning = _d("reasoning_tokens")
         d_turns = _d("turns")
         d_guard_aborted = _d("guard_aborted_turns")
+        d_finalize_timeouts = _d("finalize_timeouts")
         # WO-TURNACCT-1 (Walter 2026-08-10): guard-killed turns are EXCLUDED
         # from scoring turns — their tokens stay metered (real burn), the
         # excluded count is carried on guard_aborted_turns (never silent), and
@@ -2849,7 +2871,12 @@ class BackgammonRunner(AgentRunner):
         # them). The stdout path never counts a killed turn in the first place
         # (the interrupted step gets no step_finish), so this subtraction is
         # what keeps the two arms identical (RC-4).
-        scoring_turns = max(0, d_turns - d_guard_aborted)
+        # WO-NUDGE-INF-1 (Walter 2026-08-11): finalize-killed turns are excluded
+        # on exactly the same grounds. Nudging is now unbounded, so this is what
+        # keeps recovery from inflating the measurement: a phase that was
+        # nudged N times reports the same scoring turns as one that was never
+        # nudged, while every burned token stays on the token counters.
+        scoring_turns = max(0, d_turns - d_guard_aborted - d_finalize_timeouts)
         d_truncations = _d("truncations")
         d_cost = float(m.get("cost_usd", 0.0) or 0.0) - (
             float(baseline.get("cost_usd", 0.0) or 0.0) if baseline is not None else 0.0
@@ -2878,6 +2905,8 @@ class BackgammonRunner(AgentRunner):
         self._progress(
             f"PROGRESS run_label={run_label} step=serve-drive-end phase={phase} "
             f"turns={scoring_turns} guard_aborted_turns={d_guard_aborted} "
+            f"finalize_timeout_turns={d_finalize_timeouts} "
+            f"recovery_nudges={recovery_nudges} "
             f"session_turns={m.get('turns', 0)} "
             f"input={d_input} output={d_output} reasoning={d_reasoning} "
             f"session_id={session_id} cost_usd={d_cost:.4f} "
@@ -2906,6 +2935,7 @@ class BackgammonRunner(AgentRunner):
             unmetered_turn_wall_s=0.0,
             recovery_nudges=recovery_nudges,
             guard_aborted_turns=d_guard_aborted,
+            finalize_timeout_turns=d_finalize_timeouts,
         )
 
     def _run_opencode_serve_chunked(
@@ -2922,11 +2952,12 @@ class BackgammonRunner(AgentRunner):
     ) -> _OpencodeRunStats:
         """WO-77 chunked first pass: drive the chunk prompts IN ORDER through the
         one serve session. Per chunk: drive -> watermark-windowed marker scan
-        (only messages THIS chunk produced) -> up to WEVIBE_BENCH_CHUNK_NUDGE_BUDGET
-        marker nudges (default 3) -> loud ``chunk_marker_missing`` failure ->
-        inter-chunk compaction phase (fail-open, skipped after the last chunk).
-        Aggregates are the sum of per-chunk deltas (the per-phase metering in
-        :meth:`_run_opencode_serve` is delta-true).
+        (only messages THIS chunk produced) -> unbounded marker nudges
+        (WO-NUDGE-INF-1: a missing marker is a stall, re-nudged until it lands,
+        never an attempt failure) -> inter-chunk compaction phase (fail-open,
+        skipped after the last chunk). Aggregates are the sum of per-chunk
+        deltas (the per-phase metering in :meth:`_run_opencode_serve` is
+        delta-true).
         """
         sum_input = 0
         sum_output = 0
@@ -2936,6 +2967,7 @@ class BackgammonRunner(AgentRunner):
         sum_truncations = 0
         sum_recovery_nudges = 0
         sum_guard_aborted = 0
+        sum_finalize_timeouts = 0
         anomalies: list[dict[str, Any]] = []
         chunk_reports: list[dict[str, Any]] = []
 
@@ -2954,11 +2986,12 @@ class BackgammonRunner(AgentRunner):
                 chunk_reports=tuple(chunk_reports),
                 recovery_nudges=sum_recovery_nudges,
                 guard_aborted_turns=sum_guard_aborted,
+                finalize_timeout_turns=sum_finalize_timeouts,
             )
 
         def _drive(phase: str, prompt: str) -> _OpencodeRunStats:
             nonlocal sum_input, sum_output, sum_reasoning, sum_turns, sum_cost, sum_truncations
-            nonlocal sum_recovery_nudges, sum_guard_aborted
+            nonlocal sum_recovery_nudges, sum_guard_aborted, sum_finalize_timeouts
             stats = self._run_opencode_serve(
                 active_cell=active_cell,
                 serve_client=serve_client,
@@ -2978,11 +3011,11 @@ class BackgammonRunner(AgentRunner):
             sum_truncations += stats.truncations
             sum_recovery_nudges += stats.recovery_nudges
             sum_guard_aborted += stats.guard_aborted_turns
+            sum_finalize_timeouts += stats.finalize_timeout_turns
             anomalies.extend(stats.turn_anomalies)
             return stats
 
         compact_enabled = (os.environ.get("WEVIBE_BENCH_CHUNK_COMPACT") or "1").strip() != "0"
-        nudge_budget = int(os.environ.get("WEVIBE_BENCH_CHUNK_NUDGE_BUDGET") or "3")
         compact_grace_s = float(os.environ.get("WEVIBE_BENCH_COMPACT_GRACE_S") or "15")
         compact_total_s = float(os.environ.get("WEVIBE_BENCH_COMPACT_TOTAL_S") or "1800")
 
@@ -2996,6 +3029,7 @@ class BackgammonRunner(AgentRunner):
                 "compaction": None,
                 "recovery_nudges": 0,
                 "guard_aborted_turns": 0,
+                "finalize_timeout_turns": 0,
             }
             # Watermark BEFORE the drive: the marker scan below covers only the
             # messages THIS chunk produced, so a marker from an earlier chunk
@@ -3004,6 +3038,7 @@ class BackgammonRunner(AgentRunner):
             stats = _drive(phase, chunk_prompt)
             report["recovery_nudges"] += stats.recovery_nudges
             report["guard_aborted_turns"] += stats.guard_aborted_turns
+            report["finalize_timeout_turns"] += stats.finalize_timeout_turns
             report.update(
                 turns=stats.turns,
                 input_tokens=stats.input_tokens,
@@ -3017,19 +3052,12 @@ class BackgammonRunner(AgentRunner):
                 CHUNK_MARKER in text
                 for text in serve_client.assistant_texts_since(session_id, watermark)
             ):
-                if report["nudges"] >= nudge_budget:
-                    self._progress(
-                        f"PROGRESS run_label={run_label} step=chunk-marker-missing "
-                        f"chunk={index} session_id={session_id} action=fail "
-                        f"nudges={report['nudges']}"
-                    )
-                    return _aggregate(exit_code=1, killed_reason="chunk_marker_missing")
                 report["nudges"] += 1
                 report["nudged"] = True
                 self._progress(
                     f"PROGRESS run_label={run_label} step=chunk-marker-missing "
                     f"chunk={index} session_id={session_id} action=nudge "
-                    f"nudge={report['nudges']} budget={nudge_budget}"
+                    f"nudge={report['nudges']} budget=unbounded"
                 )
                 nudge = (
                     f"Your previous response did not end with the {CHUNK_MARKER} marker. "
@@ -3040,6 +3068,7 @@ class BackgammonRunner(AgentRunner):
                 nudge_stats = _drive(f"{phase}-marker-nudge-{report['nudges']}", nudge)
                 report["recovery_nudges"] += nudge_stats.recovery_nudges
                 report["guard_aborted_turns"] += nudge_stats.guard_aborted_turns
+                report["finalize_timeout_turns"] += nudge_stats.finalize_timeout_turns
                 if nudge_stats.exit_code != 0:
                     return _aggregate(
                         exit_code=nudge_stats.exit_code, killed_reason=nudge_stats.killed_reason
