@@ -20,6 +20,11 @@ node server.mjs --help
 
 **No dependencies. No build step. No `npm install`.** If this ever needs a
 package manager to start, something has been added that should not have been.
+The tests run on the stdlib runner for the same reason:
+
+```bash
+cd wevibe-bench/dashboard && node --test
+```
 
 The bench repo is mounted **read-only** at `/bench`. That `:ro` is not
 decoration: run artifacts under `runs/` are the authoritative record of a
@@ -47,6 +52,15 @@ Consequences that are enforced in code, not by convention:
   labelled *delivery, not outcome*, and that box is deliberately the quietest.
 - **No delta below `min_cells_per_arm` (3).** The hero renders `COLLECTING`
   with the real cell counts instead. A number at n=1 is what gets you killed.
+- **Only VALID cells enter the delta**, and `cells` counts scored cells only.
+  A void-instrument cell (RUNBOOK rule 5.10 — provider-side truncation on a
+  non-green terminal attempt) or a single-attempt cell is excluded and counted
+  in `arm_delta.<arm>.excluded`, never scored as a measured 0%. Both used to
+  contribute 0 to the numerator and their full gate count to the denominator,
+  which manufactured apparent lift for the memory arm the moment the threshold
+  unlocked. `contract.mjs::cellValidity` MIRRORS the scorecard's canonical rule
+  in `wevibe_bench/cumulative/run_artifacts.py` — if that rule moves, this moves
+  with it. Pinned by `arm-delta-validity.test.mjs`.
 - **No confidence interval over gate counts, ever.** Gates cluster within cell —
   68 gates from one cell are not 68 independent samples. The standing note says
   so permanently.

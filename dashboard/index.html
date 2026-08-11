@@ -6,7 +6,7 @@
 <title>WeVibe Bench — live</title>
 <!--
 ─────────────────────────────────────────────────────────────────────────────
- JSON CONTRACT v1.0 — what this board consumes. Diff against contract.mjs and
+ JSON CONTRACT v1.1 — what this board consumes. Diff against contract.mjs and
  against what the backend actually emits.
 
  {
@@ -19,7 +19,11 @@
                  policy_anchor_status, worker_image_fp, leader_fp, corpus, seed }
    arm_delta:  { sufficient, min_cells_per_arm, delta, ci, statement, note,
                  a|b:{ cells, gates_resolved, gates_total, resolution_rate,
-                       median_turns_to_green } }
+                       median_turns_to_green,
+                       excluded{total,void_instrument,resolution_unmeasurable} } }
+                 `cells` counts SCORED cells only. A void-instrument cell
+                 (RUNBOOK 5.10) or a single-attempt cell is excluded and
+                 counted in `excluded` — never scored as a measured 0.
    wall:       { gates:[{id,req,title,a,b,a_flipped_at_attempt,
                          b_flipped_at_attempt}], totals:{a,b} }
    episodes:   [{ failure_key, arm, state, turns, elapsed_s, error, opened_at }]

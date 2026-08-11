@@ -88,6 +88,19 @@ function armCol(cls, label, arm, need) {
       ? nul("unobserved")
       : `${a.median_turns_to_green}`;
 
+  // Excluded cells are stated, never hidden. A cell dropped from the delta is
+  // still a cell that ran and burned real tokens; silently omitting it would be
+  // its own kind of dishonesty, and the reason is what makes the exclusion
+  // auditable against RUNBOOK rule 5.10 rather than something to take on trust.
+  const ex = a.excluded ?? {};
+  const excluded =
+    (ex.total ?? 0) > 0
+      ? `<div style="font-size:var(--fs-label);margin-top:4px">
+           <span class="null">${ex.total} excluded</span>
+           <span class="label">${excludedReasons(ex)}</span>
+         </div>`
+      : "";
+
   return `
   <div class="armcol">
     <div class="label" style="color:var(--arm-${cls})">${label}</div>
@@ -95,8 +108,18 @@ function armCol(cls, label, arm, need) {
     <div style="font-size:var(--fs-label);margin-top:2px">
       <span class="${cls}">${cells}</span>${need ? `<span class="null"> / ${need}</span>` : ""} cells ${gates}
     </div>
+    ${excluded}
     <div style="font-size:var(--fs-label);margin-top:6px">
       <span class="label">median turns to green</span> ${median}
     </div>
   </div>`;
+}
+
+function excludedReasons(ex) {
+  const parts = [];
+  if ((ex.void_instrument ?? 0) > 0) parts.push(`${ex.void_instrument} void-instrument`);
+  if ((ex.resolution_unmeasurable ?? 0) > 0) {
+    parts.push(`${ex.resolution_unmeasurable} single-attempt`);
+  }
+  return esc(parts.join(" · "));
 }

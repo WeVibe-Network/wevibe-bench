@@ -28,10 +28,24 @@
 //   - shadow recall              (would break arm comparability; killed)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const CONTRACT_VERSION = "1.0";
+export const CONTRACT_VERSION = "1.1";
 
 /** Gate-level counts cluster within cell. Below this, NO delta and NO CI. */
 export const MIN_CELLS_PER_ARM = 3;
+
+/**
+ * Why a cell was kept out of the arm delta. `scored` is the only value that
+ * enters the measurement; everything else is reported, never silently dropped.
+ *
+ *   void_instrument         provider-side truncation on a non-green terminal
+ *                           attempt (RUNBOOK rule 5.10). Never a capability FAIL.
+ *   resolution_unmeasurable fewer than 2 attempts, so "resolved" is underivable
+ *                           by construction — see cellValidity().
+ */
+export const CELL_EXCLUSIONS = /** @type {const} */ ([
+  "void_instrument",
+  "resolution_unmeasurable",
+]);
 
 /** Permanent provenance label. Never a badge. Never a tier. */
 export const ATTESTATION = "bench-mock/self-declared";
@@ -169,7 +183,15 @@ function armSlot() {
     gates_total: null,
     resolution_rate: null,
     median_turns_to_green: null,
+    // Cells observed for this arm but kept OUT of the numbers above, by reason.
+    // An excluded cell must never read as a measured 0 — that is the whole
+    // point of the three-kinds-of-nothing rule.
+    excluded: excludedSlot(),
   };
+}
+
+function excludedSlot() {
+  return { total: 0, void_instrument: 0, resolution_unmeasurable: 0 };
 }
 
 function gateTotals() {
@@ -254,12 +276,60 @@ export function median(xs) {
 }
 
 /**
+ * Decide whether a cell may enter the arm delta at all, and why not if not.
+ *
+ * This MIRRORS the scorecard's canonical rule — it does not invent a second
+ * one. The authority is `wevibe_bench/cumulative/run_artifacts.py` (the
+ * VOID-INSTRUMENT gate, WO-NIGHT2-1b) implementing RUNBOOK rule 5.10. If that
+ * rule changes, this changes with it; two divergent definitions of "does this
+ * cell count" is precisely the class of drift the board exists to expose.
+ *
+ * Returns `{ scored: true }` or `{ scored: false, reason }`.
+ *
+ * VOID-INSTRUMENT (rule 5.10): a non-green terminal attempt carrying a
+ * provider-side truncation signal is an instrument failure, NEVER a capability
+ * FAIL. Scoring it as 0% resolution attributes the transport's failure to the
+ * model — and on the control arm that manufactures apparent lift for the
+ * memory arm, which is the single most damaging thing this board could do.
+ * A green terminal attempt is scored regardless of earlier truncation.
+ *
+ * RESOLUTION_UNMEASURABLE: "resolved" is defined as red in an earlier attempt
+ * and absent in the latest, so it is underivable from a single attempt. Such a
+ * cell would otherwise contribute 0 to the numerator and its FULL gate count
+ * to the denominator — a guaranteed 0% that is an artifact of when the cell
+ * stopped, not a measurement of anything. Excluding it is the only coherent
+ * choice: the same code that concedes it cannot measure resolution must not
+ * then assert a rate.
+ */
+export function cellValidity(cell) {
+  const c = cell ?? {};
+
+  const terminalGreen = c.full_green === true;
+  if (!terminalGreen) {
+    const truncationSignal =
+      str(c.terminal_reason) === "transport_incomplete" ||
+      (int(c.length_truncations) ?? 0) > 0 ||
+      (int(c.truncated_turns) ?? 0) > 0;
+    if (truncationSignal) return { scored: false, reason: "void_instrument" };
+  }
+
+  const attempts = c.attempts instanceof Map ? c.attempts.size : int(c.attempt_count) ?? 0;
+  if (attempts < 2) return { scored: false, reason: "resolution_unmeasurable" };
+
+  return { scored: true, reason: null };
+}
+
+/**
  * Decide whether a delta may be shown at all, and phrase it in words.
  *
  * HARD RULE: below MIN_CELLS_PER_ARM the delta stays null and the board renders
  * "COLLECTING". A number here with n=1 is the thing a skeptical engineer kills
  * you with. `ci` stays null permanently for gate rates — the samples are
  * clustered within cell and a binomial CI over them would be a lie.
+ *
+ * `cells` counts SCORED cells only. Excluded cells are reported separately on
+ * each arm slot and never reach this threshold — otherwise three void cells
+ * would unlock a delta computed from nothing.
  */
 export function finalizeDelta(delta) {
   const a = delta.a;

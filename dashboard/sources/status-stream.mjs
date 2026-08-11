@@ -28,7 +28,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { join } from "node:path";
-import { parseGate, int, str, median, finalizeDelta } from "../contract.mjs";
+import { parseGate, int, str, median, finalizeDelta, cellValidity } from "../contract.mjs";
 import { readTail, parseJsonl, listDir, statOrNull } from "./_runtime.mjs";
 
 export const id = "status-stream";
@@ -174,6 +174,10 @@ function cellsFromRecords(records, dirName) {
         served_failed: null,
         problems_before: null,
         problems_after: null,
+        // VOID-INSTRUMENT inputs (RUNBOOK rule 5.10) — see contract.cellValidity.
+        full_green: false,
+        terminal_reason: null,
+        length_truncations: 0,
         last_seen: 0,
         resolved_gates: [],
       });
@@ -185,7 +189,14 @@ function cellsFromRecords(records, dirName) {
       continue;
     }
 
-    // attempt record (the archived first-generation records carry no `type`)
+    // Only `attempt` records carry gate/progress state. The stream also carries
+    // `extraction` records (and may gain more types), which have no attempt,
+    // verdict or progress and must not be folded in as if they did. This was
+    // previously an unguarded fall-through that happened to be harmless only
+    // because the extraction record carries none of the keys read below —
+    // safety by luck. A record whose type is absent is an ARCHIVED
+    // first-generation attempt record and is still accepted.
+    if (r.type !== undefined && r.type !== "attempt") continue;
     const gates = Array.isArray(r.failed_gates)
       ? r.failed_gates
       : Array.isArray(r.progress?.failed_gates)
@@ -231,6 +242,12 @@ function cellsFromRecords(records, dirName) {
     c.served_failed = int(p.served_failed) ?? c.served_failed;
     c.problems_before = int(p.problems_before) ?? c.problems_before;
     c.problems_after = int(p.problems_after) ?? c.problems_after;
+    // Terminal-attempt validity inputs. Read from the LAST attempt record seen
+    // for the cell, which is the terminal one — matching the scorecard, which
+    // takes the last attempt record carrying a progress dict.
+    c.full_green = p.full_green === true;
+    c.terminal_reason = str(r.terminal_reason) ?? c.terminal_reason;
+    c.length_truncations = Math.max(c.length_truncations, int(r.length_truncations) ?? 0);
     c.last_seen += 1;
   }
 
@@ -319,12 +336,39 @@ function tally(gates, side) {
  * Per-arm resolution: resolved gates / gates ever red, aggregated over cells.
  * Cells are the unit; `cells` is reported at equal weight to the rate, because
  * gates cluster within cell (see contract note).
+ *
+ * ONLY SCORED CELLS ENTER. `cellValidity` (contract.mjs) mirrors the
+ * scorecard's canonical VOID-INSTRUMENT rule. Without this filter an aborted
+ * or single-attempt cell contributed 0 to the numerator and its FULL gate
+ * count to the denominator — a guaranteed 0% that is an artifact of how the
+ * cell ended, not a measurement. On the control arm that manufactures apparent
+ * lift for the memory arm at exactly the moment MIN_CELLS_PER_ARM unlocks the
+ * delta. Excluded cells are counted and reported, never silently dropped.
  */
 function buildDelta(cells) {
   const build = (arm) => {
-    const mine = cells.filter((c) => c.arm === arm && c.attempts.size);
+    const observed = cells.filter((c) => c.arm === arm && c.attempts.size);
+    const excluded = { total: 0, void_instrument: 0, resolution_unmeasurable: 0 };
+    const mine = [];
+    for (const c of observed) {
+      const v = cellValidity(c);
+      if (v.scored) {
+        mine.push(c);
+        continue;
+      }
+      excluded.total += 1;
+      excluded[v.reason] += 1;
+    }
+
     if (!mine.length) {
-      return { cells: 0, gates_resolved: null, gates_total: null, resolution_rate: null, median_turns_to_green: null };
+      return {
+        cells: 0,
+        gates_resolved: null,
+        gates_total: null,
+        resolution_rate: null,
+        median_turns_to_green: null,
+        excluded,
+      };
     }
     let resolved = 0;
     let total = 0;
@@ -341,6 +385,7 @@ function buildDelta(cells) {
       gates_total: total,
       resolution_rate: total > 0 ? resolved / total : null,
       median_turns_to_green: median(mine.filter((c) => c.verdict === "PASS").map((c) => c.turns)),
+      excluded,
     };
   };
 
