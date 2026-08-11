@@ -12,7 +12,6 @@ import argparse
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -25,7 +24,7 @@ import sys
 import tempfile
 import threading
 import time
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, NamedTuple
 
 from wevibe_bench import config
@@ -221,14 +220,6 @@ class CliContext(NamedTuple):
     review_card: PrivateReviewCard
     layout: PathLayout
     runner: object
-
-
-BuildSubstrateEvents = Callable[
-    ...,
-    tuple[list[dict[str, Any]], dict[str, Any], list[Path]],
-]
-SessionIdCounts = Callable[[Path], dict[str, int]]
-SessionIdFromEvents = Callable[..., str | None]
 
 
 def _utc_now_iso() -> str:
@@ -607,8 +598,8 @@ class _PromptInjectingCaptureRest:
 
     def extract(
         self,
-        events: list[dict[str, Any]],
         model: str,
+        session_db_path: str,
         project_context: dict[str, Any] | None = None,
         org_id: str | None = None,
         provider: str | None = None,
@@ -619,7 +610,7 @@ class _PromptInjectingCaptureRest:
         session_id: str | None = None,
     ) -> str:
         job_id = self._inner.extract(
-            events=events,
+            session_db_path=session_db_path,
             model=model,
             project_context=project_context,
             org_id=org_id,
@@ -635,30 +626,6 @@ class _PromptInjectingCaptureRest:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
-
-
-def _load_sxe_helpers(
-    repo_root: Path,
-) -> tuple[BuildSubstrateEvents, SessionIdCounts, SessionIdFromEvents]:
-    module_path = repo_root / "scripts" / "backgammon_sxe.py"
-    spec = importlib.util.spec_from_file_location("_wevibe_backgammon_sxe", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"unable to load backgammon_sxe helpers from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    assert isinstance(module, ModuleType)
-    spec.loader.exec_module(module)
-
-    build_substrate_events = getattr(module, "_build_substrate_events", None)
-    session_id_counts = getattr(module, "_session_id_counts_from_events", None)
-    session_id_from_events = getattr(module, "_session_id_from_events", None)
-
-    if not callable(build_substrate_events):
-        raise RuntimeError("backgammon_sxe._build_substrate_events missing or non-callable")
-    if not callable(session_id_counts):
-        raise RuntimeError("backgammon_sxe._session_id_counts_from_events missing or non-callable")
-    if not callable(session_id_from_events):
-        raise RuntimeError("backgammon_sxe._session_id_from_events missing or non-callable")
-    return build_substrate_events, session_id_counts, session_id_from_events
 
 
 def _atomic_write_json_private(path: Path, payload: Mapping[str, Any]) -> None:
@@ -736,12 +703,6 @@ class RealSessionRunner:
         self._strategy_e_prompt_path = self._repo_root / "scaffold" / "sxe-candidate" / "E-assembled.txt"
         self._strategy_s_prompt_path = self._repo_root / "scaffold" / "sxe-candidate" / "S-fork-reasoning.md"
         self._strategy_s_prompt = _load_required_text(self._strategy_s_prompt_path)
-
-        (
-            self._build_substrate_events,
-            self._session_id_counts_from_events,
-            self._session_id_from_events,
-        ) = _load_sxe_helpers(self._repo_root)
 
         self._max_attempts, self._max_attempts_source = _resolve_positive_int_env(
             "WEVIBE_BENCH_MAX_ATTEMPTS",
@@ -1292,18 +1253,17 @@ class RealSessionRunner:
                 f"missing run directory for extraction sequence_index={session.sequence_index}: {state.run_dir}"
             )
 
-        events, event_stats, _ = self._build_substrate_events(session_dir=state.run_dir)
-        session_counts = self._session_id_counts_from_events(state.run_dir)
-        session_id = self._session_id_from_events(
-            state.run_dir,
-            session_counts=session_counts,
-        )
-        if session_id is None:
-            session_id = state.last_session_id
-        if session_id is None:
+        # The session DB is the substrate. The bench hands WeVibe the path and
+        # WeVibe projects it (D-SESSION-SUBSTRATE: one builder, shared by the
+        # dashboard Extract path and the benchmark). The bench builds nothing.
+        session_db_path = state.run_dir / "session-db" / "opencode.db"
+        if not session_db_path.is_file():
             raise RuntimeError(
-                "unable to resolve session_id from worker events; extraction cannot continue"
+                "missing session database for extraction "
+                f"sequence_index={session.sequence_index}: {session_db_path}"
             )
+
+        session_id = state.last_session_id
 
         self._contributor_rest.last_job_id = None
         extract_model, extract_provider = self._extract_model_for_session(session)
@@ -1316,7 +1276,7 @@ class RealSessionRunner:
 
         try:
             memories = self._proof.produce_memories(
-                events=events,
+                session_db_path=str(session_db_path),
                 model=extract_model,
                 api_key=self._extract_api_key,
                 project_context=project_context,
@@ -1367,13 +1327,13 @@ class RealSessionRunner:
             )
 
         _LOG.info(
-            "run_cumulative.extract sequence_index=%d memory_mode=%s job_id=%s session_fp=%s candidate_count=%d events_sha256_first8=%s",
+            "run_cumulative.extract sequence_index=%d memory_mode=%s job_id=%s session_fp=%s candidate_count=%d session_db=%s",
             session.sequence_index,
             session.memory_mode,
             extraction_job_id,
             SessionRecord.session_fp_of(session_id),
             len(candidate_refs),
-            str(event_stats.get("events_sha256_first8") or "none"),
+            session_db_path,
         )
 
         return {

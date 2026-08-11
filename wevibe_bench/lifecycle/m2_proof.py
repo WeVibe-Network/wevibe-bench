@@ -375,7 +375,7 @@ class M2Proof:
 
     def produce_memories(
         self,
-        events: list[dict[str, Any]],
+        session_db_path: str,
         model: str,
         api_key: str,
         project_context: dict[str, Any],
@@ -421,7 +421,7 @@ class M2Proof:
 
         client = self._contributor_rest()
         job_id = client.extract(
-            events=events,
+            session_db_path=session_db_path,
             model=model,
             project_context=context,
             org_id=org_id,
@@ -452,7 +452,7 @@ class M2Proof:
 
     def produce_memory(
         self,
-        events: list[dict[str, Any]],
+        session_db_path: str,
         model: str,
         api_key: str,
         project_context: dict[str, Any],
@@ -464,7 +464,7 @@ class M2Proof:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         memories = self.produce_memories(
-            events=events,
+            session_db_path=session_db_path,
             model=model,
             api_key=api_key,
             project_context=project_context,
@@ -940,7 +940,7 @@ class M2Proof:
 
     def run(
         self,
-        events: list[dict[str, Any]],
+        session_db_path: str,
         model: str,
         api_key: str,
         project_context: dict[str, Any],
@@ -949,7 +949,7 @@ class M2Proof:
         qdrant_before = self._snapshot_fn(self._qdrant_url)
 
         memory = self.produce_memory(
-            events=events,
+            session_db_path=session_db_path,
             model=model,
             api_key=api_key,
             project_context=project_context,

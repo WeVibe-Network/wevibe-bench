@@ -40,13 +40,13 @@ def test_m2_proof_run_result_and_m2_result_json_are_content_free() -> None:
     class FakeContributorRest:
         def extract(
             self,
-            events: list[dict[str, Any]],
+            session_db_path: str,
             model: str,
             project_context: dict[str, Any] | None = None,
             org_id: str | None = None,
             **_kwargs: Any,
         ) -> str:
-            assert events == events_payload
+            assert session_db_path == "/tmp/bench-test/session-db/opencode.db"
             assert model == "model-a"
             assert project_context == {"project": "ctx", "api_key_present": True}
             assert org_id == "org-77"
@@ -253,7 +253,7 @@ def test_m2_proof_run_result_and_m2_result_json_are_content_free() -> None:
     )
 
     result = proof.run(
-        events=events_payload,
+        session_db_path="/tmp/bench-test/session-db/opencode.db",
         model="model-a",
         api_key="api-key",
         project_context={"project": "ctx"},
@@ -295,7 +295,7 @@ def test_m2_proof_direct_memory_log_uses_memory_fp_and_not_text_prefix() -> None
     class ExtractShouldNotRun:
         def extract(
             self,
-            events: list[dict[str, Any]],
+            session_db_path: str,
             model: str,
             project_context: dict[str, Any] | None = None,
             org_id: str | None = None,
@@ -323,7 +323,7 @@ def test_m2_proof_direct_memory_log_uses_memory_fp_and_not_text_prefix() -> None
     )
 
     memory = proof.produce_memory(
-        events=[{"kind": "user", "time": 1, "seq": 0, "text": "ignored"}],
+        session_db_path="/tmp/bench-test/session-db/opencode.db",
         model="ignored",
         api_key="",
         project_context={"project": "ctx"},
@@ -354,13 +354,13 @@ def test_m2_proof_produce_memories_keeps_atomic_candidates_separate() -> None:
     class FakeContributorRest:
         def extract(
             self,
-            events: list[dict[str, Any]],
+            session_db_path: str,
             model: str,
             project_context: dict[str, Any] | None = None,
             org_id: str | None = None,
             **_kwargs: Any,
         ) -> str:
-            assert events == events_payload
+            assert session_db_path == "/tmp/bench-test/session-db/opencode.db"
             assert model == "model-a"
             assert project_context == {"project": "ctx", "api_key_present": True}
             assert org_id == "org-1"
@@ -415,7 +415,7 @@ def test_m2_proof_produce_memories_keeps_atomic_candidates_separate() -> None:
     )
 
     memories = proof.produce_memories(
-        events=events_payload,
+        session_db_path="/tmp/bench-test/session-db/opencode.db",
         model="model-a",
         api_key="api-key",
         project_context={"project": "ctx"},

@@ -25,15 +25,6 @@ def _build_real_session_runner(module: Any, monkeypatch: pytest.MonkeyPatch, tmp
     (repo_root / "tasks" / "backgammon").mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(module, "_load_required_text", lambda _path: "strategy-s")
-    monkeypatch.setattr(
-        module,
-        "_load_sxe_helpers",
-        lambda _repo_root: (
-            lambda **_kwargs: ([], {}, []),
-            lambda _run_dir: {},
-            lambda *_args, **_kwargs: None,
-        ),
-    )
 
     return module.RealSessionRunner(
         task="backgammon",

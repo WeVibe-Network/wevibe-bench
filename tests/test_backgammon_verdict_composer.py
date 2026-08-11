@@ -9,7 +9,6 @@ from wevibe_bench.adapters.backgammon import BackgammonRunner
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-from backgammon_sxe import _build_substrate_events  # noqa: E402
 
 
 def _sync_feedback_patterns() -> tuple[re.Pattern[str], re.Pattern[str]]:
@@ -131,44 +130,3 @@ def test_build_feedback_prompt_headers_and_invariants() -> None:
         "\n"
         "- (gate runner reported FAIL with no itemised checks): FAILING"
     )
-
-
-def test_build_substrate_events_preserves_verdict_texts_verbatim(tmp_path: Path) -> None:
-    worker_events = tmp_path / "worktree.events.jsonl"
-    sidecar = tmp_path / "worktree.user-events.jsonl"
-
-    pass_verdict = "That fixed it — [G01] A, [G03] C all pass now."
-    failure_verdict = (
-        "The rest are still failing — fix the implementation so they pass. "
-        "Do not explain, just edit the code."
-    )
-    normal_row = "initial prompt"
-
-    sidecar.write_text(
-        "\n".join(
-            [
-                json.dumps({"type": "user", "timestamp": 1_700_100_000_001, "attempt": 1, "text": normal_row}),
-                json.dumps({"type": "user", "timestamp": 1_700_100_000_002, "attempt": 2, "text": pass_verdict}),
-                json.dumps({"type": "user", "timestamp": 1_700_100_000_003, "attempt": 2, "text": failure_verdict}),
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    worker_events.write_text(
-        json.dumps(
-            {
-                "type": "text",
-                "timestamp": 1_700_100_000_100,
-                "part": {"text": "assistant output", "time": {"start": 1_700_100_000_101}},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    events, _, _ = _build_substrate_events(session_dir=tmp_path)
-    user_events = [event for event in events if event.get("kind") == "user"]
-
-    assert [event["text"] for event in user_events] == [normal_row, pass_verdict, failure_verdict]
-    assert [event["kind"] for event in user_events] == ["user", "user", "user"]

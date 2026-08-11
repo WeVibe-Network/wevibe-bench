@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
 import time
@@ -71,8 +70,8 @@ class _PromptInjectingRest:
 
     def extract(
         self,
-        events: list[dict[str, Any]],
         model: str,
+        session_db_path: str,
         project_context: dict[str, Any] | None = None,
         org_id: str | None = None,
         provider: str | None = None,
@@ -83,7 +82,7 @@ class _PromptInjectingRest:
         session_id: str | None = None,
     ) -> str:
         return self._inner.extract(
-            events=events,
+            session_db_path=session_db_path,
             model=model,
             project_context=project_context,
             org_id=org_id,
@@ -190,310 +189,6 @@ def _json_line(path: Path, line_no: int, raw: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"invalid JSONL object at {path}:{line_no}: expected object")
     return payload
-
-
-def _event_files(session_dir: Path) -> list[Path]:
-    files = sorted({p.resolve() for p in session_dir.rglob("*.events.jsonl")})
-    if files:
-        return files
-
-    fallback = session_dir / "worktree.events.jsonl"
-    if fallback.is_file():
-        return [fallback.resolve()]
-    raise RuntimeError(f"no worker events JSONL files found under {session_dir}")
-
-
-def _session_id_counts_from_events(session_dir: Path) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for events_file in _event_files(session_dir):
-        try:
-            lines = events_file.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            raise RuntimeError(f"unable to read events file {events_file}: {exc}") from exc
-
-        for raw in lines:
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-
-            session_id = payload.get("sessionID")
-            if not isinstance(session_id, str):
-                continue
-            normalized = session_id.strip()
-            if not normalized:
-                continue
-            counts[normalized] = counts.get(normalized, 0) + 1
-    return counts
-
-
-def _session_id_from_events(
-    session_dir: Path,
-    *,
-    session_counts: dict[str, int] | None = None,
-) -> str | None:
-    counts = session_counts if session_counts is not None else _session_id_counts_from_events(session_dir)
-    if not counts:
-        return None
-    if len(counts) == 1:
-        return next(iter(counts))
-
-    chosen_session_id, _ = max(counts.items(), key=lambda item: (item[1], item[0]))
-    counts_blob = ", ".join(
-        f"{session_id}:{count}"
-        for session_id, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    )
-    print(
-        f"[{_utc_iso()}] WARNING multiple sessionIDs in events session_dir={session_dir} "
-        f"chosen_session_id={chosen_session_id} distinct_sessions={counts_blob}",
-        flush=True,
-    )
-    return chosen_session_id
-
-
-def _canonical_json(value: Any, *, source: str) -> str:
-    try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"{source} must be JSON-serializable: {exc}") from exc
-
-
-def _finite_time_ms(value: Any, *, source: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise RuntimeError(f"{source} must be finite numeric ms timestamp, got: {value!r}")
-    numeric = float(value)
-    if not math.isfinite(numeric):
-        raise RuntimeError(f"{source} must be finite numeric ms timestamp, got: {value!r}")
-    return int(numeric)
-
-
-def _event_time_ms(entry: dict[str, Any], part: dict[str, Any], *, path: Path, line_no: int) -> int:
-    part_time = part.get("time")
-    if isinstance(part_time, dict) and "start" in part_time:
-        return _finite_time_ms(
-            part_time.get("start"),
-            source=f"worker event part.time.start at {path}:{line_no}",
-        )
-    return _finite_time_ms(
-        entry.get("timestamp"),
-        source=f"worker event timestamp at {path}:{line_no}",
-    )
-
-
-def _user_sidecar_for_events(events_file: Path) -> Path:
-    suffix = ".events.jsonl"
-    if not events_file.name.endswith(suffix):
-        raise RuntimeError(f"events file name must end with {suffix}: {events_file}")
-    return events_file.with_name(events_file.name[: -len(suffix)] + ".user-events.jsonl")
-
-
-def _build_substrate_events(
-    *,
-    session_dir: Path,
-) -> tuple[list[dict[str, Any]], dict[str, Any], list[Path]]:
-    events_files = _event_files(session_dir)
-    events: list[dict[str, Any]] = []
-    seq = 0
-    skipped_error_events = 0
-
-    def emit(event: dict[str, Any]) -> None:
-        nonlocal seq
-        event["seq"] = seq
-        seq += 1
-
-        kind = event.get("kind")
-        if kind not in {"user", "assistant", "reasoning", "tool", "edit"}:
-            raise RuntimeError(f"invalid substrate event kind={kind!r}")
-
-        time_value = event.get("time")
-        if isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
-            raise RuntimeError(f"invalid substrate event time kind={kind!r} time={time_value!r}")
-        if not math.isfinite(float(time_value)):
-            raise RuntimeError(f"invalid substrate event time kind={kind!r} time={time_value!r}")
-
-        seq_value = event.get("seq")
-        if not isinstance(seq_value, int) or seq_value < 0:
-            raise RuntimeError(f"invalid substrate event seq kind={kind!r} seq={seq_value!r}")
-
-        events.append(event)
-
-    for events_file in events_files:
-        sidecar_file = _user_sidecar_for_events(events_file)
-        if not sidecar_file.is_file():
-            raise RuntimeError(
-                "missing user sidecar for worker events file: "
-                f"events={events_file} sidecar={sidecar_file}"
-            )
-
-        for line_no, raw in enumerate(sidecar_file.read_text(encoding="utf-8").splitlines(), start=1):
-            line = raw.strip()
-            if not line:
-                continue
-            user_entry = _json_line(sidecar_file, line_no, line)
-            if user_entry.get("type") != "user":
-                raise RuntimeError(
-                    f"invalid user sidecar record at {sidecar_file}:{line_no}: "
-                    f"type must be 'user', got {user_entry.get('type')!r}"
-                )
-            user_text = user_entry.get("text")
-            if not isinstance(user_text, str):
-                raise RuntimeError(
-                    f"invalid user sidecar record at {sidecar_file}:{line_no}: text must be string"
-                )
-            emit(
-                {
-                    "kind": "user",
-                    "time": _finite_time_ms(
-                        user_entry.get("timestamp"),
-                        source=f"user sidecar timestamp at {sidecar_file}:{line_no}",
-                    ),
-                    "text": user_text,
-                }
-            )
-
-        for line_no, raw in enumerate(events_file.read_text(encoding="utf-8").splitlines(), start=1):
-            line = raw.strip()
-            if not line:
-                continue
-
-            entry = _json_line(events_file, line_no, line)
-            event_type = entry.get("type")
-            if event_type in {"step_start", "step_finish"}:
-                continue
-            if event_type == "error":
-                skipped_error_events += 1
-                continue
-
-            part = entry.get("part")
-            if not isinstance(part, dict):
-                raise RuntimeError(f"worker event part missing object at {events_file}:{line_no}")
-
-            event_time = _event_time_ms(entry, part, path=events_file, line_no=line_no)
-
-            part_metadata = part.get("metadata")
-            openrouter_meta = part_metadata.get("openrouter") if isinstance(part_metadata, dict) else None
-            reasoning_details = (
-                openrouter_meta.get("reasoning_details") if isinstance(openrouter_meta, dict) else None
-            )
-            if isinstance(reasoning_details, list):
-                for detail in reasoning_details:
-                    if not isinstance(detail, dict):
-                        continue
-                    if detail.get("type") != "reasoning.text":
-                        continue
-                    reasoning_text = detail.get("text")
-                    if isinstance(reasoning_text, str) and reasoning_text.strip():
-                        emit(
-                            {
-                                "kind": "reasoning",
-                                "time": event_time,
-                                "role": "assistant",
-                                "text": reasoning_text,
-                            }
-                        )
-
-            if event_type == "text":
-                assistant_text = part.get("text")
-                if isinstance(assistant_text, str) and assistant_text.strip():
-                    emit(
-                        {
-                            "kind": "assistant",
-                            "time": event_time,
-                            "role": "assistant",
-                            "text": assistant_text,
-                        }
-                    )
-                continue
-
-            if event_type != "tool_use":
-                continue
-
-            tool_name = part.get("tool")
-            if not isinstance(tool_name, str) or not tool_name.strip():
-                raise RuntimeError(f"worker tool_use missing tool name at {events_file}:{line_no}")
-
-            state = part.get("state")
-            if not isinstance(state, dict):
-                raise RuntimeError(f"worker tool_use state missing object at {events_file}:{line_no}")
-
-            status_value = state.get("status")
-            state_input = state.get("input")
-            if tool_name in {"edit", "write"} and status_value != "error":
-                if not isinstance(state_input, dict):
-                    raise RuntimeError(f"edit/write tool input missing object at {events_file}:{line_no}")
-
-                file_path = state_input.get("filePath")
-                if not isinstance(file_path, str) or not file_path.strip():
-                    raise RuntimeError(f"edit/write tool missing filePath at {events_file}:{line_no}")
-
-                detail_key = "newString" if tool_name == "edit" else "content"
-                detail = state_input.get(detail_key)
-                if not isinstance(detail, str):
-                    raise RuntimeError(
-                        f"edit/write tool missing string {detail_key} at {events_file}:{line_no}"
-                    )
-
-                emit(
-                    {
-                        "kind": "edit",
-                        "time": event_time,
-                        "file": file_path,
-                        "detail": detail,
-                    }
-                )
-                continue
-
-            state_output = state.get("output")
-            state_metadata = state.get("metadata")
-
-            tool_event: dict[str, Any] = {
-                "kind": "tool",
-                "time": event_time,
-                "name": tool_name,
-                "input": _canonical_json(
-                    state_input,
-                    source=f"tool input at {events_file}:{line_no}",
-                ),
-                "output": state_output,
-                "exit": state_metadata.get("exit") if isinstance(state_metadata, dict) else None,
-                "status": status_value,
-            }
-            if status_value == "error":
-                error_text: str | None = None
-                state_error = state.get("error")
-                if isinstance(state_error, str) and state_error.strip():
-                    error_text = state_error
-                elif isinstance(state_output, str) and state_output.strip():
-                    error_text = state_output
-                elif state_output is not None:
-                    error_text = _canonical_json(
-                        state_output,
-                        source=f"tool output at {events_file}:{line_no}",
-                    )
-                if error_text is not None:
-                    tool_event["error"] = error_text
-            emit(tool_event)
-
-    kind_counts = {kind: 0 for kind in ("user", "assistant", "reasoning", "tool", "edit")}
-    for event in events:
-        kind = event.get("kind")
-        if isinstance(kind, str):
-            kind_counts[kind] = kind_counts.get(kind, 0) + 1
-
-    canonical_events_json = _canonical_json(events, source=f"substrate events list under {session_dir}")
-    stats = {
-        "event_count": len(events),
-        "kind_counts": kind_counts,
-        "skipped_error_events": skipped_error_events,
-        "total_chars": len(canonical_events_json),
-        "events_sha256_first8": _sha256_first8(canonical_events_json),
-    }
-    return events, stats, events_files
 
 
 def _normalize_keywords(raw: Any) -> list[str]:
@@ -658,31 +353,12 @@ def main() -> int:
         e_prompt = _load_prompt(e_prompt_path)
         s_prompt = _load_prompt(s_prompt_path)
 
-        stage = "substrate_events"
-        events, event_stats, events_files = _build_substrate_events(session_dir=session_dir)
-        session_counts = _session_id_counts_from_events(session_dir)
-        session_id = _session_id_from_events(session_dir, session_counts=session_counts)
-        progress(
-            "session linkage "
-            f"source_mode={args.source_mode} distinct_session_count={len(session_counts)} "
-            f"chosen_session_id={session_id or 'none'}"
-        )
-        if args.source_mode == "on" and session_id is None:
-            progress(
-                "WARNING source_mode=on no sessionID found in events; "
-                "injected_memory dedup will be skipped for this run"
-            )
-        kind_counts = event_stats.get("kind_counts", {})
-        progress(
-            "substrate events built "
-            f"events_files={len(events_files)} event_count={event_stats.get('event_count', len(events))} "
-            f"kind_user={kind_counts.get('user', 0)} kind_assistant={kind_counts.get('assistant', 0)} "
-            f"kind_reasoning={kind_counts.get('reasoning', 0)} kind_tool={kind_counts.get('tool', 0)} "
-            f"kind_edit={kind_counts.get('edit', 0)} "
-            f"skipped_error_events={event_stats.get('skipped_error_events', 0)} "
-            f"total_chars={event_stats.get('total_chars', 0)} "
-            f"events_sha256_first8={event_stats.get('events_sha256_first8', 'none')}"
-        )
+        stage = "substrate"
+        session_db_path = session_dir / "session-db" / "opencode.db"
+        if not session_db_path.is_file():
+            raise RuntimeError(f"session database not found for extraction: {session_db_path}")
+        session_id = None
+        progress(f"substrate source session_db={session_db_path}")
 
         stage = "identity"
         leader = _load_identity("WEVIBE_BENCH_LEADER_SEED_HEX")
@@ -808,13 +484,12 @@ def main() -> int:
         progress(
             "extract start "
             f"session_model={args.session_model} extract_model={extract_model} "
-            f"extract_timeout_s={args.extract_timeout} events={event_stats.get('event_count', len(events))} "
-            f"events_sha256_first8={event_stats.get('events_sha256_first8', 'none')} "
+            f"extract_timeout_s={args.extract_timeout} session_db={session_db_path} "
             f"prompt=E-assembled provider={extract_provider}"
         )
 
         memories_raw = proof.produce_memories(
-            events=events,
+            session_db_path=str(session_db_path),
             model=extract_model,
             api_key=api_key,
             project_context=project_context,

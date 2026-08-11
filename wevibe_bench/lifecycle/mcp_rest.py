@@ -136,8 +136,8 @@ class McpRest:
 
     def extract(
         self,
-        events: list[dict[str, Any]],
         model: str,
+        session_db_path: str,
         project_context: dict[str, Any] | None = None,
         org_id: str | None = None,
         provider: str | None = None,
@@ -147,8 +147,20 @@ class McpRest:
         prompt: str | None = None,
         session_id: str | None = None,
     ) -> str:
+        """Start an extraction job against a session database.
+
+        The bench NEVER builds the substrate itself: it hands WeVibe the path to
+        the session DB and WeVibe projects it (D-SESSION-SUBSTRATE — one builder,
+        shared by the dashboard Extract path and the benchmark). A bench-side
+        projection is product logic in the benchmark repo and is exactly the
+        divergence that silently broke extraction.
+        """
+        path = str(session_db_path or "").strip()
+        if not path:
+            raise RuntimeError("extract requires a non-empty session_db_path")
+
         body: dict[str, Any] = {
-            "events": events,
+            "session_db_path": path,
             "model": model,
         }
         if project_context is not None:

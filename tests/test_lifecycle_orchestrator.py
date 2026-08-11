@@ -540,7 +540,7 @@ def test_m2_proof_produce_memory_uses_direct_memory_without_extract() -> None:
     class ExtractShouldNotRun:
         def extract(
             self,
-            events: list[dict[str, Any]],
+            session_db_path: str,
             model: str,
             project_context: dict[str, Any] | None = None,
             org_id: str | None = None,
@@ -576,7 +576,7 @@ def test_m2_proof_produce_memory_uses_direct_memory_without_extract() -> None:
     )
 
     memory = proof.produce_memory(
-        events=[{"kind": "user", "time": 1, "seq": 0, "text": "ignored"}],
+        session_db_path="/tmp/bench-test/session-db/opencode.db",
         model="ignored",
         api_key="",
         project_context={"project": "ctx"},
@@ -641,9 +641,9 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     commit_batch_call: dict[str, Any] = {}
 
     class FakeContributorRest:
-        def extract(self, events: list[dict[str, Any]], model: str, project_context: dict[str, Any] | None = None, org_id: str | None = None, **_kwargs: Any) -> str:
+        def extract(self, session_db_path: str, model: str, project_context: dict[str, Any] | None = None, org_id: str | None = None, **_kwargs: Any) -> str:
             calls.append("extract")
-            assert events == [{"kind": "user", "time": 1700000000000, "seq": 0, "text": "task prompt"}]
+            assert session_db_path == "/tmp/bench-test/session-db/opencode.db"
             assert model == "model-a"
             assert org_id == "org-77"
             return "job-1"
@@ -854,7 +854,7 @@ def test_m2_proof_run_executes_verify_commit_hops_and_reports_delivery_yes() -> 
     )
 
     result = proof.run(
-        events=[{"kind": "user", "time": 1700000000000, "seq": 0, "text": "task prompt"}],
+        session_db_path="/tmp/bench-test/session-db/opencode.db",
         model="model-a",
         api_key="api-key",
         project_context={"project": "ctx"},

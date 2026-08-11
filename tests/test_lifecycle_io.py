@@ -301,16 +301,20 @@ def test_mcp_rest_extract_and_recall_build_expected_urls_and_bearer_header(tmp_p
 
     cfg = LifecycleConfig(session_token_path=str(token_path))
     client = McpRest("http://127.0.0.1:4450", cfg, logger, transport=transport)
-    events = [{"kind": "user", "time": 1, "seq": 0, "text": "prompt"}]
+    session_db_path = "/tmp/bench-test/session-db/opencode.db"
 
-    job_id = client.extract(events, "model-a", org_id="org-7")
+    job_id = client.extract("model-a", session_db_path, org_id="org-7")
     recall = client.recall("query text", "org-7")
 
     assert job_id == "job-1"
     assert recall == {"status": "ok", "memories": []}
 
     assert calls[0]["url"] == "http://127.0.0.1:4450/v1/extract"
-    assert calls[0]["body"] == {"events": events, "model": "model-a", "org_id": "org-7"}
+    assert calls[0]["body"] == {
+        "session_db_path": session_db_path,
+        "model": "model-a",
+        "org_id": "org-7",
+    }
 
     extract_headers = calls[0]["headers"]
     assert isinstance(extract_headers, dict)
@@ -339,11 +343,11 @@ def test_mcp_rest_extract_includes_session_id_only_when_provided(tmp_path) -> No
 
     cfg = LifecycleConfig(session_token_path=str(token_path))
     client = McpRest("http://127.0.0.1:4450", cfg, logger, transport=transport)
-    events = [{"kind": "user", "time": 1, "seq": 0, "text": "prompt"}]
+    session_db_path = "/tmp/bench-test/session-db/opencode.db"
 
-    assert client.extract(events, "model-a", org_id="org-7", session_id="sess-xyz") == "job-1"
-    assert client.extract(events, "model-a", org_id="org-7") == "job-2"
-    assert client.extract(events, "model-a", org_id="org-7", session_id=None) == "job-3"
+    assert client.extract("model-a", session_db_path, org_id="org-7", session_id="sess-xyz") == "job-1"
+    assert client.extract("model-a", session_db_path, org_id="org-7") == "job-2"
+    assert client.extract("model-a", session_db_path, org_id="org-7", session_id=None) == "job-3"
 
     first_body = calls[0]["body"]
     assert isinstance(first_body, dict)
