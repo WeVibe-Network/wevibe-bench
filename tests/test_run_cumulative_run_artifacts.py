@@ -324,6 +324,48 @@ def test_turn_terminal_records_appended_for_truncated_turns(tmp_path: Path) -> N
     assert turn["session_id"] == "sid-1"
 
 
+def test_scoring_turn_exclusions_reach_the_status_stream(tmp_path: Path) -> None:
+    """WO-NUDGE-INF-1: the status stream must carry BOTH scoring-turn subtrahends.
+
+    Scoring turns are `turns - guard_aborted_turns - finalize_timeout_turns`.
+    RC-5 makes the manifest plus this status stream the ONLY sources a scorecard
+    may read, so a subtrahend that lives solely on a PROGRESS log line makes the
+    measurement unreconstructable from the authoritative artifacts. This pins
+    both fields into the attempt record.
+    """
+    module = _load_run_cumulative_module()
+    runs_dir = tmp_path / "runs"
+
+    result = _cell_result()
+    result.verdict = "FAIL"
+    result.termination_reason = "attempt_ceiling_reached"
+    result.guard_aborted_turns = 2
+    result.finalize_timeout_turns = 3
+
+    class _ExclusionRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            self._kwargs = kwargs
+
+        def run_cell(self, run_label: str, run_dir: Path, task_id: str = "backgammon") -> Any:
+            return result
+
+    runner = _build_runner(module, tmp_path, runs_dir=runs_dir)
+    runner._runner_cls = _ExclusionRunner
+    runner.run_session(_session(0))
+
+    attempts = [r for r in _read_status_records(runs_dir) if r["type"] == "attempt"]
+    assert len(attempts) == 1
+    attempt = attempts[0]
+
+    assert attempt["guard_aborted_turns"] == 2
+    assert attempt["finalize_timeout_turns"] == 3
+
+    # `recovery_nudges` is deliberately absent: it never reaches
+    # BackgammonCellResult, so emitting it would write a constant 0 and
+    # fabricate the appearance of a measurement.
+    assert "recovery_nudges" not in attempt
+
+
 def test_served_model_capture_and_failure_tolerance(tmp_path: Path) -> None:
     module = _load_run_cumulative_module()
     runs_dir = tmp_path / "runs"

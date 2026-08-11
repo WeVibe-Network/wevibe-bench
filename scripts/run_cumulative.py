@@ -1064,6 +1064,22 @@ class RealSessionRunner:
             # Guard-killed turns excluded from scoring turns (WO-TURNACCT-1) —
             # carried so the exclusion is visible in the ledger, never silent.
             "guard_aborted_turns": int(getattr(result, "guard_aborted_turns", 0) or 0),
+            # Finalize-killed turns, excluded from scoring turns on the same
+            # grounds (WO-NUDGE-INF-1). Scoring turns are
+            # `turns - guard_aborted_turns - finalize_timeout_turns`, so a
+            # scorecard that cannot read this subtrahend cannot reconstruct the
+            # measurement. RC-5 makes the manifest plus this status stream the
+            # ONLY sources a scorecard may use, so a value carried solely on a
+            # PROGRESS log line is invisible to it — which is why this is here
+            # and not left to the log.
+            #
+            # NOTE: `recovery_nudges` is deliberately NOT emitted. It exists on
+            # the internal per-phase `_OpencodeRunStats` only and never reaches
+            # `BackgammonCellResult`, so emitting it here would silently write a
+            # constant 0 and fabricate the appearance of a measurement. The
+            # nudge count stays observable on the PROGRESS line until it is
+            # plumbed through the cell result properly.
+            "finalize_timeout_turns": int(getattr(result, "finalize_timeout_turns", 0) or 0),
             "unmetered_turns": int(getattr(result, "unmetered_turns", 0) or 0),
             "unmetered_turn_wall_s": float(getattr(result, "unmetered_turn_wall_s", 0.0) or 0.0),
             "session_fp": session_fp,
