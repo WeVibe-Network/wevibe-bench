@@ -30,7 +30,7 @@ export function renderTopbar(board, { stale, lastError }) {
 
   return `
   <div class="topbar">
-    <span class="brand">WEVIBE LIVE BENCHMARK</span>
+    <span class="brand">HOW GOOD IS <u>YOUR</u> MEMORY SYSTEM</span>
     <span class="ident">${r.cell_label ? esc(r.cell_label) : nul("no cell")}</span>
     <span class="armtag" style="color:${arm.color}">${arm.label}</span>
     <span class="ident">${r.model ? esc(r.model) : nul("model unobserved")}</span>

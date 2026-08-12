@@ -76,6 +76,25 @@
   --font:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --fs-hero:56px; --fs-metric:28px; --fs-body:16px; --fs-ident:15px; --fs-label:14px;
 }
+
+/* ── TYPE SCALE AT LAPTOP WIDTH ──────────────────────────────────────────────
+   The scale above is sized for the 1920+ stream target. On a 1440-or-narrower
+   screen the SAME text in narrower columns wrapped short labels onto two and
+   three lines — measured: "median turns to green", "scoring turns",
+   "injected block", "serves · delivery only", and every `.railnote` (up to 4
+   lines). Wrapped labels are what read as "text rendering weird": the value
+   they label gets pushed away from them and the six rail boxes stop aligning.
+
+   One step down at the breakpoint keeps those labels on one line. The hero
+   number and metrics shrink with it so the visual hierarchy is preserved
+   rather than flattened. Nothing here is a per-panel patch — the scale is one
+   place, so the whole board moves together. */
+@media (max-width:1600px){
+  :root{ --fs-hero:44px; --fs-metric:24px; --fs-body:15px; --fs-ident:14px; --fs-label:13px; }
+}
+@media (max-width:1400px){
+  :root{ --fs-hero:38px; --fs-metric:22px; --fs-body:14px; --fs-ident:13px; --fs-label:12px; }
+}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
@@ -100,18 +119,69 @@ body{
 
 .panel{background:var(--panel);border:1px solid var(--rule);display:flex;flex-direction:column;min-height:0}
 .phead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 14px;border-bottom:1px solid var(--rule)}
-.pbody{padding:12px 14px;overflow:hidden;flex:1;min-height:0}
+/* `auto`, NOT `hidden`. On a short screen (measured: 1366x768 and 1280x800)
+   the arm-delta content genuinely exceeds the space the layout can give it,
+   even after the row minimums and the type step-down. `overflow:hidden` there
+   silently AMPUTATES the tail of a panel — on this board that meant the
+   standing "no CI over gate counts" note and part of an arm's cell counts
+   simply disappeared, with nothing on screen indicating anything was missing.
+   Content that is present but scrolled is recoverable; content that is clipped
+   without a mark is indistinguishable from content that was never rendered,
+   which is the exact class of dishonesty the null-state rules exist to stop.
+   At the 1920+ stream target nothing scrolls — this only ever engages below it. */
+.pbody{padding:12px 14px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:var(--rule-2) transparent}
+.pbody::-webkit-scrollbar{width:6px}
+.pbody::-webkit-scrollbar-thumb{background:var(--rule-2)}
+
+/* The right-hand column: arm delta stacked over the recall moment.
+   SAME COLLAPSE CLASS AS THE GRID ROWS, one level down. The hero panel was
+   `flex:0 1 auto` and sized itself from content, leaving the recall panel —
+   `flex:1 1 0` with `min-height:0` — to absorb every shortfall. Measured at
+   1440x900: recall rendered 2px tall against 78px of content, so the panel
+   carrying the gate-mode disclosure vanished entirely.
+
+   Both panels now hold a floor and share the surplus proportionally, so
+   pressure is distributed instead of dumped onto whichever panel is last. */
+.stack{display:flex;flex-direction:column;gap:10px;min-height:0}
+.stack>.panel:first-child{flex:1 1 auto;min-height:132px}
+.stack>.panel:last-child{flex:1 1 auto;min-height:104px}
 
 /* ── top bar ─────────────────────────────────────────────────────────────── */
-.topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;background:var(--bg-2);border-bottom:1px solid var(--rule-2)}
+/* NOWRAP IS LOAD-BEARING. These children are single-line identity chips: a run
+   label, an arm tag, a model name. With default wrapping they broke INTERNALLY
+   the moment natural content width exceeded the bar (measured: 1294px of
+   content at 1440px viewport), turning every item into two lines and growing
+   the bar 49px → 73px. That extra height then cascaded into the grid below and
+   collapsed the ticker row. The bar must stay one line and give up characters
+   instead, so the long identifiers ellipsize rather than reflow the board. */
+.topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;background:var(--bg-2);border-bottom:1px solid var(--rule-2);flex-wrap:nowrap;white-space:nowrap}
+.topbar>*{flex:0 0 auto}
 .brand{font-size:20px;font-weight:700;color:var(--type);letter-spacing:.04em}
 .attest{font-size:var(--fs-label);color:var(--dim);letter-spacing:.06em}
-.spacer{flex:1}
+/* The two long, low-priority identifiers are the ONLY things allowed to shrink:
+   truncating a model name costs a viewer nothing (it is repeated in the
+   provenance strip), whereas truncating the arm tag or the attestation label
+   would hide a claim the board is required to state in full. */
+.topbar .ident{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.spacer{flex:1 1 auto;min-width:0}
 .armtag{font-size:var(--fs-label);font-weight:700;letter-spacing:.08em;padding:3px 10px;border:1px solid currentColor}
 
 /* ── layout: wall-dominant (1c) ──────────────────────────────────────────── */
-.grid{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto 1fr auto;gap:10px;padding:10px;min-height:0}
-.rail{grid-column:1/-1;display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+/* ROW MINIMUMS ARE LOAD-BEARING, NOT PADDING.
+   These rows were `auto 1fr auto`. Row 1 (`auto`) is sized by its content, so
+   the hero panel took whatever it wanted and row 2 (`1fr`) received only the
+   remainder. Below roughly 1500px of usable height the remainder reached ZERO
+   and the Episode ticker rendered as a 2px sliver — measured 2px tall against
+   61px of content at 1440x900, 1366x768 and 1280x800, i.e. every laptop
+   screen. A panel silently collapsing to nothing is indistinguishable from a
+   panel that has no data, which is the one confusion this board exists to
+   prevent.
+
+   Both rows now carry an explicit minimum AND a proportional share, so they
+   shrink together under pressure and neither can be starved to zero by the
+   other. The 1.35:1 ratio preserves the wall-dominant intent. */
+.grid{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:minmax(150px,1.35fr) minmax(112px,1fr) auto auto;gap:10px;padding:10px;min-height:0}
+.rail{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
 
 /* ── the wall ────────────────────────────────────────────────────────────── */
 .wallrow{margin-bottom:14px}
@@ -128,13 +198,24 @@ body{
 /* ── hero ────────────────────────────────────────────────────────────────── */
 .hero{display:flex;align-items:flex-start;gap:22px}
 .heronum{font-size:var(--fs-hero);font-weight:700;line-height:1;color:var(--type)}
-.collect{font-size:32px;font-weight:700;letter-spacing:.06em;color:var(--dim)}
+/* Derived from the hero scale rather than pinned: COLLECTING is the empty
+   state that sits on screen for most of a run, so it must shrink with the
+   number it stands in for instead of overpowering it on a small screen. */
+.collect{font-size:calc(var(--fs-hero) * .58);font-weight:700;letter-spacing:.06em;color:var(--dim)}
 .armcol{flex:1}
 .armrate{font-size:var(--fs-metric);font-weight:600}
 .note{font-size:var(--fs-label);color:var(--dim);line-height:1.5;margin-top:8px;border-top:1px solid var(--rule);padding-top:8px}
 
 /* ── ticker ──────────────────────────────────────────────────────────────── */
 .trow{display:grid;grid-template-columns:96px 40px 1fr 54px 62px;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--rule);font-size:var(--fs-body)}
+
+/* The live-cell metric grid. Six FIXED tracks forced short labels
+   ("scoring turns", "injected block") to wrap onto two lines below ~1500px,
+   which pushes each label away from the number it names. auto-fit lets the row
+   reflow to fewer, wider columns instead of squeezing all six. */
+.cellgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:12px}
+.cellgrid>div{min-width:0}
+.cellval{font-size:calc(var(--fs-metric) * .8);font-weight:600;color:var(--type)}
 /* red-again: the pre-trigger tension. STATIC — double rule + inset, no pulse. */
 .trow.tense{border-left:3px double var(--fail);box-shadow:inset 0 0 0 1px rgba(255,107,107,.22);background:rgba(255,107,107,.05)}
 .state{font-size:var(--fs-label);font-weight:700;letter-spacing:.04em}
@@ -145,10 +226,161 @@ body{
 .cand{display:grid;grid-template-columns:1fr 52px 62px 96px;gap:8px;padding:4px 0;border-bottom:1px solid var(--rule);font-size:var(--fs-ident)}
 .disp{font-size:12px;font-weight:600;letter-spacing:.04em}
 
-.railbox{background:var(--panel);border:1px solid var(--rule);padding:8px 10px}
-.railval{font-size:22px;font-weight:600;color:var(--type);margin:2px 0}
-.railnote{font-size:12px;color:var(--dim);line-height:1.35}
+.railbox{background:var(--panel);border:1px solid var(--rule);padding:8px 10px;min-width:0}
+.railval{font-size:calc(var(--fs-metric) * .8);font-weight:600;color:var(--type);margin:2px 0}
+.railnote{font-size:calc(var(--fs-label) - 1px);color:var(--dim);line-height:1.35}
 .prov{display:flex;gap:16px;flex-wrap:wrap;padding:6px 18px;background:var(--bg-2);border-top:1px solid var(--rule-2);font-size:13px;color:var(--dim)}
+
+/* ── the drawer ──────────────────────────────────────────────────────────────
+   Anchored to the BOTTOM edge, sitting ABOVE the provenance strip — the strip
+   is the board's permanent attestation and must never be occluded, so the
+   drawer's travel stops short of it rather than covering it.
+
+   ONE drawer, three tabs. Three separate popouts would let two live surfaces
+   fight for the same screen edge; a single drawer makes the choice explicit.
+
+   Height is a discrete STOP, never a drag-anywhere resize: a stream viewer
+   should not be able to leave the board in a half-broken layout, and fixed
+   stops keep every row height (34px event, 44px stage) landing on the same
+   pixel grid at every size.
+
+   NO new accent hue. The drawer borrows --arm-a/--arm-b/--fail/--pass with
+   their existing reserved meanings and adds none of its own. */
+.drawer{
+  position:fixed; left:0; right:0; bottom:var(--prov-h,28px);
+  background:var(--bg-2); border-top:1px solid var(--rule-2);
+  display:flex; flex-direction:column;
+  height:var(--drawer-h,34px);
+  max-height:calc(100vh - 120px);
+  z-index:40;
+  /* Height is the ONLY animated property and only on an explicit stop change.
+     The board's motion budget belongs to the recall takeover, so this is a
+     single short ease with no bounce, and it never runs on a data update. */
+  transition:height .16s ease-out;
+}
+.drawer.dragging{transition:none}
+
+/* The lip is always visible and always the same 34px, so the handle never
+   moves. A control that relocates when you open it is a control you have to
+   re-find every time. */
+.dlip{
+  height:34px; min-height:34px; display:flex; align-items:center; gap:14px;
+  padding:0 18px; cursor:pointer; user-select:none;
+  border-bottom:1px solid transparent;
+}
+.drawer.open .dlip{border-bottom-color:var(--rule)}
+.dlip:hover{background:var(--raised)}
+.dgrip{width:26px;height:3px;background:var(--rule-2);border-radius:2px;flex:0 0 auto}
+.dlip:hover .dgrip{background:var(--dim)}
+
+.dtabs{display:flex;gap:2px;flex:0 0 auto}
+.dtab{
+  font:inherit; font-size:var(--fs-label); letter-spacing:.04em;
+  background:transparent; border:1px solid transparent; color:var(--dim);
+  padding:3px 10px; cursor:pointer; white-space:nowrap;
+}
+.dtab:hover{color:var(--fg)}
+.dtab.on{color:var(--type);border-color:var(--rule-2);background:var(--panel)}
+/* A tab carrying a live count earns emphasis; an empty one must not pretend to. */
+.dtab .dcount{color:var(--dim);margin-left:6px}
+.dtab.on .dcount{color:var(--fg)}
+
+.dbody{flex:1;min-height:0;display:none;overflow:hidden}
+.drawer.open .dbody{display:flex}
+.dpane{flex:1;min-height:0;display:none;flex-direction:column}
+.dpane.on{display:flex}
+.dscroll{
+  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  scrollbar-width:thin;scrollbar-color:var(--rule-2) transparent;
+}
+
+/* ── events pane ─────────────────────────────────────────────────────────── */
+/* Constant 34px row height per kind — the feed must never jitter as rows of
+   different kinds stream in, because a list that reflows is unreadable while
+   it is moving. */
+.evrow{
+  height:34px;min-height:34px;display:flex;align-items:center;gap:10px;
+  padding:0 18px;border-bottom:1px solid var(--rule);
+  font-size:var(--fs-label);white-space:nowrap;overflow:hidden;
+}
+.evrow:hover{background:var(--panel)}
+.evt{color:var(--dim);flex:0 0 auto;font-size:calc(var(--fs-label) - 1px)}
+.evmark{flex:0 0 auto;width:12px;text-align:center;color:var(--dim)}
+.evname{color:var(--type);flex:0 0 auto}
+.evdetail{color:var(--fg);overflow:hidden;text-overflow:ellipsis;min-width:0}
+/* Paths truncate from the LEFT: the filename is the identifying token, not the
+   repo root every path shares. */
+.evpath{direction:rtl;text-align:left;unicode-bidi:plaintext}
+.evrow.thinking .evname,.evrow.thinking .evdetail{color:var(--dim)}
+.evrow.thinking{padding-left:36px}
+.evrow.error .evmark,.evrow.error .evname{color:var(--fail)}
+.evrow.lifecycle .evname{color:var(--dim)}
+
+.dfilters{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:6px 18px;border-bottom:1px solid var(--rule);flex:0 0 auto;
+}
+.chip{
+  font:inherit;font-size:calc(var(--fs-label) - 1px);
+  background:transparent;border:1px solid var(--rule-2);color:var(--dim);
+  padding:2px 8px;cursor:pointer;white-space:nowrap;
+}
+.chip:hover{color:var(--fg)}
+.chip.on{color:var(--type);background:var(--panel)}
+.chip.off{opacity:.45;text-decoration:line-through}
+
+/* ── extraction pane ─────────────────────────────────────────────────────── */
+/* 44px minimum, but a gated stage carries a full-sentence reason and is allowed
+   to grow — truncating the reason a gate refused on would defeat the point. */
+.strow{
+  min-height:44px;display:flex;align-items:flex-start;gap:12px;
+  padding:9px 18px;border-bottom:1px solid var(--rule);font-size:var(--fs-label);
+}
+.stmark{flex:0 0 auto;width:14px;text-align:center;color:var(--dim);line-height:1.5}
+.stname{flex:0 0 auto;width:150px;color:var(--type);letter-spacing:.03em}
+.stdetail{flex:1;min-width:0;color:var(--fg);line-height:1.5;overflow-wrap:anywhere}
+.stright{flex:0 0 auto;color:var(--dim);text-align:right}
+.strow.done .stmark{color:var(--pass)}
+.strow.running .stmark{color:var(--arm-a)}
+.strow.failed .stmark,.strow.failed .stname{color:var(--fail)}
+/* GATED is not a failure — it is the system refusing to proceed on bad input.
+   It gets its own treatment (a left rule, not the fail hue) so a viewer never
+   reads a working integrity gate as a crash. */
+.strow.gated{background:rgba(255,107,107,.05);border-left:2px solid var(--fail)}
+.strow.gated .stmark{color:var(--fail)}
+.strow.pending{opacity:.5}
+.strow.pending .stname{color:var(--fg)}
+
+/* ── control region ──────────────────────────────────────────────────────── */
+.dctl{
+  flex:0 0 auto;min-height:168px;display:flex;flex-direction:column;gap:10px;
+  padding:12px 18px;border-left:1px solid var(--rule);width:340px;
+}
+.dctl-row{display:flex;flex-direction:column;gap:4px}
+.dctl label{font-size:calc(var(--fs-label) - 1px);color:var(--dim);letter-spacing:.04em}
+.dsel{
+  font:inherit;font-size:var(--fs-label);
+  background:var(--panel);color:var(--type);
+  border:1px solid var(--rule-2);padding:5px 8px;width:100%;
+}
+.dsel:disabled{color:var(--dim);opacity:.6;cursor:not-allowed}
+.dbtn{
+  font:inherit;font-size:var(--fs-label);letter-spacing:.04em;
+  background:var(--panel);color:var(--type);
+  border:1px solid var(--rule-2);padding:7px 12px;cursor:pointer;
+}
+.dbtn:hover:not(:disabled){background:var(--raised);border-color:var(--dim)}
+.dbtn:disabled{color:var(--dim);opacity:.5;cursor:not-allowed}
+.dbtn.armed{border-color:var(--fail);color:var(--fail)}
+/* The restatement is what the operator is actually agreeing to. It is never
+   truncated and never collapsed behind a hover. */
+.drestate{
+  font-size:calc(var(--fs-label) - 1px);color:var(--fg);line-height:1.5;
+  background:var(--panel);border:1px solid var(--rule);padding:8px 10px;
+  overflow-wrap:anywhere;
+}
+.dwhy{font-size:calc(var(--fs-label) - 1px);color:var(--dim);line-height:1.45}
+.dwhy.bad{color:var(--fail)}
 </style>
 </head>
 <body>

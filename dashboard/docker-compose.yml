@@ -38,6 +38,25 @@ services:
       # loses liveness — it does not fail.
       WEVIBE_DASH_OPENCODE_URL: "http://host.docker.internal:4096"
 
+      # ── OPT-IN: host-side control plane ─────────────────────────────────
+      # The control plane is the ONLY write-capable surface. This dashboard
+      # stays read-only: it merely READS state from the control plane, and the
+      # browser POSTs to it directly.
+      #
+      # TWO URLs BECAUSE THERE ARE TWO CLIENTS ON DIFFERENT SIDES OF THE
+      # CONTAINER BOUNDARY:
+      #   CONTROL_URL        this container -> the host  (host.docker.internal)
+      #   CONTROL_PUBLIC_URL the browser    -> the host  (already on the host)
+      # Using one for both breaks the other, and the failure looks exactly like
+      # "the control plane is down" while it is running perfectly.
+      #
+      # The control plane binds 127.0.0.1 with no --host flag, by design.
+      # Docker Desktop's proxy presents host.docker.internal traffic to the
+      # host as loopback, so that bind is preserved, NOT weakened.
+      WEVIBE_DASH_SOURCE_CONTROL_PLANE: "1"
+      WEVIBE_DASH_CONTROL_URL: "http://host.docker.internal:7718"
+      WEVIBE_DASH_CONTROL_PUBLIC_URL: "http://127.0.0.1:7718"
+
       # ── OPT-IN: hub recall tables ───────────────────────────────────────
       # Off by default. The board must come up on a machine with no database
       # and no WeVibe stack. Enable by uncommenting these AND the network

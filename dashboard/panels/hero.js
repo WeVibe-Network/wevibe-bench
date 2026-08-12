@@ -92,12 +92,17 @@ function armCol(cls, label, arm, need) {
   // still a cell that ran and burned real tokens; silently omitting it would be
   // its own kind of dishonesty, and the reason is what makes the exclusion
   // auditable against RUNBOOK rule 5.10 rather than something to take on trust.
+  // The reason sits on its OWN line rather than trailing the count. In a narrow
+  // arm column "1 void-instrument" broke mid-phrase across two lines, which
+  // reads as a rendering fault next to a number. An exclusion reason is the
+  // audit trail for a dropped cell (RUNBOOK 5.10) — it has to stay legible.
   const ex = a.excluded ?? {};
+  const reasons = excludedReasons(ex);
   const excluded =
     (ex.total ?? 0) > 0
       ? `<div style="font-size:var(--fs-label);margin-top:4px">
-           <span class="null">${ex.total} excluded</span>
-           <span class="label">${excludedReasons(ex)}</span>
+           <div class="null">${ex.total} excluded</div>
+           ${reasons ? `<div class="label">${reasons}</div>` : ""}
          </div>`
       : "";
 

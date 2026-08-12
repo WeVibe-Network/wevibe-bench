@@ -28,7 +28,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,6 +82,33 @@ async function boardFrom(records) {
     const res = await read({ runsRoot: root, benchRoot: root, config: {} });
     assert.equal(res.ok, true, `source should read: ${res.reason ?? ""}`);
     return res.patch;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Write SEVERAL run directories, as a real bench host accumulates them, and
+ * read through the real module. `runs` is { dirName: records[] }, written in
+ * order so each directory's mtime is strictly newer than the last.
+ */
+async function boardFromRuns(runs) {
+  const root = await mkdtemp(join(tmpdir(), "wevibe-dash-multi-"));
+  try {
+    let stamp = Date.now() - 60_000;
+    for (const [name, records] of Object.entries(runs)) {
+      const dir = join(root, name);
+      await mkdir(dir, { recursive: true });
+      const file = join(dir, "manifest.status.jsonl");
+      await writeFile(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      // Pin mtimes explicitly: writing in order is not enough to guarantee a
+      // distinct mtime on a filesystem with coarse timestamp granularity.
+      stamp += 10_000;
+      const when = new Date(stamp);
+      await utimes(file, when, when);
+    }
+    const res = await read({ runsRoot: root, benchRoot: root, config: {} });
+    return res;
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -280,4 +307,75 @@ test("the wall still shows a void cell's gates — it is display, not measuremen
   ]);
   assert.equal(patch.wall.totals.b.red, 2);
   assert.equal(patch.arm_delta.b.cells, 0);
+});
+
+// ── ONE RUN ON SCREEN: no cross-run contamination ────────────────────────────
+//
+// THE DEFECT THESE PIN, observed live on the operator's board:
+// every source globbed `<runs_root>/*/` and folded EVERY run directory into one
+// picture. With two abandoned runs beside the live one, the wall rendered 48
+// gates — 40 red from the live run plus 8 that existed ONLY in the abandoned
+// runs, drawn on the same strip as "unobserved". A viewer diffing that strip
+// against the live run's failed_gates list finds gates that are not in it, and
+// the arm delta counted abandoned cells toward the live arm's exclusions.
+
+test("ONE RUN: the wall carries only the active run's gates", async () => {
+  const res = await boardFromRuns({
+    "cumulative.burned-old": [
+      attempt({ seq: 0, attempt: 1, mode: "off", gates: ["[G91] REQ-OLD — dead", "[G92] REQ-OLD — dead"] }),
+    ],
+    "cumulative": scoredCell(0, "off"), // newest — the live run
+  });
+
+  assert.equal(res.ok, true);
+  const ids = res.patch.wall.gates.map((g) => g.id).sort();
+  assert.deepEqual(ids, ["G01", "G02"], "an abandoned run's gates must not appear on the wall");
+  assert.equal(res.patch.wall.totals.b.unobserved, 0, "no phantom unobserved slots from a dead run");
+  assert.equal(res.provenance.run, "cumulative");
+});
+
+test("ONE RUN: an abandoned run's cells never reach the arm delta", async () => {
+  const res = await boardFromRuns({
+    "cumulative.aborted-a": [attempt({ seq: 0, attempt: 1, mode: "off", terminalReason: "harness_error", truncatedTurns: 9 })],
+    "cumulative.aborted-b": [attempt({ seq: 0, attempt: 1, mode: "off", terminalReason: "harness_error", truncatedTurns: 9 })],
+    "cumulative": scoredCell(0, "off"),
+  });
+
+  const b = res.patch.arm_delta.b;
+  assert.equal(b.cells, 1, "only the live run's cell scores");
+  assert.equal(b.excluded.total, 0, "two dead runs' void cells must not be charged to this run");
+  // History carries the ACTIVE run's completed cells — one here, and none from
+  // the two abandoned runs. Pre-fix this listed all three.
+  assert.equal(res.patch.history.length, 1);
+  assert.ok(
+    res.patch.history.every((h) => h.cell_label.startsWith("cumulative-")),
+    `history must hold only active-run cells, got ${JSON.stringify(res.patch.history.map((h) => h.cell_label))}`,
+  );
+});
+
+test("ONE RUN: a live status stream outranks a newer bare manifest", async () => {
+  // A just-created run writes manifest.json before it ever appends an attempt
+  // record. Selecting purely on mtime would let that empty directory steal the
+  // screen from the run actually producing data mid-flight.
+  const root = await mkdtemp(join(tmpdir(), "wevibe-dash-rank-"));
+  try {
+    const live = join(root, "cumulative");
+    await mkdir(live, { recursive: true });
+    await writeFile(
+      join(live, "manifest.status.jsonl"),
+      scoredCell(0, "off").map((r) => JSON.stringify(r)).join("\n") + "\n",
+      "utf8",
+    );
+
+    const fresh = join(root, "cumulative.just-created");
+    await mkdir(fresh, { recursive: true });
+    await writeFile(join(fresh, "manifest.json"), JSON.stringify({ org_id: "x" }), "utf8");
+
+    const res = await read({ runsRoot: root, benchRoot: root, config: {} });
+    assert.equal(res.ok, true);
+    assert.equal(res.provenance.run, "cumulative", "the run with real data stays on screen");
+    assert.equal(res.patch.arm_delta.b.cells, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

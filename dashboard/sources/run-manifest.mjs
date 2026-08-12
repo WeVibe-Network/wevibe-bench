@@ -15,9 +15,8 @@
 // is absent we report null and the UI says so — we never assume auto-approve.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { join } from "node:path";
 import { str, int } from "../contract.mjs";
-import { readJson, listDir, statOrNull } from "./_runtime.mjs";
+import { readJson, activeRun } from "./_runtime.mjs";
 
 export const id = "run-manifest";
 export const fields = ["provenance", "run.org_id", "run.model"];
@@ -25,24 +24,14 @@ export function describe() {
   return "run manifest — policy anchor, levers, org, model identity (RC-5)";
 }
 
-async function newestManifest(runsRoot) {
-  let best = null;
-  for (const ent of await listDir(runsRoot)) {
-    if (!ent.isDirectory()) continue;
-    const p = join(runsRoot, ent.name, "manifest.json");
-    const st = await statOrNull(p);
-    if (st?.isFile() && (!best || st.mtimeMs > best.mtime)) {
-      best = { path: p, mtime: st.mtimeMs, size: st.size };
-    }
-  }
-  return best;
-}
-
 export async function read(ctx) {
-  const found = await newestManifest(ctx.runsRoot);
-  if (!found) return { ok: false, reason: "no manifest.json under runs root" };
+  // Scoped to the active run, so provenance describes the run whose gates are
+  // on the wall. Picking the newest manifest INDEPENDENTLY of the stream could
+  // pair one run's policy anchor with another run's measurements.
+  const run = await activeRun(ctx.runsRoot);
+  if (!run?.manifestPath) return { ok: false, reason: "no manifest.json under runs root" };
 
-  const m = await readJson(found.path);
+  const m = await readJson(run.manifestPath);
   if (!m) return { ok: false, reason: "manifest.json unreadable or malformed" };
 
   const levers = m.run_context?.levers ?? {};
@@ -58,7 +47,12 @@ export async function read(ctx) {
 
   return {
     ok: true,
-    provenance: { path: found.path, mtime: found.mtime, bytes: found.size },
+    provenance: {
+      path: run.manifestPath,
+      mtime: run.manifestStat?.mtimeMs ?? null,
+      bytes: run.manifestStat?.size ?? null,
+      run: run.name,
+    },
     patch: {
       run: {
         org_id: str(m.org_id),

@@ -37,12 +37,12 @@ export function renderRecall(board) {
   const fresh = rm.fired_at && Date.now() - rm.fired_at < 6000;
 
   return `
-  <div class="panel ${fresh ? "takeover settle" : ""}" style="flex:1;min-height:0">
+  <div class="panel ${fresh ? "takeover settle" : ""}">
     <div class="phead">
       <span class="label">Recall moment</span>
       <span class="label" style="color:var(--arm-a)">${fresh ? "TAKEOVER" : "SETTLED"} · ${esc(rm.failure_key ?? "")}</span>
     </div>
-    <div class="pbody" style="overflow:auto">
+    <div class="pbody">
       ${errorLine(rm)}
       ${metaRow(rm)}
       ${candidates(rm)}
@@ -57,15 +57,20 @@ function resting(board, gateLabel, gateSrc) {
   const armed = (board.episodes ?? []).filter((e) => e.state === "red-again").length;
   const isControl = board.run?.arm === "off";
 
+  // "align-items: safe center" — a plain `center` on a scrollable flex
+  // container pushes overflowing content past the TOP edge, where it cannot be
+  // scrolled back into view. `safe` falls back to start-alignment the moment it
+  // would overflow, so the panel stays centred when it fits and stays reachable
+  // when it does not.
   return `
-  <div class="panel" style="flex:1;min-height:0">
+  <div class="panel">
     <div class="phead">
       <span class="label">Recall moment</span>
       <span class="label">RESTING</span>
     </div>
-    <div class="pbody" style="display:flex;align-items:center;justify-content:center">
+    <div class="pbody" style="display:flex;align-items:safe center;justify-content:center">
       <div style="text-align:center;max-width:460px">
-        <div class="collect" style="font-size:24px">${isControl ? "CONTROL ARM" : "NO TRIGGER YET"}</div>
+        <div class="collect">${isControl ? "CONTROL ARM" : "NO TRIGGER YET"}</div>
         <div class="label" style="margin-top:8px">${armed} episode${armed === 1 ? "" : "s"} armed</div>
         <div class="null" style="margin-top:12px;line-height:1.6;font-size:var(--fs-label)">
           ${isControl

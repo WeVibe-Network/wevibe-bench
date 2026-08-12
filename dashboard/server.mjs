@@ -81,6 +81,18 @@ const DEFAULT_CONFIG = {
   runsRoot: null, // derived from benchRoot when null
   pollMs: 2000,
   opencodeServeUrl: "http://127.0.0.1:4096",
+  // The host-side control plane. Opt-in like every other network source: the
+  // board must come up with nothing else running.
+  //
+  // TWO URLs, DELIBERATELY. `controlUrl` is how THIS PROCESS reaches the
+  // control plane; `controlPublicUrl` is what the BROWSER is told to POST to.
+  // In the container these are different hosts — the server crosses the
+  // container boundary via host.docker.internal, while the browser is already
+  // on the host and must use a host address. Publishing the server's own URL
+  // to the browser would make every write fail with a connection error that
+  // looks like the control plane is down when it is running fine.
+  controlUrl: "http://127.0.0.1:7718",
+  controlPublicUrl: null, // defaults to controlUrl when not set
   sources: {
     "run-manifest": true,
     "status-stream": true,
@@ -89,6 +101,7 @@ const DEFAULT_CONFIG = {
     "funnel-cells": true,
     "plugin-log": true,
     "opencode-serve": true,
+    "control-plane": false, // needs the control service — opt in explicitly
     "hub-db": false, // needs a reachable postgres — opt in explicitly
   },
   hubDb: {
@@ -114,6 +127,8 @@ function applyEnv(cfg) {
   if (env.WEVIBE_DASH_PORT) cfg.port = Number(env.WEVIBE_DASH_PORT);
   if (env.WEVIBE_DASH_POLL_MS) cfg.pollMs = Number(env.WEVIBE_DASH_POLL_MS);
   if (env.WEVIBE_DASH_OPENCODE_URL) cfg.opencodeServeUrl = env.WEVIBE_DASH_OPENCODE_URL;
+  if (env.WEVIBE_DASH_CONTROL_URL) cfg.controlUrl = env.WEVIBE_DASH_CONTROL_URL;
+  if (env.WEVIBE_DASH_CONTROL_PUBLIC_URL) cfg.controlPublicUrl = env.WEVIBE_DASH_CONTROL_PUBLIC_URL;
 
   // Per-source toggles: WEVIBE_DASH_SOURCE_HUB_DB=1, ..._OPENCODE_SERVE=0, etc.
   for (const name of Object.keys(cfg.sources)) {
@@ -161,6 +176,7 @@ const MODULE_FILES = {
   "funnel-cells": "./sources/funnel-cells.mjs",
   "plugin-log": "./sources/plugin-log.mjs",
   "opencode-serve": "./sources/opencode-serve.mjs",
+  "control-plane": "./sources/control-plane.mjs",
   "hub-db": "./sources/hub-db.mjs",
 };
 

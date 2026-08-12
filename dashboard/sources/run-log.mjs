@@ -91,7 +91,6 @@ export async function read(ctx) {
   let sessionTurns = null; // raw, inflated by recovered turns — never the measurement
   let mode = null;
   let recoveries = 0;
-  let lastTs = null;
   let terminal = null;
 
   // ── DEDUPE (measured, not assumed) ──────────────────────────────────────
@@ -110,8 +109,6 @@ export async function read(ctx) {
   for (const line of lines) {
     const kv = parseKV(line);
     const step = str(kv.step);
-    const ts = line.slice(0, 23);
-    if (/^\d{4}-\d{2}-\d{2}/.test(ts)) lastTs = ts;
 
     // STEP-SCOPED PARSING. A blanket key match is wrong: `mode=` also appears on
     // backend lines as `mode=real` (the recall backend), and `phase=` appears as
@@ -182,11 +179,24 @@ export async function read(ctx) {
     }
   }
 
-  const lastMs = lastTs ? Date.parse(lastTs.replace(",", ".")) : null;
+  // ── SILENCE, MEASURED WITHOUT PARSING A TIMESTAMP ───────────────────────
   // "silent" is a real state: the runner publishes progress continuously, so a
-  // long silence is information, not something to paper over. With nudges now
-  // unbounded, silence + a climbing nudge count is the wedged-relay signature.
-  const silentFor = lastMs ? Math.round((Date.now() - lastMs) / 1000) : null;
+  // long silence is information. With nudges now unbounded, silence + a
+  // climbing nudge count is the wedged-relay signature.
+  //
+  // It is derived from the log file's MTIME, not from the timestamp text in the
+  // last line. The harness writes NAIVE local timestamps ("2026-08-11 15:26:00"
+  // with no offset), and `Date.parse` resolves those against the READER's
+  // timezone. The dashboard container runs UTC while the harness writes host
+  // local time, so parsing produced a CONSTANT phantom silence equal to the
+  // UTC offset — measured at 25560s (7.1h) on a log written seconds earlier,
+  // which pinned the panel's `EXCEEDS 900s` alarm on for every run and made a
+  // genuine stall indistinguishable from the bug.
+  //
+  // mtime is an absolute epoch from the filesystem, so it carries no timezone
+  // ambiguity and needs no agreement between writer and reader. It measures
+  // exactly the thing the panel claims: how long since the runner last wrote.
+  const silentFor = Math.max(0, Math.round((Date.now() - log.mtime) / 1000));
 
   return {
     ok: true,

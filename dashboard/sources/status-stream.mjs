@@ -27,9 +27,8 @@
 // resolution and must not be counted as green.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { join } from "node:path";
 import { parseGate, int, str, median, finalizeDelta, cellValidity } from "../contract.mjs";
-import { readTail, parseJsonl, listDir, statOrNull } from "./_runtime.mjs";
+import { readTail, parseJsonl, activeRun } from "./_runtime.mjs";
 
 export const id = "status-stream";
 export const fields = ["wall", "arm_delta", "run.arm", "history", "honesty.transport"];
@@ -37,33 +36,21 @@ export function describe() {
   return "append-only per-attempt status stream (RC-5) — authoritative for gates, arm, verdict";
 }
 
-/** Find every manifest.status.jsonl under the runs root, newest first. */
-async function findStreams(runsRoot) {
-  const out = [];
-  for (const ent of await listDir(runsRoot)) {
-    if (!ent.isDirectory()) continue;
-    const p = join(runsRoot, ent.name, "manifest.status.jsonl");
-    const st = await statOrNull(p);
-    if (st?.isFile()) out.push({ dir: ent.name, path: p, mtime: st.mtimeMs, size: st.size });
-  }
-  return out.sort((a, b) => b.mtime - a.mtime);
-}
-
 export async function read(ctx) {
-  const streams = await findStreams(ctx.runsRoot);
-  if (!streams.length) {
+  // SCOPED TO ONE RUN. This module previously globbed every
+  // `<runs_root>/*/manifest.status.jsonl` and folded them all together, which
+  // unioned gates across abandoned runs onto one wall (see activeRun). The
+  // board shows the active run and nothing else.
+  const run = await activeRun(ctx.runsRoot);
+  if (!run?.statusPath) {
     return {
       ok: false,
       reason: "no manifest.status.jsonl yet — appended at attempt end (~30 min)",
     };
   }
 
-  // Every stream contributes cells; the newest contributes live state.
-  const cells = [];
-  for (const s of streams) {
-    const records = parseJsonl(await readTail(s.path));
-    for (const cell of cellsFromRecords(records, s.dir)) cells.push(cell);
-  }
+  const records = parseJsonl(await readTail(run.statusPath));
+  const cells = cellsFromRecords(records, run.name);
   if (!cells.length) {
     return { ok: false, reason: "status stream present but carries no attempt records" };
   }
@@ -89,7 +76,12 @@ export async function read(ctx) {
 
   return {
     ok: true,
-    provenance: { path: streams[0].path, mtime: streams[0].mtime, bytes: streams[0].size },
+    provenance: {
+      path: run.statusPath,
+      mtime: run.statusStat?.mtimeMs ?? null,
+      bytes: run.statusStat?.size ?? null,
+      run: run.name,
+    },
     patch: {
       run: {
         arm: newest.arm,

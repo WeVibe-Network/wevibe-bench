@@ -56,7 +56,7 @@ export function renderTicker(board) {
       <span class="label">Episode ticker</span>
       <span class="label">newest first</span>
     </div>
-    <div class="pbody" style="overflow:auto">${body}</div>
+    <div class="pbody">${body}</div>
   </div>`;
 }
 
@@ -103,7 +103,7 @@ export function renderCell(board) {
       ([label, v]) => `
       <div>
         <div class="label">${label}</div>
-        <div style="font-size:22px;font-weight:600;color:var(--type)">
+        <div class="cellval">
           ${v === null || v === undefined ? nul("—") : esc(String(v))}
         </div>
       </div>`,
@@ -127,7 +127,7 @@ export function renderCell(board) {
       ${silentHtml}
     </div>
     <div class="pbody">
-      <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px">${cells}</div>
+      <div class="cellgrid">${cells}</div>
       <div class="note">
         ${excluded !== null
           ? `${excluded} turn${excluded === 1 ? "" : "s"} recovered and excluded from scoring (raw session turns ${r.session_turns}).`

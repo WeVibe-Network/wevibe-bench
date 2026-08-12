@@ -113,13 +113,14 @@ import { renderHero } from "./panels/hero.js";
 import { renderRecall } from "./panels/recall.js";
 import { renderTicker, renderCell } from "./panels/ticker.js";
 import { renderRail } from "./panels/rail.js";
+import { mountDrawer, updateDrawer } from "./panels/drawer.js";
 
 function render() {
   const root = document.getElementById("root");
 
   if (!board) {
     root.innerHTML = `
-      <div class="topbar"><span class="brand">WEVIBE LIVE BENCHMARK</span>
+      <div class="topbar"><span class="brand">HOW GOOD IS <u>YOUR</u> MEMORY SYSTEM</span>
         <span class="spacer"></span>
         <span class="attest">connecting to feed…</span></div>
       <div style="flex:1;display:flex;align-items:center;justify-content:center">
@@ -135,7 +136,7 @@ function render() {
     ${renderTopbar(board, { stale: consecutiveErrors > 0, lastError })}
     <div class="grid">
       ${renderWall(board)}
-      <div style="display:flex;flex-direction:column;gap:10px;min-height:0">
+      <div class="stack">
         ${renderHero(board)}
         ${renderRecall(board)}
       </div>
@@ -145,6 +146,13 @@ function render() {
     </div>
     ${renderProvenance(board)}
   `;
+
+  // The drawer lives OUTSIDE #root and survives this innerHTML swap, so it is
+  // updated rather than rebuilt — that is what preserves its open state, its
+  // scroll position, and any half-made selection in its controls. It is updated
+  // AFTER the swap because it measures the provenance strip it sits above.
+  mountDrawer();
+  updateDrawer(board);
 }
 
 poll();

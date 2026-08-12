@@ -20,7 +20,7 @@
 
 import { join } from "node:path";
 import { str } from "../contract.mjs";
-import { readTail, parseJsonl, listDir, statOrNull } from "./_runtime.mjs";
+import { readTail, parseJsonl, listDir, statOrNull, activeRun } from "./_runtime.mjs";
 
 export const id = "truncation";
 export const fields = ["honesty.transport"];
@@ -28,23 +28,30 @@ export function describe() {
   return "per-turn transport anomalies (truncations, finalize timeouts) — VOID-INSTRUMENT class";
 }
 
-async function findEvidence(runsRoot) {
+/**
+ * Every session's evidence file WITHIN ONE RUN. A run may legitimately have
+ * several session directories (one per cell), and they all belong to the run
+ * being watched — but evidence from an ABANDONED run does not, and summing it
+ * in inflated the transport counters on the live board with anomalies from
+ * runs that were already dead.
+ */
+async function findEvidence(runDir) {
   const found = [];
-  for (const runDir of await listDir(runsRoot)) {
-    if (!runDir.isDirectory()) continue;
-    const sessionsDir = join(runsRoot, runDir.name, "sessions");
-    for (const sess of await listDir(sessionsDir)) {
-      if (!sess.isDirectory()) continue;
-      const p = join(sessionsDir, sess.name, "truncation-evidence.jsonl");
-      const st = await statOrNull(p);
-      if (st?.isFile()) found.push({ path: p, mtime: st.mtimeMs, size: st.size });
-    }
+  const sessionsDir = join(runDir, "sessions");
+  for (const sess of await listDir(sessionsDir)) {
+    if (!sess.isDirectory()) continue;
+    const p = join(sessionsDir, sess.name, "truncation-evidence.jsonl");
+    const st = await statOrNull(p);
+    if (st?.isFile()) found.push({ path: p, mtime: st.mtimeMs, size: st.size });
   }
   return found.sort((a, b) => b.mtime - a.mtime);
 }
 
 export async function read(ctx) {
-  const files = await findEvidence(ctx.runsRoot);
+  const run = await activeRun(ctx.runsRoot);
+  if (!run) return { ok: false, reason: "no run directory under runs root" };
+
+  const files = await findEvidence(run.dir);
   if (!files.length) {
     return { ok: false, reason: "no truncation evidence file yet" };
   }
@@ -69,7 +76,7 @@ export async function read(ctx) {
 
   return {
     ok: true,
-    provenance: { path: files[0].path, mtime: files[0].mtime, bytes: files[0].size },
+    provenance: { path: files[0].path, mtime: files[0].mtime, bytes: files[0].size, run: run.name },
     patch: {
       honesty: {
         transport: {
