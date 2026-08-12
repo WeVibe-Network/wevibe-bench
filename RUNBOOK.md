@@ -32,12 +32,38 @@
 
 Everything an operator needs to launch a run. Rationale and rules live in the sections cited.
 
+### THE SHORT VERSION — two commands
+
+**Do not hand-run the checks below. Run this, then run what it prints.**
+
 ```bash
-# 1. Preflight — all three must succeed (§7 for bring-up if any fail):
+.venv/bin/python scripts/bench_preflight.py --model qwen3.6-35b-a3b-bench
+```
+
+It performs EVERY check in this section — ports, **identity asserted at the seam**, worker-image
+staleness, the `runs/cumulative` slot, disk — then prints **GO** with the exact launch command
+(correct flag order, `< /dev/null` included), or **NO-GO** naming the fix. Exit 0 = GO, 1 = NO-GO.
+
+Added 2026-08-11 (WO-DBVOL-1) because doing this by hand cost a full discovery pass every run: the
+steps were spread across §0/§2.1/§7, and the identity assertion — the one check that has actually
+caught a real defect — was effectively undiscoverable, since `/v1/identity/pubkeys` is bearer-gated
+and answers a plain `curl` with `{"status":"error","error":"unauthorized"}`. The script reads the
+token the same way the harness does. **It only reads and reports** — it never archives, wipes, or
+launches; those stay operator decisions (step 3a, §2).
+
+The manual equivalents are kept below as reference for debugging a NO-GO.
+
+```bash
+# 1. Preflight — all four must succeed (§7 for bring-up if any fail):
 nc -z 127.0.0.1 4545   # local relay (session + extraction models)
 nc -z 127.0.0.1 4550   # leader clone MCP (identity f7733d6e)
 nc -z 127.0.0.1 4451   # contributor clone MCP (identity 5292550d)
 nc -z 127.0.0.1 4440   # hub
+#    A PORT ANSWERING IS NOT AN IDENTITY (AGENTS.md §2.1). `nc` proves liveness
+#    only; it proved nothing in two real failures. The fingerprints above are
+#    fp(ed_pubkey_bytes) and MUST be asserted via GET /v1/identity/pubkeys —
+#    which bench_preflight.py does for you. NEVER point any bench component at
+#    :4450 (the operator's real host MCP).
 
 # 2. Worker image — rebuild ONLY when docker/worker/ changed since the last build
 #    (the vendored opencode plugin is baked in at build time; a stale image runs
@@ -67,10 +93,17 @@ TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
 mv runs/cumulative runs/cumulative.<why>-<date>
 #     The server corpus is untouched (§2 wipe rules still govern that).
 
-# 4. Watch + attach. The runner logs the session id and attach command itself:
+# 4. Watch + attach. The runner logs the session id and attach command itself.
+#    One copy-paste that prints the FULL attach command for the live cell:
+sed -n 's/^attach_cmd=//p' runs/cumulative/sessions/*/live-view.txt
+#    (equivalently, from the log:)
 grep -E 'attach_cmd|session_id' runs/off-cell-<ts>.log | tail -5
-#    then attach to the cell's live worker serve:
-opencode attach http://127.0.0.1:4096 --session <ses_...>
+#    then attach to the cell's live worker serve — the id is per-run, e.g.:
+opencode attach http://127.0.0.1:4096 --session ses_00b54ddb7ffemO5eRSBu0ni034
+#    `--session` is NOT optional: without it the TUI opens its own new-session
+#    view instead of the live worker session. There is only ever ONE session on
+#    :4096, so `-c` (continue last) is the typo-proof route:
+opencode attach http://127.0.0.1:4096 -c
 ```
 
 **Optional — hold the stack for UI review (WO-HOLD-UI-1).** Set `WEVIBE_BENCH_HOLD_UI=1` on the
@@ -972,7 +1005,7 @@ Fixed defects are not listed. They are in git.
 | **D-KV-PEAK-UNKNOWN** | 🟢 CURIOSITY | Peak resident footprint at full context is unknown. Not a threat given headroom. | nothing |
 | **D-EMISSIONS-INERT-KEEPERS** | 🟡 OPEN | The emissions module carries an injected serve keeper and reputation keeper (`wevibe-chain/x/emissions/types/expected_keepers.go`, wired at `keeper/keeper.go:35-47`) whose methods are never invoked outside tests — inert today, and exactly the seam an accidental change would activate. Serve credit touches no economics: emissions qualify contributors on approvals only (`x/emissions/keeper/keeper.go:233`). Recorded 2026-08-07 (WO-CANON-1); cross-posted to RECALL-PIVOT-SPEC §8.7 F5. | nothing today — silent-economics drift if activated unnoticed |
 | **D-INTEGRATION-SUITE-QUARANTINE** | 🟡 OPEN — post-campaign | The wevibe-meta integration suite is scoped out of the pre-campaign TEST stage (§2): it POSTs `/v1/test/reset`, a route the hub build does not register (`cmd/wevibe-hub/main.go:390-397` vs `wevibe-meta/tests/lib/hub-client.ts:95`), and its mutating e2e tests would write orgs and memories to the live campaign hub and chain — the same hazard class as a second wipe. The reset route must not be registered to accommodate it. Restored behind a guard after the campaign (Walter, 2026-08-07). | nothing while quarantined — pre-campaign TEST is the bench pytest suite |
-| **D-SERVE-MESSAGE-500** | 🟡 OPEN — intermittent, cell-voiding | `GET /session/{id}/message` on the worker serve intermittently returns **HTTP 500**, which the serve-drive path reports as `status=metrics_error` and meters as `turns=0`; the phase is then correctly declared `harness_error` rather than gating a half-written worktree. Root cause is inside opencode, not the harness: `EffectDrizzleQueryError: Failed query: select … from "part" where "message_id" in (?×36)` (worker `opencode.log`, 2026-08-11T21:46:57Z). Observed ONCE, on the 14:35 cell at the chunk-1→2 boundary; the 14:55 cell cleared the same boundary with `turns=32`, so it is **intermittent, not a structural chunk-2 defect**. A TUI attach hits the same endpoint and was in flight at the failure — **contribution neither established nor excluded**. Until characterised, prefer the dashboard over attaching to a live cell. | any cell, intermittently — voids the cell loudly, never silently |
+| **D-SERVE-MESSAGE-500** | 🟢 ROOT-CAUSED + FIXED 2026-08-11 (WO-DBVOL-1) | **NOT an opencode bug — the worker's SQLite session DB was CORRUPT.** `PRAGMA integrity_check` on the preserved DBs of BOTH 500-failing cells reports `database disk image is malformed`, with damaged pages in **tree 27 = the `part` table** — exactly the table in the failing `select … from "part" where "message_id" in (?×N)`. The 11:14 cell that never 500'd is **clean**. The IN-list size (36→50) was a **red herring**: a larger list touches more pages, so it meets a corrupt page sooner. **Cause:** the DB was bind-mounted from the macOS filesystem (osxfs/gRPC-FUSE), whose locking + fsync semantics SQLite cannot rely on. Pinning opencode never helped because the image was ALREADY pinned (`docker/worker/Dockerfile:4`, 1.18.1). **Fix:** the session DB now lives on a **named Docker volume** (ext4 in the Linux VM), exported via `docker cp` at teardown to the same published host path; a per-cell volume is chowned to the worker uid (needs `--user 0:0` — the image bakes `USER worker`) and removed in a `finally` so a failed teardown cannot leak volumes. **Second defect closed:** extraction previously accepted any `is_file()` DB. SQLite corruption is PARTIAL — the corrupt DB answered `count(*)`=492 fine — so a corrupt substrate **silently under-reported memories** instead of failing. `wevibe_bench/session_db_integrity.py` now fail-closes extraction (`require_sound_session_db`). | was: intermittently, cell-voiding — now: cause removed, and a corrupt substrate voids the cell loudly instead of under-extracting |
 | **D-RECALL-SELECTION-BIAS** | 🟡 OPEN — known, stated limitation | Recall fires only after a repeat — the second failure under the same stable `failureKey` while still red — so every serve is conditioned on an already-hard problem. Standing therefore measures **"works on stuck problems," not "works."** Defensible, and arguably the population that matters, but a further departure from the sim's uniform-serving assumption (recorded 2026-08-08, WO-RT-O6; claim and limit travel together — the §1/BENCHMARK-DIARY §2.4 dual-carriage principle). | every standing/recall conclusion — disclosed, not blocking |
 
 **Memory is not a constraint — CLOSED, do not re-investigate.** Zero swap, ~211 GB wired headroom.

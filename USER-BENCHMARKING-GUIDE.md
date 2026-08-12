@@ -221,21 +221,26 @@ values on an ON cell = rule-18 walk-back** — stop and declare it, do not conti
 
 ### Get the session id and attach
 
+**The one-liner — prints the full, ready-to-paste attach command for the live cell:**
+
+```bash
+sed -n 's/^attach_cmd=//p' runs/cumulative/sessions/*/live-view.txt
+```
+
+The marker file is written the moment the session is created, so this works for
+the duration of the run and survives log rotation. Equivalent, from the log:
+
 ```bash
 grep "step=live-view" runs/off-cell-<TS>.log | tail -3
 ```
 
-That line carries `session_id=ses_...` and a ready-made `attach_cmd='...'`. Also
-written to a marker file:
+That line carries `session_id=ses_...` and a ready-made `attach_cmd='...'`.
+
+Attach — **the session id is per-run**, so read it from the command above rather
+than copying one from a doc. A full example as it actually appears:
 
 ```bash
-cat runs/cumulative/sessions/*/live-view.txt
-```
-
-Attach:
-
-```bash
-opencode attach http://127.0.0.1:4096 --session <ses_...>
+opencode attach http://127.0.0.1:4096 --session ses_00b54ddb7ffemO5eRSBu0ni034
 opencode attach http://127.0.0.1:4096 -c            # or: continue the last session
 ```
 
@@ -447,9 +452,9 @@ TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
 .venv/bin/python scripts/run_cumulative.py \
   --org wevibe-org-0 --model qwen3.6-35b-a3b-bench extract
 
-# session id + attach
-grep "step=live-view" runs/<log> | tail -3
-opencode attach http://127.0.0.1:4096 --session <ses_...>
+# session id + attach — prints the FULL command, id is per-run
+sed -n 's/^attach_cmd=//p' runs/cumulative/sessions/*/live-view.txt
+opencode attach http://127.0.0.1:4096 -c     # typo-proof: one session on :4096
 
 # state — --model REQUIRED (omitting it = "roster hash drift detected")
 .venv/bin/python scripts/run_cumulative.py --model qwen3.6-35b-a3b-bench state
