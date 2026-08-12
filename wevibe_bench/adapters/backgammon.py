@@ -55,6 +55,7 @@ from wevibe_bench.serve_client import (
     ServeClientError,
     classify_transport_anomaly,
     founder_attach_command,
+    set_read_retry_observer,
 )
 
 
@@ -239,6 +240,12 @@ TURN_TERMINAL_GUARD_ABORT = "guard_abort"
 TURN_TERMINAL_TRANSPORT_ERROR = "transport_error"
 TURN_TERMINAL_STREAM_DIED_OPEN = "stream_died_open"
 TURN_TERMINAL_UNCLASSIFIED_FINISH = "unclassified_finish"
+# D-SERVE-MESSAGE-500: the transcript read failed past every transient retry,
+# so the harness lost its window onto a session that may still be alive. The
+# phase carries no trustworthy measurement — an instrument failure, never a
+# capability FAIL (RUNBOOK rule 5.10).
+TURN_TERMINAL_OBSERVATION_LOST = "observation_lost"
+REASON_OBSERVATION_LOST = "transcript_read_failed_past_retries"
 # WO-WATCH-1E evidence file name, written next to the cell's events file under
 # the run dir (``<worktree>.events.jsonl`` -> ``<worktree>.parent/...``). Lazily
 # created: only a real truncation/transport anomaly ever opens it.
@@ -536,6 +543,10 @@ class _OpencodeRunStats:
     # from scoring turns on the same grounds and counted here for the same
     # reason — the exclusion is reported, never silent. Tokens stay metered.
     finalize_timeout_turns: int = 0
+    # D-SERVE-MESSAGE-500: phases whose transcript read failed past every
+    # transient retry. Non-zero means the cell was measured blind and must be
+    # gated VOID-INSTRUMENT rather than scored.
+    observation_lost_turns: int = 0
 
 
 @dataclass(frozen=True)
@@ -605,6 +616,8 @@ class BackgammonCellResult:
     # reason. With unbounded nudging these are the turns recovery re-drove; the
     # count is what proves the nudges did not inflate the measurement.
     finalize_timeout_turns: int = 0
+    # D-SERVE-MESSAGE-500: phases that lost transcript observation entirely.
+    observation_lost_turns: int = 0
     unmetered_turns: int = 0
     unmetered_turn_wall_s: float = 0.0
     contention: ContentionCovariates | None = None
@@ -2025,6 +2038,11 @@ class BackgammonRunner(AgentRunner):
                 if record.get("terminal") == TURN_TERMINAL_TRANSPORT_ERROR
                 and record.get("reason") == REASON_STREAM_FINALIZE_TIMEOUT
             ),
+            observation_lost_turns=sum(
+                1
+                for record in turn_anomalies_all
+                if record.get("terminal") == TURN_TERMINAL_OBSERVATION_LOST
+            ),
             unmetered_turns=unmetered_turns_total,
             unmetered_turn_wall_s=unmetered_turn_wall_total,
             worker_image_fingerprint=worker_image_identity,
@@ -2564,6 +2582,17 @@ class BackgammonRunner(AgentRunner):
         if kill_hook is None:
             kill_hook = active_cell.kill_worker_processes
 
+        # Surface every transient observation-read retry on the progress
+        # stream. A retry nobody can see is indistinguishable from a serve that
+        # never faulted, and a rising retry rate is the leading indicator of
+        # D-SERVE-MESSAGE-500 degrading underneath a run that still looks green.
+        set_read_retry_observer(
+            lambda what, attempt, exc: self._progress(
+                f"PROGRESS run_label={run_label} step=serve-read-retry "
+                f"phase={phase} what={what} attempt={attempt} detail={exc}"
+            )
+        )
+
         # WO-WATCH-1E per-attempt evidence correlation id + start timestamp,
         # matching the stdout path's ``state`` fields. The evidence file path is
         # derived from the cell's worktree when available (real DockerCell);
@@ -2634,6 +2663,10 @@ class BackgammonRunner(AgentRunner):
         turn_anomaly_list: list[dict[str, Any]] = []
         killed_reason: str | None = None
         exit_code = 0
+        # Set when the transcript read fails past serve_client's transient
+        # retries: the harness has lost its window onto the session, so the
+        # phase carries no trustworthy measurement (D-SERVE-MESSAGE-500).
+        observation_lost = False
         m: dict[str, Any] = {}
         while True:
             # 1) Enqueue the prompt asynchronously.
@@ -2743,12 +2776,25 @@ class BackgammonRunner(AgentRunner):
                 m = serve_client.metrics(session_id)
                 m_window = serve_client.metrics(session_id, since=class_watermark)
             except ServeClientError as exc:
-                # Metering failed after completion; report a transport-style exit and
-                # let the caller decide (fall through to stdout path on retry).
+                # OBSERVATION LOST (D-SERVE-MESSAGE-500). serve_client already
+                # retried this read through every transient fault, so reaching
+                # here means the harness can no longer see the session at all.
+                #
+                # This is NOT a capability result and must never be scored as
+                # one: the classification window is empty, so the recovery
+                # classifier below is blind by construction (it reads only
+                # error_texts/truncations/error_parts/info_errors) and would
+                # report "no anomaly" for a session that may still be running.
+                # That blindness is exactly what voided the 2026-08-11 cell.
+                #
+                # Record it as a first-class terminal so run_artifacts can gate
+                # the cell VOID-INSTRUMENT instead of letting gates run against
+                # a half-written worktree and report a false capability FAIL.
                 self._progress(
                     f"PROGRESS run_label={run_label} step=serve-drive phase={phase} "
-                    f"status=metrics_error detail={exc}"
+                    f"status=observation_lost detail={exc}"
                 )
+                observation_lost = True
                 m = (
                     dict(baseline)
                     if baseline is not None
@@ -2765,6 +2811,31 @@ class BackgammonRunner(AgentRunner):
                 m_window = {}
                 if exit_code == 0:
                     exit_code = 1
+
+            if observation_lost:
+                # The classifier cannot see anything (m_window is empty), so
+                # record the lost-observation terminal explicitly rather than
+                # letting the blind classifier report a clean phase.
+                turn_anomaly_list.append(
+                    {
+                        "phase": str(phase),
+                        "turn_index": int(m.get("turns", 0) or 0),
+                        "terminal": TURN_TERMINAL_OBSERVATION_LOST,
+                        "reason": REASON_OBSERVATION_LOST,
+                        "tool_uses": 0,
+                        "file_writes": 0,
+                        "input_tokens": int(m.get("input_tokens", 0) or 0),
+                        "output_tokens": int(m.get("output_tokens", 0) or 0),
+                        "reasoning_tokens": int(m.get("reasoning_tokens", 0) or 0),
+                        "cost_usd": float(m.get("cost_usd", 0.0) or 0.0),
+                        "tokens_unmetered": True,
+                        "wall_seconds": None,
+                        "retried": False,
+                        "retry_kind": None,
+                        "session_id": session_id,
+                    }
+                )
+                break
 
             terminal, reason = classify_transport_anomaly(m_window)
             if terminal is not None:
@@ -2906,6 +2977,7 @@ class BackgammonRunner(AgentRunner):
             f"PROGRESS run_label={run_label} step=serve-drive-end phase={phase} "
             f"turns={scoring_turns} guard_aborted_turns={d_guard_aborted} "
             f"finalize_timeout_turns={d_finalize_timeouts} "
+            f"observation_lost={'1' if observation_lost else '0'} "
             f"recovery_nudges={recovery_nudges} "
             f"session_turns={m.get('turns', 0)} "
             f"input={d_input} output={d_output} reasoning={d_reasoning} "
@@ -2936,6 +3008,7 @@ class BackgammonRunner(AgentRunner):
             recovery_nudges=recovery_nudges,
             guard_aborted_turns=d_guard_aborted,
             finalize_timeout_turns=d_finalize_timeouts,
+            observation_lost_turns=1 if observation_lost else 0,
         )
 
     def _run_opencode_serve_chunked(
@@ -2968,6 +3041,7 @@ class BackgammonRunner(AgentRunner):
         sum_recovery_nudges = 0
         sum_guard_aborted = 0
         sum_finalize_timeouts = 0
+        sum_observation_lost = 0
         anomalies: list[dict[str, Any]] = []
         chunk_reports: list[dict[str, Any]] = []
 
@@ -2987,11 +3061,13 @@ class BackgammonRunner(AgentRunner):
                 recovery_nudges=sum_recovery_nudges,
                 guard_aborted_turns=sum_guard_aborted,
                 finalize_timeout_turns=sum_finalize_timeouts,
+                observation_lost_turns=sum_observation_lost,
             )
 
         def _drive(phase: str, prompt: str) -> _OpencodeRunStats:
             nonlocal sum_input, sum_output, sum_reasoning, sum_turns, sum_cost, sum_truncations
             nonlocal sum_recovery_nudges, sum_guard_aborted, sum_finalize_timeouts
+            nonlocal sum_observation_lost
             stats = self._run_opencode_serve(
                 active_cell=active_cell,
                 serve_client=serve_client,
@@ -3012,6 +3088,7 @@ class BackgammonRunner(AgentRunner):
             sum_recovery_nudges += stats.recovery_nudges
             sum_guard_aborted += stats.guard_aborted_turns
             sum_finalize_timeouts += stats.finalize_timeout_turns
+            sum_observation_lost += stats.observation_lost_turns
             anomalies.extend(stats.turn_anomalies)
             return stats
 

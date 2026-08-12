@@ -1041,6 +1041,10 @@ class RealSessionRunner:
             # nudge count stays observable on the PROGRESS line until it is
             # plumbed through the cell result properly.
             "finalize_timeout_turns": int(getattr(result, "finalize_timeout_turns", 0) or 0),
+            # D-SERVE-MESSAGE-500: non-zero gates the cell VOID-INSTRUMENT in
+            # run_artifacts — the harness lost sight of the session, so nothing
+            # the gates then measured is a capability signal.
+            "observation_lost_turns": int(getattr(result, "observation_lost_turns", 0) or 0),
             "unmetered_turns": int(getattr(result, "unmetered_turns", 0) or 0),
             "unmetered_turn_wall_s": float(getattr(result, "unmetered_turn_wall_s", 0.0) or 0.0),
             "session_fp": session_fp,

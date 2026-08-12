@@ -118,6 +118,27 @@ FINALIZE_TIMEOUT_SIGNATURE = "did not finalize"
 _MAX_ERROR_TEXTS = 8
 _MAX_ERROR_TEXT_CHARS = 240
 
+# Transient-read retry (D-SERVE-MESSAGE-500, 2026-08-11). Observation reads are
+# idempotent GETs, so a 5xx/429/socket fault is retried rather than allowed to
+# kill a cell that is still alive. 4 attempts with linear backoff (0.5/1.0/1.5s)
+# spans ~3s — long enough to ride out the observed intermittent Drizzle query
+# failure, short enough that a genuinely dead serve still fails fast.
+_READ_RETRY_ATTEMPTS = 4
+_READ_RETRY_BACKOFF_S = 0.5
+
+# Set by the harness to surface each retry on the progress stream. A retry that
+# nobody can see is indistinguishable from a serve that never faulted, and a
+# rising retry rate is the leading indicator of the underlying defect.
+_READ_RETRY_OBSERVER: Callable[[str, int, Exception], None] = (
+    lambda what, attempt, exc: None
+)
+
+
+def set_read_retry_observer(observer: Callable[[str, int, Exception], None]) -> None:
+    """Install the callback invoked before each transient-read retry."""
+    global _READ_RETRY_OBSERVER
+    _READ_RETRY_OBSERVER = observer
+
 
 class ServeClientError(Exception):
     """Raised for any HTTP/transport failure from :class:`ServeClient`.
@@ -343,6 +364,63 @@ def _http_json(method: str, url: str, body=None, timeout: float = 5.0) -> Any:
         raise ServeClientError(f"{method} {url} failed: {exc}") from exc
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """True when ``exc`` is a retryable observation fault, not a real answer.
+
+    A 5xx, a 429, or any socket-level failure is the serve failing to ANSWER —
+    the session behind it is untouched. A 4xx other than 429 is a real answer
+    (bad request, unknown session) and must never be retried into a false read.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500 or exc.code == 429
+    # URLError/OSError/socket.timeout: the request never landed.
+    return isinstance(exc, (urllib.error.URLError, OSError))
+
+
+def _retry_read(
+    call,
+    *,
+    what: str,
+    attempts: int = _READ_RETRY_ATTEMPTS,
+    backoff_s: float = _READ_RETRY_BACKOFF_S,
+    sleep=None,
+):
+    """Run an IDEMPOTENT read ``call``, retrying transient observation faults.
+
+    D-SERVE-MESSAGE-500 (2026-08-11): a single ``GET /session/{id}/message``
+    returning HTTP 500 from an opencode-internal Drizzle query killed a cell
+    32 minutes in. The session was alive and generating; only the harness's
+    ability to OBSERVE it failed. Recovery could not fire, because the drive
+    loop decides whether to nudge by reading this very endpoint — a blind
+    sensor reports no anomaly to recover from.
+
+    Retrying here is safe ONLY because every caller is a read (GET). Writes
+    (prompt_async, abort, summarize) are NEVER routed through this: replaying
+    a prompt would duplicate a turn and corrupt the measurement.
+
+    Raises the LAST :class:`ServeClientError` when every attempt fails, so a
+    genuinely dead serve still surfaces loudly rather than hanging.
+    """
+    last = None
+    # Resolved per call, never bound at def time, so a monkeypatched
+    # ``time.sleep`` (tests) is honoured.
+    nap = sleep if sleep is not None else time.sleep
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except ServeClientError as exc:
+            cause = exc.__cause__ or exc
+            if not _is_transient(cause):
+                raise
+            last = exc
+            if attempt < attempts:
+                _READ_RETRY_OBSERVER(what, attempt, exc)
+                nap(backoff_s * attempt)
+    raise ServeClientError(
+        f"{what}: {attempts} consecutive transient failures; last: {last}"
+    ) from last
+
+
 def _http_status(method: str, url: str, body=None, timeout: float = 5.0) -> int:
     """Perform an HTTP request and return the response status code."""
     data = None
@@ -414,20 +492,36 @@ class ServeClient:
             raise ServeClientError(f"abort: expected 2xx, got {status}")
 
     def session_busy(self, session_id: str) -> bool:
-        """GET /session/status -> parse_busy_status for ``session_id``."""
-        payload = _http_json(
-            "GET", self._url("/session/status"), body=None, timeout=self.timeout
+        """GET /session/status -> parse_busy_status for ``session_id``.
+
+        Retried: this is the completion signal polled by :meth:`wait_idle` and
+        :meth:`wait_busy`. A transient fault here must not read as "idle".
+        """
+        payload = _retry_read(
+            lambda: _http_json(
+                "GET", self._url("/session/status"), body=None, timeout=self.timeout
+            ),
+            what="session_busy",
         )
         if not isinstance(payload, dict):
             return False
         return parse_busy_status(payload, session_id)
 
     def get_messages(self, session_id: str) -> list:
-        """GET /session/{sid}/message -> parsed JSON message list."""
+        """GET /session/{sid}/message -> parsed JSON message list.
+
+        Retries transient observation faults (:func:`_retry_read`): this is the
+        endpoint D-SERVE-MESSAGE-500 intermittently 500s on, and it is also the
+        harness's only window onto the session — a single unretried failure
+        here previously voided a 32-minute cell.
+        """
         url = self._url(
             f"/session/{urllib.parse.quote(session_id, safe='')}/message"
         )
-        payload = _http_json("GET", url, body=None, timeout=self.timeout)
+        payload = _retry_read(
+            lambda: _http_json("GET", url, body=None, timeout=self.timeout),
+            what=f"get_messages({session_id})",
+        )
         return _as_list(payload)
 
     def wait_idle(
@@ -436,10 +530,20 @@ class ServeClient:
         """Poll :meth:`session_busy` until idle or timeout.
 
         Returns True if the session reached idle, False on timeout.
+
+        A probe that fails even after retries is treated as STILL BUSY, never
+        as idle. Reading "idle" from a failed probe is the dangerous direction:
+        it releases the harness to gate a worktree the worker is still writing
+        (the 2026-08-09 turns=0/gates-race void). Waiting costs only time; a
+        sustained outage still ends at ``timeout_s`` and returns False.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if not self.session_busy(session_id):
+            try:
+                busy = self.session_busy(session_id)
+            except ServeClientError:
+                busy = True
+            if not busy:
                 return True
             time.sleep(self.poll_interval)
         return False
@@ -454,11 +558,18 @@ class ServeClient:
         window sees a false idle and returns instantly (the 2026-08-09
         turns=0/gates-race-the-worktree void). Always confirm busy first.
         Returns True if the session went busy, False on timeout.
+
+        A failed probe is treated as NOT-yet-busy so the wait continues: the
+        conservative direction here is to keep waiting for confirmation rather
+        than declare a pickup that was never observed.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if self.session_busy(session_id):
-                return True
+            try:
+                if self.session_busy(session_id):
+                    return True
+            except ServeClientError:
+                pass
             time.sleep(self.poll_interval)
         return False
 

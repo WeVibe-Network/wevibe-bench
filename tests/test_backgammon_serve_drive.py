@@ -21,6 +21,7 @@ from wevibe_bench.adapters.backgammon import (
     _LOOP_RECOVERY_NUDGE,
     BackgammonRunner,
     TURN_TERMINAL_GUARD_ABORT,
+    TURN_TERMINAL_OBSERVATION_LOST,
     TURN_TERMINAL_TRANSPORT_ERROR,
     TURN_TERMINAL_TRUNCATED,
 )
@@ -521,6 +522,49 @@ def test_serve_drive_metrics_error_sets_exit1(tmp_path: Path) -> None:
     assert stats.killed_reason is None
     assert stats.turns == 0
     assert cell.kill_calls == 0
+
+
+def test_serve_drive_lost_observation_is_recorded_never_silently_clean(
+    tmp_path: Path,
+) -> None:
+    """D-SERVE-MESSAGE-500: a blind phase must declare itself, not read clean.
+
+    When the transcript read fails past serve_client's transient retries, the
+    classification window is empty — so ``classify_transport_anomaly`` returns
+    (None, None) and, before this fix, the phase fell through recording NO
+    anomaly at all. The cell then ran gates against a worktree nobody had
+    observed and reported 43 "problems" as if they were a capability result
+    (the 2026-08-11 void). The phase must instead carry an explicit
+    observation_lost terminal so the cell is gated VOID-INSTRUMENT.
+    """
+    runner = _make_runner(tmp_path)
+    client = _FakeServeClient()
+    client.metrics_error = ServeClientError(
+        "GET /session/ses_x/message failed: HTTP Error 500: Internal Server Error"
+    )
+    cell = _FakeCell()
+
+    stats = runner._run_opencode_serve(
+        active_cell=cell,
+        serve_client=client,
+        session_id="ses_obs",
+        prompt="p",
+        run_label="cell-obs",
+        phase="initial-chunk-4",
+    )
+
+    assert stats.exit_code == 1
+    assert stats.observation_lost_turns == 1, "the blind phase must be counted"
+    terminals = [a["terminal"] for a in stats.turn_anomalies]
+    assert TURN_TERMINAL_OBSERVATION_LOST in terminals, (
+        "a phase the harness could not observe must never look like a clean phase"
+    )
+    lost = next(
+        a
+        for a in stats.turn_anomalies
+        if a["terminal"] == TURN_TERMINAL_OBSERVATION_LOST
+    )
+    assert lost["tokens_unmetered"] is True, "unobserved tokens are not metered truth"
 
 
 def _make_feedback_attempt_kwargs(

@@ -750,3 +750,106 @@ def test_http_error_wraps_serve_client_error(monkeypatch):
         sc._http_json("GET", "http://127.0.0.1:4096/session/status")
     with pytest.raises(ServeClientError):
         sc._http_status("POST", "http://127.0.0.1:4096/session")
+
+# ---------------------------------------------------------------------------
+# D-SERVE-MESSAGE-500 — transient observation-read retry (2026-08-11)
+#
+# A single HTTP 500 from GET /session/{id}/message killed a 32-minute cell.
+# The session was alive; only the harness's ability to OBSERVE it failed, and
+# recovery could not fire because the nudge decision reads that same endpoint.
+# These tests pin the retry contract that closes it.
+# ---------------------------------------------------------------------------
+def _http_error(code):
+    return urllib.error.HTTPError(
+        url="http://127.0.0.1:4096/session/ses_1/message",
+        code=code,
+        msg="Internal Server Error",
+        hdrs=None,
+        fp=None,
+    )
+
+
+def _flaky_json(monkeypatch, outcomes, sleeps=None):
+    """Pop an outcome per _http_json call; Exceptions are raised, else returned."""
+    calls = []
+
+    def fake(method, url, body=None, timeout=5.0):
+        calls.append(url)
+        item = outcomes.pop(0)
+        if isinstance(item, Exception):
+            raise ServeClientError(f"{method} {url} failed: {item}") from item
+        return item
+
+    monkeypatch.setattr("wevibe_bench.serve_client._http_json", fake)
+    monkeypatch.setattr(
+        "wevibe_bench.serve_client.time.sleep",
+        lambda s: (sleeps.append(s) if sleeps is not None else None),
+    )
+    return calls
+
+
+def test_get_messages_retries_through_the_exact_500_that_voided_the_cell(monkeypatch):
+    """Two consecutive 500s then success -> the read succeeds, cell survives."""
+    payload = [{"info": {"role": "assistant"}, "parts": []}]
+    sleeps = []
+    calls = _flaky_json(
+        monkeypatch, [_http_error(500), _http_error(500), payload], sleeps
+    )
+    msgs = ServeClient("http://127.0.0.1:4096").get_messages("ses_1")
+    assert msgs == payload
+    assert len(calls) == 3, "must retry until the read lands"
+    assert sleeps == [0.5, 1.0], "linear backoff between attempts"
+
+
+def test_get_messages_raises_after_exhausting_retries(monkeypatch):
+    """A genuinely dead serve still fails LOUDLY — retry is not a hang."""
+    _flaky_json(monkeypatch, [_http_error(500)] * 4)
+    with pytest.raises(ServeClientError) as excinfo:
+        ServeClient("http://127.0.0.1:4096").get_messages("ses_1")
+    assert "4 consecutive transient failures" in str(excinfo.value)
+
+
+def test_get_messages_never_retries_a_real_answer(monkeypatch):
+    """A 404 is the serve ANSWERING (unknown session); retrying would be a lie."""
+    calls = _flaky_json(monkeypatch, [_http_error(404)])
+    with pytest.raises(ServeClientError):
+        ServeClient("http://127.0.0.1:4096").get_messages("ses_1")
+    assert len(calls) == 1, "4xx must not be retried"
+
+
+def test_session_busy_retries_transient_faults(monkeypatch):
+    """The completion signal must not read 'idle' because of a transient 500."""
+    calls = _flaky_json(monkeypatch, [_http_error(503), {"ses_1": {"type": "busy"}}])
+    assert ServeClient("http://127.0.0.1:4096").session_busy("ses_1") is True
+    assert len(calls) == 2
+
+
+def test_wait_idle_treats_a_dead_probe_as_busy_never_idle(monkeypatch):
+    """Fail-safe direction: an unreadable probe must never release the gates.
+
+    Reading 'idle' from a failed probe lets the harness gate a worktree the
+    worker is still writing (the 2026-08-09 turns=0/gates-race void).
+    """
+    def always_fails(self, sid):
+        raise ServeClientError("probe down")
+
+    monkeypatch.setattr(
+        "wevibe_bench.serve_client.ServeClient.session_busy", always_fails
+    )
+    client = ServeClient("http://127.0.0.1:4096", poll_interval=0.0)
+    assert client.wait_idle("ses_1", timeout_s=0.05) is False
+
+
+def test_wait_idle_returns_true_once_a_probe_recovers(monkeypatch):
+    """A transient probe outage mid-wait resolves to a real idle reading."""
+    results = iter([ServeClientError("down"), True, False])
+
+    def flaky(self, sid):
+        item = next(results)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr("wevibe_bench.serve_client.ServeClient.session_busy", flaky)
+    client = ServeClient("http://127.0.0.1:4096", poll_interval=0.0)
+    assert client.wait_idle("ses_1", timeout_s=5) is True

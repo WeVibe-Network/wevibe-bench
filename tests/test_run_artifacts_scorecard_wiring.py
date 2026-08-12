@@ -675,6 +675,54 @@ def test_truncated_cell_classified_void_instrument_not_scored(tmp_path: Path) ->
     assert scorecard["not_scored"] == []
 
 
+def test_cell_measured_blind_is_void_instrument_never_a_capability_fail(
+    tmp_path: Path,
+) -> None:
+    """D-SERVE-MESSAGE-500 end-to-end: a blind cell must not be published as FAIL.
+
+    On 2026-08-11 a single HTTP 500 on GET /session/{id}/message ended a cell
+    32 minutes in. Gates then ran against a worktree the harness had never
+    observed and returned 43 problems. Published as-is that reads as a
+    capability FAIL; it is an instrument failure. This pins the distinction on
+    the real scorecard surface.
+    """
+    manifest_path = _write_scorecard_manifest(tmp_path)
+    stream = StatusStream(default_status_stream_path(manifest_path))
+
+    record: dict[str, Any] = {
+        "type": "attempt",
+        "schema_version": 1,
+        "sequence_index": 0,
+        "memory_mode": "off",
+        "org_id": "org-1",
+        "terminal_reason": "harness_error",
+        # The signal the drive loop now emits when it loses the transcript.
+        "observation_lost_turns": 1,
+        "progress": {
+            "problems_before": None,
+            "problems_after": 43,
+            "resolved_count": None,
+            "remaining_count": 43,
+            "full_green": False,
+            "turns": 65,
+            "total_tokens": 85635,
+            "wall_seconds": 1922.87,
+            "wall_cost_usd": 0.0,
+        },
+        "session_fp": "e5037b4b",
+        "session_id": "ses_blind",
+    }
+    stream.append(record)
+
+    scorecard = build_scorecard(manifest_path)
+
+    assert scorecard["void_instrument"][0]["sequence_index"] == 0
+    assert scorecard["scored_sessions"] == 0, "a blind cell is never scored"
+    assert scorecard["scored_fail"] == 0, (
+        "the 43 gate problems must NOT surface as a capability FAIL"
+    )
+
+
 def test_green_with_truncation_still_scored_pass(tmp_path: Path) -> None:
     manifest_path = _write_scorecard_manifest(tmp_path)
     stream = StatusStream(default_status_stream_path(manifest_path))

@@ -384,6 +384,12 @@ def build_scorecard(
             return True
         if int(record.get("truncated_turns") or 0) > 0:
             return True
+        # D-SERVE-MESSAGE-500: the harness lost its window onto the session
+        # (transcript read failed past every transient retry). Whatever the
+        # gates then measured came from an unobserved worktree, so the cell is
+        # an instrument failure — never a capability FAIL (RUNBOOK rule 5.10).
+        if int(record.get("observation_lost_turns") or 0) > 0:
+            return True
         return False
 
     void_instrument_by_index: dict[int, dict[str, Any]] = {}
