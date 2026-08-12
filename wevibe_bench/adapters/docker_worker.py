@@ -238,6 +238,8 @@ class DockerCell:
 
         uid = _host_uid()
         gid = _host_gid()
+        if self.config.session_db_host_path is not None:
+            self._ensure_session_db_volume(uid=uid, gid=gid)
         mount = f"{worktree}:/work"
         run_cmd = _build_run_argv(
             config=self.config,
@@ -467,6 +469,142 @@ class DockerCell:
         finally:
             self.serve_pid = None
 
+    def session_db_volume_name(self) -> str:
+        """Name of the per-cell named volume backing the opencode session DB."""
+        return f"{self.container_name}-session-db"
+
+    def _ensure_session_db_volume(self, *, uid: int, gid: int) -> None:
+        """Create the session-DB volume and hand it to the worker uid.
+
+        WO-DBVOL-1: a FRESH named volume is created root:root 0755, but the
+        worker runs under ``--user <uid>:<gid>``, so opencode's first write
+        fails EACCES (verified empirically: ``touch`` -> Permission denied on a
+        default volume, ``WRITE OK`` after this chown). The chown runs in a
+        throwaway root container because the worker container itself is
+        ``--user`` + ``cap-drop ALL`` and cannot chown its own mount.
+
+        A stale volume from a prior cell of the same name is removed first: a
+        session DB must never inherit another cell's transcript.
+        """
+        volume = self.session_db_volume_name()
+        subprocess.run(
+            ["docker", "volume", "rm", "-f", volume],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        created = subprocess.run(
+            ["docker", "volume", "create", volume],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if created.returncode != 0:
+            raise RuntimeError(
+                f"docker volume create failed name={volume} "
+                f"rc={created.returncode} detail={_result_detail(created)}"
+            )
+        chowned = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                # --user 0:0 is REQUIRED and must not be dropped: the worker
+                # image bakes `USER worker` (uid 1000), and a non-root user
+                # cannot chown the volume root — verified: "chown: changing
+                # ownership of '/vol': Operation not permitted", after which
+                # opencode cannot create its DB and the cell dies at startup.
+                "--user",
+                "0:0",
+                "-v",
+                f"{volume}:/vol",
+                self.config.image,
+                "sh",
+                "-lc",
+                f"chown {uid}:{gid} /vol && chmod 0700 /vol",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if chowned.returncode != 0:
+            raise RuntimeError(
+                f"session-db volume chown failed name={volume} "
+                f"rc={chowned.returncode} detail={_result_detail(chowned)}"
+            )
+        self._progress(
+            f"PROGRESS session-db-volume ready name={volume} owner={uid}:{gid} "
+            "backing=docker-volume reason=sqlite-safe-fs"
+        )
+
+    def _remove_session_db_volume(self) -> None:
+        """Drop the per-cell volume AFTER its contents have been exported."""
+        volume = self.session_db_volume_name()
+        removed = subprocess.run(
+            ["docker", "volume", "rm", "-f", volume],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        status = "ok" if removed.returncode == 0 else "failed"
+        self._progress(
+            f"PROGRESS session-db-volume rm name={volume} status={status}"
+        )
+
+    def _export_session_db_pre_teardown(self) -> None:
+        """Copy the session DB out of its volume to the published host path.
+
+        WO-DBVOL-1: the DB now LIVES in a Docker volume (SQLite-safe ext4), so
+        it must be exported before the container is removed. Everything
+        downstream — extraction (``backgammon_sxe.py`` ``session_db_path``),
+        forensics, the dashboard — keeps reading the same host path as before.
+
+        Ordering matters: ``teardown`` calls ``stop_serve`` FIRST, so opencode
+        is dead before this copy and the DB is quiescent. The WAL and SHM
+        sidecars are copied with it — omitting the WAL would silently drop the
+        most recent turns, which is precisely the kind of quiet data loss this
+        work exists to eliminate.
+
+        Never raises: teardown must stay clean. A failed export is reported
+        loudly and leaves the integrity check (run by the caller) to void the
+        cell rather than letting a missing DB read as an empty one.
+        """
+        if self.config.session_db_host_path is None:
+            return
+        destination = Path(self.config.session_db_host_path).expanduser().resolve()
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            copied = subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{self.container_name}:{self.config.home_dir}/.local/share/opencode/.",
+                    str(destination),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - teardown must never raise.
+            self._progress(
+                f"PROGRESS session-db-export status=failed path={destination} "
+                f"reason=exception detail={exc}"
+            )
+            return
+
+        if copied.returncode != 0:
+            self._progress(
+                f"PROGRESS session-db-export status=failed path={destination} "
+                f"rc={copied.returncode} detail={_result_detail(copied)}"
+            )
+            return
+
+        db_path = destination / "opencode.db"
+        size = db_path.stat().st_size if db_path.is_file() else 0
+        self._progress(
+            f"PROGRESS session-db-export status=ok path={destination} db_bytes={size}"
+        )
+
     def teardown(self) -> None:
         if not self.container_name:
             return
@@ -477,40 +615,49 @@ class DockerCell:
         self.stop_serve()
 
         self._capture_worker_logs_pre_teardown()
+        self._export_session_db_pre_teardown()
 
         self._progress(f"PROGRESS docker-rm start name={self.container_name}")
 
+        # try/finally: the two early returns below (docker CLI missing, docker
+        # rm raising) must still drop the per-cell volume. Without this a failed
+        # teardown leaks one named volume per cell, and a long campaign silently
+        # fills the Docker VM's disk — a slow way to break every later run.
         try:
-            removed = subprocess.run(
-                ["docker", "rm", "-f", self.container_name],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except FileNotFoundError:
-            self._progress(f"PROGRESS docker-rm fail name={self.container_name} reason=docker_cli_missing")
-            self.container_id = None
-            return
-        except Exception as exc:  # noqa: BLE001 - teardown must not raise.
-            self._progress(
-                f"PROGRESS docker-rm fail name={self.container_name} reason=exception detail={exc}"
-            )
-            self.container_id = None
-            return
+            try:
+                removed = subprocess.run(
+                    ["docker", "rm", "-f", self.container_name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except FileNotFoundError:
+                self._progress(f"PROGRESS docker-rm fail name={self.container_name} reason=docker_cli_missing")
+                self.container_id = None
+                return
+            except Exception as exc:  # noqa: BLE001 - teardown must not raise.
+                self._progress(
+                    f"PROGRESS docker-rm fail name={self.container_name} reason=exception detail={exc}"
+                )
+                self.container_id = None
+                return
 
-        detail = _result_detail(removed)
-        if removed.returncode == 0:
-            self._progress(
-                f"PROGRESS docker-rm done name={self.container_name} detail={detail or 'removed'}"
-            )
-        elif "No such container" in detail:
-            self._progress(f"PROGRESS docker-rm done name={self.container_name} detail=already-absent")
-        else:
-            self._progress(
-                f"PROGRESS docker-rm fail name={self.container_name} rc={removed.returncode} detail={detail}"
-            )
+            detail = _result_detail(removed)
+            if removed.returncode == 0:
+                self._progress(
+                    f"PROGRESS docker-rm done name={self.container_name} detail={detail or 'removed'}"
+                )
+            elif "No such container" in detail:
+                self._progress(f"PROGRESS docker-rm done name={self.container_name} detail=already-absent")
+            else:
+                self._progress(
+                    f"PROGRESS docker-rm fail name={self.container_name} rc={removed.returncode} detail={detail}"
+                )
 
-        self.container_id = None
+            self.container_id = None
+        finally:
+            if self.config.session_db_host_path is not None:
+                self._remove_session_db_volume()
 
     def _capture_worker_logs_pre_teardown(self) -> None:
         if self.config.worker_logs_dir is None:
@@ -814,19 +961,33 @@ def _build_run_argv(
 
     if config.session_db_host_path is not None:
         host_session_db = Path(config.session_db_host_path).expanduser().resolve()
-        # Docker pre-creates the bind destination's parent chain (.local, .local/share)
-        # as root:0755 on the HOME tmpfs, which makes opencode's own
-        # `mkdir ~/.local/state` (XDG_STATE_HOME) fail EACCES under --user. A 1777
-        # tmpfs on .local keeps the state sibling writable; the bind mount itself
-        # still lands on .local/share/opencode (mounts are depth-sorted).
+        # WO-DBVOL-1 (2026-08-11): the session DB is served from a NAMED DOCKER
+        # VOLUME, never a macOS bind mount.
+        #
+        # A bind mount puts SQLite on osxfs/gRPC-FUSE, whose locking and fsync
+        # semantics SQLite does not trust — and the corruption was real, not
+        # theoretical: `PRAGMA integrity_check` on the preserved DBs of BOTH
+        # 500-failing cells reports "database disk image is malformed", with
+        # the damaged pages in tree 27 = the `part` table, exactly the table in
+        # the failing `select ... from "part" where "message_id" in (?...)`.
+        # The 11:14 cell that never 500'd is clean. The IN-list size was a red
+        # herring: a larger list touches more pages, so it meets a corrupt page
+        # sooner. A named volume lives on ext4 inside the Linux VM, where
+        # SQLite's guarantees actually hold.
+        #
+        # The host directory remains the published artifact location; the DB is
+        # copied out of the volume at teardown (_export_session_db). Reads of
+        # the exported copy (extraction, forensics) are unchanged.
+        volume_name = f"{config.container_name}-session-db"
         run_cmd.extend(
             [
                 "--tmpfs",
                 f"{config.home_dir}/.local:mode=1777",
                 "-v",
-                f"{host_session_db}:{config.home_dir}/.local/share/opencode:rw",
+                f"{volume_name}:{config.home_dir}/.local/share/opencode:rw",
             ]
         )
+        host_session_db.mkdir(parents=True, exist_ok=True)
 
     if config.output_token_max is not None:
         # Enforced output-cap lever for opencode workers: this EXPERIMENTAL env flag

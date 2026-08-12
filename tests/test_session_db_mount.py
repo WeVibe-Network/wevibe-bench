@@ -56,13 +56,23 @@ def test_run_argv_session_db_mount_present_when_configured_memory_mode_off(tmp_p
 
     argv = _build_run_argv(config=cfg, worktree=worktree, uid=501, gid=20, memory_mode="off")
 
+    # WO-DBVOL-1: the session DB is served from a NAMED DOCKER VOLUME, never a
+    # host bind mount. On macOS a bind mount puts SQLite on osxfs/gRPC-FUSE,
+    # whose locking/fsync semantics SQLite cannot rely on — verified corruption
+    # ("database disk image is malformed", damaged pages in the `part` table)
+    # on BOTH 2026-08-11 cells that failed with HTTP 500.
     assert _contains_pair(
         argv,
         "-v",
-        f"{session_db.resolve()}:/home/worker/.local/share/opencode:rw",
+        "wevibe-bench-cell-session-db-off-session-db:/home/worker/.local/share/opencode:rw",
     )
+    # The host path must NOT appear as a bind source: that is the defect.
+    assert not any(
+        str(session_db.resolve()) in item and "/home/worker/.local/share/opencode" in item
+        for item in argv
+    ), "session DB must never be bind-mounted from the macOS filesystem"
     # The 1777 tmpfs on .local keeps opencode's XDG_STATE_HOME sibling writable:
-    # docker pre-creates the bind destination's parents as root:0755 otherwise.
+    # docker pre-creates the mount destination's parents as root:0755 otherwise.
     assert _contains_pair(argv, "--tmpfs", "/home/worker/.local:mode=1777")
 
 
@@ -77,11 +87,18 @@ def test_run_argv_session_db_mount_present_when_configured_memory_mode_on(
 
     argv = _build_run_argv(config=cfg, worktree=worktree, uid=501, gid=20, memory_mode="on")
 
+    # Volume-backed on the ON arm too: the arms must stay byte-identical in
+    # topology, and the ON arm is the one whose extraction result depends on
+    # this DB being sound.
     assert _contains_pair(
         argv,
         "-v",
-        f"{session_db.resolve()}:/home/worker/.local/share/opencode:rw",
+        "wevibe-bench-cell-session-db-on-session-db:/home/worker/.local/share/opencode:rw",
     )
+    assert not any(
+        str(session_db.resolve()) in item and "/home/worker/.local/share/opencode" in item
+        for item in argv
+    ), "session DB must never be bind-mounted from the macOS filesystem"
     assert _contains_pair(argv, "--tmpfs", "/home/worker/.local:mode=1777")
 
 

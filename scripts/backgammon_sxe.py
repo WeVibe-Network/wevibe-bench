@@ -25,6 +25,7 @@ from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
 from wevibe_bench.lifecycle.mcp_rest import McpRest
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.preflight import preflight
+from wevibe_bench.session_db_integrity import require_sound_session_db
 from wevibe_bench.spend_key import (
     key_fingerprint,
     resolve_local_llm_proxy_api_key,
@@ -319,6 +320,51 @@ def main() -> int:
         print(line, flush=True)
         logger.info(line)
 
+    # ── STRUCTURED STAGE EMITTER ────────────────────────────────────────────
+    # The `stage` local below is the extraction pipeline's real state machine,
+    # but before this it was only ever PRINTED on the error path
+    # (`ERROR stage=<x>`), so a consumer could not tell which stage was running
+    # without scraping prose PROGRESS lines and inferring.
+    #
+    # A UI built on prose-scraping lies the moment a message is reworded. This
+    # emits ONE machine-readable line per stage transition, with a stable
+    # schema, so the dashboard renders the pipeline from a declared fact rather
+    # than an inference. The prose lines are untouched — this is additive.
+    #
+    # `gated` is a FIRST-CLASS state, distinct from `failed`: the WO-DBVOL-1
+    # integrity check refusing a corrupt substrate is the instrument working
+    # correctly, and must never render as a crash (nor, ever, as a pass).
+    # Stages that already emitted a TERMINAL state (gated/failed). The error
+    # handler must not overwrite a `gated` with a `failed`: the distinction is
+    # the whole point — a gate refusing a corrupt substrate is the instrument
+    # working, and it raises afterwards to void the cell.
+    _terminal_stages: set[str] = set()
+
+    def emit_stage(
+        name: str,
+        state: str,
+        *,
+        count: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        if state in {"gated", "failed"}:
+            _terminal_stages.add(name)
+        payload: dict[str, Any] = {
+            "stage": name,
+            "state": state,
+            "at": time.time(),
+        }
+        if count is not None:
+            payload["count"] = int(count)
+        if detail is not None:
+            # Bounded: a stage detail is a reason a human reads on a stream,
+            # never a stack dump or a transcript.
+            payload["detail"] = str(detail)[:400]
+        print(
+            "BACKGAMMON_SXE_STAGE " + json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            flush=True,
+        )
+
     result_payload: dict[str, Any] = {
         "status": "error",
         "org_id": args.org_id,
@@ -334,6 +380,7 @@ def main() -> int:
     }
 
     stage = "init"
+    emit_stage("init", "running")
     extract_path = ""
     leader_instance: McpInstance | None = None
     contributor_instance: McpInstance | None = None
@@ -354,13 +401,37 @@ def main() -> int:
         s_prompt = _load_prompt(s_prompt_path)
 
         stage = "substrate"
+        emit_stage("init", "complete")
+        emit_stage("substrate", "running")
         session_db_path = session_dir / "session-db" / "opencode.db"
         if not session_db_path.is_file():
+            emit_stage(
+                "substrate",
+                "gated",
+                detail=f"session database not found for extraction: {session_db_path}",
+            )
             raise RuntimeError(f"session database not found for extraction: {session_db_path}")
+        # WO-DBVOL-1: existence is NOT soundness. SQLite corruption is partial —
+        # the 2026-08-11 DB answered `count(*)` fine while `PRAGMA quick_check`
+        # reported a malformed image — so an unverified substrate silently
+        # under-reports memories instead of failing. Fail closed here: a corrupt
+        # DB voids the cell rather than producing a plausible wrong number.
+        #
+        # A corrupt substrate emits `gated`, NOT `failed`: the gate refusing is
+        # the instrument behaving correctly, and the UI must show it as a
+        # deliberate refusal rather than a crash.
+        try:
+            integrity = require_sound_session_db(session_db_path)
+        except Exception as exc:
+            emit_stage("substrate", "gated", detail=str(exc))
+            raise
+        progress(f"substrate integrity {integrity.summary()}")
+        emit_stage("substrate", "complete", detail=integrity.summary())
         session_id = None
         progress(f"substrate source session_db={session_db_path}")
 
         stage = "identity"
+        emit_stage("identity", "running")
         leader = _load_identity("WEVIBE_BENCH_LEADER_SEED_HEX")
         contributor = _load_identity("WEVIBE_BENCH_CONTRIB_SEED_HEX")
 
@@ -370,11 +441,15 @@ def main() -> int:
         )
 
         stage = "preflight"
+        emit_stage("identity", "complete")
+        emit_stage("preflight", "running")
         progress(f"preflight hub start hub_url={cfg.hub_url}")
         preflight(hub_url=cfg.hub_url, mcp_recall_url=None)
         progress("preflight hub ok")
+        emit_stage("preflight", "complete")
 
         stage = "orchestrator"
+        emit_stage("orchestrator", "running")
         wevibe_root = os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT", str(Path(__file__).resolve().parents[2]))
         leader_keystore = os.environ.get("WEVIBE_BENCH_LEADER_KEYSTORE", DEFAULT_LEADER_KEYSTORE_PATH)
         contributor_keystore = os.environ.get(
@@ -416,6 +491,8 @@ def main() -> int:
         )
 
         stage = "org_resolve"
+        emit_stage("orchestrator", "complete")
+        emit_stage("org_resolve", "running")
         progress("run_m1 start (org resolve)")
         m1_result = orchestrator.run_m1()
         resolved_org_id = str(m1_result.get("org_id") or "").strip()
@@ -427,6 +504,7 @@ def main() -> int:
             )
         org_id = args.org_id or resolved_org_id
         progress(f"org resolve ok org_id={org_id}")
+        emit_stage("org_resolve", "complete", detail=f"org_id={org_id}")
 
         extract_base_url = _resolve_extract_base_url()
         extract_num_ctx = _resolve_extract_num_ctx()
@@ -480,6 +558,7 @@ def main() -> int:
             raise RuntimeError(f"extract model empty after normalization: provider={extract_provider!r}")
 
         stage = "extract"
+        emit_stage("extract", "running", detail=f"model={extract_model}")
         extract_start = time.perf_counter()
         progress(
             "extract start "
@@ -521,9 +600,15 @@ def main() -> int:
             f"path={extract_path} dur_ms={extract_dur_ms} n_memories={len(memories)} "
             f"total_text_size={total_text_size} total_keywords={total_keywords}"
         )
+        # A count of 0 is a MEASURED ZERO — a real result, not absence. The
+        # board must render it as such (contract rule 1), which is why the
+        # count is always emitted rather than omitted when empty.
+        emit_stage("extract", "complete", count=len(memories))
 
         committed_memories: list[dict[str, Any]] = []
         delivery_targets: list[dict[str, str]] = []
+        if memories:
+            emit_stage("submit", "running", count=0)
         for index, memory in enumerate(memories, start=1):
             stage = f"submit[{index}/{len(memories)}]"
             submission_hash = proof.submit_memory(org_id, memory)
@@ -559,6 +644,12 @@ def main() -> int:
             )
 
         stage = "prove_delivery"
+        # Submit/approve advance per memory; they are reported as one stage each
+        # carrying the count actually completed, so a partial run shows how far
+        # it got rather than a bare "failed".
+        emit_stage("submit", "complete", count=len(committed_memories))
+        emit_stage("approve", "complete", count=len(committed_memories))
+        emit_stage("prove_delivery", "running")
         delivery_payload = proof.prove_delivery(org_id, delivery_targets)
         delivery = str(delivery_payload.get("delivery") or "NO")
         n_memories = int(delivery_payload.get("n_memories") or len(delivery_targets))
@@ -596,6 +687,15 @@ def main() -> int:
                 )
 
         status = "ok" if delivery == "YES" else "delivery_no"
+        # Delivery NO is a real, measured outcome — the stage completed and the
+        # answer was negative. It is NOT a stage failure, and must not render as
+        # one; the delivery verdict itself carries the meaning.
+        emit_stage(
+            "prove_delivery",
+            "complete",
+            count=matched_count,
+            detail=f"delivery={delivery} matched={matched_count}/{n_memories}",
+        )
         primary_memory = committed_memories[0] if committed_memories else {}
         result_payload = {
             "status": status,
@@ -628,6 +728,13 @@ def main() -> int:
 
     except Exception as exc:
         progress(f"ERROR stage={stage} err={exc}")
+        # The stage name may carry an index suffix (`submit[3/7]`); the emitted
+        # stage id is the base name so it matches the declared stage list the
+        # UI renders. A `gated` stage has already emitted its own terminal
+        # state above and is not overwritten here.
+        _base_stage = str(stage).split("[")[0]
+        if _base_stage not in _terminal_stages:
+            emit_stage(_base_stage, "failed", detail=str(exc))
         result_payload.update(
             {
                 "status": "error",
