@@ -299,6 +299,11 @@ import {
   armRun,
   startRun,
   disarm as disarmRun,
+  openBaselineModal,
+  closeBaselineModal,
+  isBaselineModalOpen,
+  runLifecycleState,
+  clearRefusal,
 } from "./panels/runstart.js";
 import {
   renderTui, toggleTui, askDetach, cancelDetach,
@@ -355,7 +360,7 @@ function render() {
       ${renderRecall(board)}
       ${renderRail(board)}
       ${renderProvenance(board)}
-      ${renderTui(board)}
+      ${renderTui(board, runLifecycleState())}
       ${renderExtraction(board)}
     </div>
   `);
@@ -380,9 +385,26 @@ function render() {
 // it can, but it REPLACES any node whose tag changed and removes any node that
 // left the tree — a handler bound directly to one of those would be silently
 // lost. Delegation is invariant to how the tree is updated.
+//
+// BOUND BY THE BOOT GUARD, NOT AT MODULE SCOPE. These three listeners used to
+// run on import, which broke this module's OWN documented library/entry-point
+// split (see the guard at the foot of the file): board.js exports esc/nul/clip/
+// tok/dur, so every panel imports it — and any test that imports a panel
+// executed `document.addEventListener` under Node and threw
+// `ReferenceError: document is not defined` before a single assertion ran.
+// The condition was latent only because no test had yet imported a panel
+// module. Binding here keeps the behaviour identical in a browser and makes the
+// module importable everywhere else, which is what the guard already claimed.
+function bindInteraction() {
+  document.addEventListener("click", onClick);
+  // Run-form inputs. `change` covers the selects; `input` covers typing the org.
+  document.addEventListener("change", onRunSel);
+  document.addEventListener("input", onRunSel);
+  document.addEventListener("keydown", onKeydown);
+}
 
-document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-model-expand],[data-run-baseline],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
+function onClick(e) {
+  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-model-expand],[data-run-baseline],[data-baseline-continue],[data-baseline-back],[data-run-dismiss],[data-run-scrim],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
   if (!t) return;
 
   if (t.dataset.metric) { setCurveMetric(t.dataset.metric); render(); return; }
@@ -418,9 +440,32 @@ document.addEventListener("click", (e) => {
   // would otherwise match the row's own closest() hit. They each stopPropagation
   // by returning here — the button attributes are tested before the row's.
   if (t.dataset.runBaseline) {
-    // A baseline is BY DEFINITION the OFF arm. Prefills and arms; the operator
-    // still confirms, because this starts a multi-hour cell.
-    presetRun({ model: t.dataset.runBaseline, arm: "off" });
+    // Open the confirmation modal rather than silently pre-filling the form.
+    // A baseline cell costs several hours; the operator must commit explicitly.
+    openBaselineModal(t.dataset.runBaseline);
+    render();
+    return;
+  }
+  if (t.dataset.baselineContinue) {
+    // Operator confirmed. Preset the form and arm immediately.
+    presetRun({ model: t.dataset.baselineContinue, arm: "off" });
+    closeBaselineModal();
+    void doArmRun();
+    return;
+  }
+  if (t.hasAttribute("data-baseline-back")) {
+    closeBaselineModal();
+    render();
+    return;
+  }
+  // DISMISSING THE RUN CONTROL DISARMS IT. Leaving a token armed behind a
+  // closed surface is exactly the invisible state this work exists to remove —
+  // the operator would have a live token they can no longer see or confirm.
+  // The scrim only dismisses when the scrim ITSELF was clicked; a click that
+  // bubbled out of the form must never throw away a half-filled run.
+  if (t.hasAttribute("data-run-dismiss") || (t.hasAttribute("data-run-scrim") && e.target === t)) {
+    disarmRun();
+    clearRefusal();
     render();
     return;
   }
@@ -442,11 +487,8 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (t.dataset.popToggle) { togglePopout(t.dataset.popToggle); render(); return; }
-});
+}
 
-// Run-form inputs. `change` covers the selects; `input` covers typing the org.
-document.addEventListener("change", onRunSel);
-document.addEventListener("input", onRunSel);
 function onRunSel(e) {
   const s = e.target.closest("[data-run-sel]");
   if (!s) return;
@@ -454,11 +496,18 @@ function onRunSel(e) {
   render();
 }
 
-document.addEventListener("keydown", (e) => {
+function onKeydown(e) {
   if (e.key !== "Escape") return;
+  // The baseline confirm is checked FIRST — it is rendered on top, so Escape
+  // must dismiss what the operator is actually looking at.
+  if (isBaselineModalOpen()) { closeBaselineModal(); render(); return; }
   if (isInspectorOpen()) { closeInspector(); render(); return; }
+  // Escape disarms the run control for the same reason DISMISS does: an armed
+  // token behind a dismissed surface is an invisible state.
+  const lc = runLifecycleState();
+  if (lc.armed || lc.refusal) { disarmRun(); clearRefusal(); render(); return; }
   if (isDetachConfirming()) { cancelDetach(); render(); }
-});
+}
 
 /** The board never posts. The browser posts DIRECTLY to the control plane. */
 
@@ -667,6 +716,7 @@ async function doStartRun() {
 // under `node --test` neither is, and the module is then exactly what the tests
 // treat it as — a library.
 if (typeof document !== "undefined" && typeof EventSource !== "undefined") {
+  bindInteraction();
   render();
   connect();
 }

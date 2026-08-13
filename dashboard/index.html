@@ -470,6 +470,30 @@ a:hover{color:var(--type)}
 .modal-scrim{position:fixed;inset:0;background:rgba(2,16,10,.82);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:24px;z-index:100}
 .modal{width:min(920px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--radius-xl);padding:var(--pad);box-shadow:var(--shadow-term);display:flex;flex-direction:column;gap:12px}
 
+/* ── BASELINE CONFIRM (+ baseline) ─────────────────────────────────────────
+   NARROWER THAN .modal. It carries one question and two buttons; at 920px the
+   sentence spans the screen and the two controls drift far apart, which reads
+   as a form rather than as a decision. The question is the whole dialog. */
+.bmodal{width:min(560px,calc(100vw - 48px))}
+.bm-body{font-size:15px;line-height:1.5;color:var(--fg)}
+/* The consequences are stated at lower emphasis than the question but are NOT
+   hidden behind a hover or a disclosure — an operator committing hours needs to
+   read them without asking. */
+.bm-note{font-size:12px;line-height:1.55;color:var(--fg-dim)}
+/* CONTINUE FIRST, and the destructive-weight control is the one that acts.
+   BACK is deliberately the quieter of the two: dismissing costs nothing, so it
+   must not compete visually with the choice that spends hours. */
+.bm-btns{display:flex;gap:10px;align-items:center;margin-top:4px}
+
+/* ── RUN CONTROL, RAISED ON ITS OWN ────────────────────────────────────────
+   The run control used to render ONLY inside the profile inspector, so the
+   CONFIRM button and every refusal were unreachable unless a profile existed —
+   which is why [+ baseline] armed a run that could never be confirmed. It now
+   has its own dialog, raised only while there is something to confirm or a
+   refusal to read. Narrow, because it is one decision. */
+.rmodal{width:min(640px,calc(100vw - 48px))}
+.rmodal-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px;padding-top:10px;border-top:1px solid var(--hairline)}
+
 /* ── PROFILE INSPECTOR ─────────────────────────────────────────────────────
    The read-only record of a frozen policy, and the ONLY surface that starts a
    run. Two columns: the policy on the left, the evidence produced under it on
@@ -526,6 +550,31 @@ a:hover{color:var(--type)}
    above. It must read as the tag it replaced, not as a form control. */
 .chip-btn{background:transparent;cursor:pointer;font-family:var(--font)}
 .chip-btn:hover{color:var(--type);border-color:var(--fg)}
+
+/* ── EVENT-KIND FILTER CHIPS (panels/live.js) ──────────────────────────────
+   These are <button>s, and `.chip` alone sets only font and colour — so they
+   inherited the UA's white background with green text, and the on/off state
+   that the whole control exists to express had NO definition at all: an
+   operator could not tell an included kind from an excluded one.
+
+   OFF IS DRAWN AS ABSENCE, NOT AS A DIFFERENT COLOUR. A muted, hollow chip
+   reads as "these rows are not in the feed"; a second hue would read as a
+   second category of event, which is exactly the confusion to avoid. */
+.chip.on,.chip.off{
+  font:700 11px var(--font);letter-spacing:.10em;
+  background:transparent;border:1px solid var(--border-strong);
+  border-radius:var(--radius-sm);padding:3px 9px;cursor:pointer;
+}
+.chip.on{color:var(--fg);border-color:var(--fg)}
+.chip.on:hover{color:var(--type);border-color:var(--type)}
+.chip.off{color:var(--dim);border-color:var(--hairline)}
+.chip.off:hover{color:var(--fg);border-color:var(--border-strong)}
+/* A NON-ZERO ERROR COUNT OUTRANKS THE FILTER STATE. Errors are the one kind an
+   operator must not be able to overlook, so the count carries the danger hue
+   even while the chip is toggled on. It stays a border+text treatment — never a
+   filled block — so it cannot be mistaken for a pressed state. */
+.chip.err{color:var(--danger);border-color:var(--danger)}
+.chip.err:hover{color:var(--danger);border-color:var(--danger)}
 
 /* ── RUN CONTROL ───────────────────────────────────────────────────────────
    Design 5b. Four states: idle · blocked (with the reason ON the control) ·
@@ -864,6 +913,20 @@ a:hover{color:var(--type)}
    something the model DID: everything else in this feed is the agent acting. */
 .evrow.user{box-shadow:inset 2px 0 0 var(--type)}
 .evrow.user .evmark,.evrow.user .evname{color:var(--type)}
+/* HARNESS / GRADING — the verdict channel (control/gate-events.mjs).
+   PROMINENT ON PURPOSE, and louder than any agent row. Between attempts the
+   agent is idle BY DESIGN while grading runs, so every other kind falls silent
+   and this is the only line still moving — it is the sole signal separating
+   "grading" from "wedged", the exact ambiguity that cost 32 unobserved minutes
+   on 2026-08-12.
+
+   A FULL-WIDTH TINT, not just a coloured mark. The other kinds are events in a
+   stream; these are the boundaries BETWEEN attempts, so they read as rules
+   across the feed rather than as entries within it. The detail is left bright
+   because the gate counts it carries are the payload, not decoration. */
+.evrow.harness{box-shadow:inset 3px 0 0 var(--check);background:color-mix(in srgb,var(--check) 7%,transparent)}
+.evrow.harness .evmark,.evrow.harness .evname{color:var(--check);font-weight:700}
+.evrow.harness .evdetail{color:var(--type)}
 .evpath{font-size:12px}
 /* THE ONLY MOTION ON THE BOARD. Background + inset rule, one shot. Never
    height/margin/transform — those would reflow the feed mid-scroll. */
@@ -934,8 +997,61 @@ a:hover{color:var(--type)}
    rules must never impose a width that would squeeze that grid. */
 .tui-brand{font:700 12px var(--font);color:var(--type);flex:none}
 .tui-stat{font:400 12px var(--font);color:var(--fg);flex:none}
-.tui-state{display:flex;flex-direction:column;gap:7px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--bg-2);min-height:132px}
-.tui-line{font:400 12.5px/1.55 var(--font);color:var(--fg)}
+/* ── STARTUP FEED (panels/startup.js) ──────────────────────────────────────
+   Occupies the TUI grid until a real terminal frame paints, then yields.
+
+   REPLACES `.tui-state` / `.tui-line`, which styled the five placeholder
+   screens the feed absorbed. Those rules are deleted along with their markup —
+   a stylesheet that keeps definitions for classes nothing emits is how the
+   sheet and the panels drift apart, which is what style-coverage.test.mjs
+   exists to catch. */
+.sfeed{display:flex;flex-direction:column;height:100%;min-height:0;font-family:var(--font)}
+.sfeed-head{display:flex;align-items:baseline;gap:12px;padding:10px 12px;border-bottom:1px solid var(--hairline);flex:none}
+/* THE VERDICT IS THE HEADLINE. One line answering "can a benchmark start right
+   now" — read before any individual row, and the only text here that is allowed
+   to carry the danger hue at full weight. */
+.sfeed-verdict{font:400 12px var(--font);color:var(--dim)}
+.sfeed-verdict.bad{color:var(--danger);font-weight:700}
+.sfeed-rows{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:2px}
+.sfeed-foot{flex:none;padding:8px 12px;border-top:1px solid var(--hairline);font:400 11px/1.5 var(--font);color:var(--dim)}
+
+/* ONE ROW PER PROCESS. A four-column grid so the state word and the detail
+   align down the list — a ragged left edge on a status list makes scanning for
+   the one broken row into reading, which defeats the purpose. `why` and
+   `reason` span the full width beneath. */
+.sfrow{display:grid;grid-template-columns:10px minmax(0,190px) 74px minmax(0,1fr);gap:10px;align-items:baseline;padding:7px 8px;border:1px solid transparent;border-radius:var(--radius-sm)}
+/* ONLY `bad` GETS A BOX. Drawing a border around every row would make the
+   blocking one just another row in a grid; leaving the healthy rows unframed is
+   what lets the failure carry weight without any colour being added. */
+.sfrow.bad{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 7%,transparent)}
+.sfrow.off,.sfrow.idle{opacity:.62}
+.sfdot{width:8px;height:8px;border-radius:50%;align-self:center;background:var(--dim)}
+.sfdot.ok,.sfdot.busy{background:var(--check)}
+.sfdot.bad{background:var(--danger)}
+/* OFF AND IDLE ARE HOLLOW — absence drawn as absence, never as a second hue.
+   A colour would read as a third category of health; a hollow dot reads as
+   "nothing is happening here", which is the truth. */
+.sfdot.off,.sfdot.idle,.sfdot.unknown{background:transparent;border:1px solid var(--border-strong)}
+.sfname{font:400 12.5px var(--font);color:var(--fg);min-width:0;overflow:hidden;text-overflow:ellipsis}
+.sfstate{font:700 10px var(--font);letter-spacing:.10em;color:var(--dim)}
+.sfrow.bad .sfstate{color:var(--danger)}
+.sfrow.ok .sfstate,.sfrow.busy .sfstate{color:var(--check)}
+.sfdetail{font:400 12px var(--font);color:var(--type);min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* THE EXPLANATION RIDES EVERY ROW, not a tooltip. Nobody hovers on a stream,
+   and an operator who has to ask what a process does has learned nothing from a
+   coloured dot. */
+.sfwhy{grid-column:2/-1;font:400 11px/1.5 var(--font);color:var(--dim)}
+/* THE REASON IS THE PAYLOAD — the publisher's own words, verbatim. This is the
+   line whose absence made the failed [+ baseline] click invisible, so it is
+   never clipped, never truncated, and never behind an interaction. */
+.sfreason{grid-column:2/-1;font:400 11.5px/1.55 var(--font);color:var(--fg);white-space:pre-wrap}
+.sfreason.bad{color:var(--danger)}
+
+/* The minimized dock carries the blocking count, because the dock is minimized
+   by default and a failure only visible once expanded is one the operator has
+   to go looking for. */
+.tui-block{font:700 10px var(--font);letter-spacing:.10em;color:var(--danger);border:1px solid var(--danger);border-radius:var(--radius-sm);padding:2px 7px}
+.tui-ready{font:700 10px var(--font);letter-spacing:.10em;color:var(--dim)}
 .tui-confirm{width:min(376px,calc(100vw - 48px))}
 .tui-confirm .body{line-height:1.65}
 .tui-pre.dim{opacity:.55}

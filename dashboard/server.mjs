@@ -571,6 +571,7 @@ const STATIC = {
   "/panels/recall.js": { file: "panels/recall.js", type: "text/javascript; charset=utf-8" },
   "/panels/rail.js": { file: "panels/rail.js", type: "text/javascript; charset=utf-8" },
   "/panels/runstart.js": { file: "panels/runstart.js", type: "text/javascript; charset=utf-8" },
+  "/panels/startup.js": { file: "panels/startup.js", type: "text/javascript; charset=utf-8" },
   "/panels/popout.js": { file: "panels/popout.js", type: "text/javascript; charset=utf-8" },
   "/panels/extraction.js": { file: "panels/extraction.js", type: "text/javascript; charset=utf-8" },
 

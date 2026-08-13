@@ -65,6 +65,12 @@ const ui = {
   // Set when START fires, cleared once run state reports a live cell. Drives
   // the STARTING counter.
   startedAt: null,
+  // ── BASELINE CONFIRM MODAL ───────────────────────────────────────────────
+  // Opened by a [+ baseline] click before presetRun() is called, so the
+  // operator explicitly commits to starting a multi-hour OFF cell rather than
+  // doing so by reflex. The model name is shown so the confirmation is
+  // informative, not decorative.
+  baselineModal: null, // null | { model: string }
 };
 
 export function runSel() {
@@ -100,6 +106,45 @@ export function presetRun({ model, arm, context = null }) {
   // ones must die with it.
   disarm();
   ui.refusal = null;
+}
+
+export function openBaselineModal(model) {
+  ui.baselineModal = { model };
+}
+
+export function closeBaselineModal() {
+  ui.baselineModal = null;
+}
+
+export function isBaselineModalOpen() {
+  return ui.baselineModal !== null;
+}
+
+/**
+ * THE LIFECYCLE, PUBLISHED FOR THE STARTUP FEED.
+ *
+ * `ui` is module-private on purpose, but its state WAS the operator's blind
+ * spot: an armed-and-unconfirmed run and a refused preview both lived here and
+ * were painted by exactly one surface (`renderRunControl`), which is only
+ * reachable through the profile inspector. When that surface was not on screen
+ * the failure existed and was invisible.
+ *
+ * A READ-ONLY SNAPSHOT, NOT THE OBJECT. Handing out `ui` would let any consumer
+ * mutate run-start state from outside the panel that owns it; the copy makes
+ * this a report, which is all the feed is entitled to.
+ */
+export function runLifecycleState() {
+  return {
+    armed: ui.armed,
+    pending: ui.pending,
+    refusal: ui.refusal ? { ...ui.refusal } : null,
+    restatement: ui.restatement,
+    startedAt: ui.startedAt,
+    starting: ui.startedAt !== null,
+    model: ui.sel.model || null,
+    arm: ui.sel.arm || null,
+    org: ui.sel.arm === "on" ? ui.sel.org.trim() || null : null,
+  };
 }
 
 export function disarm() {
@@ -204,6 +249,41 @@ function payload() {
 }
 
 // ── RENDER ───────────────────────────────────────────────────────────────────
+
+/**
+ * THE BASELINE CONFIRM MODAL.
+ *
+ * Shown when [+ baseline] is clicked, BEFORE presetRun() is called. An OFF
+ * cell costs several hours; the operator must explicitly commit rather than
+ * starting one by reflex. The model name is shown so the confirmation is
+ * informative, not decorative.
+ *
+ * CONTINUE calls armRun() — the same path a manual ARM click takes — so the
+ * full arm → confirm → start flow follows with no special-casing.
+ */
+export function renderBaselineModal() {
+  if (!ui.baselineModal) return "";
+  const { model } = ui.baselineModal;
+  // Reuses the board's existing .modal-scrim/.modal shells so this dialog can
+  // never drift from the others in width, elevation or scrim treatment.
+  return `
+    <div class="modal-scrim" data-baseline-back="1">
+      <div class="modal bmodal" role="dialog" aria-modal="true" aria-labelledby="bm-title">
+        <span class="kick" id="bm-title">START A BENCHMARK?</span>
+        <div class="bm-body">Are you sure you want to start a benchmark with <strong>${esc(model)}</strong>?</div>
+        <div class="bm-note">${esc(
+          "This arms a CONTROL (memory off) cell — the baseline floor for this model. " +
+            "Runs are strictly serial and a cell takes hours; it cannot be paused or resumed. " +
+            "Continue arms the run and shows the server's restatement for a final confirmation — it does not launch yet.",
+        )}</div>
+        <div class="bm-btns">
+          <button class="runbtn" data-baseline-continue="${esc(model)}">CONTINUE →</button>
+          <button class="btn" data-baseline-back="1">BACK</button>
+        </div>
+      </div>
+    </div>`;
+}
+
 
 export function renderRunControl(board) {
   const c = board.control ?? null;
