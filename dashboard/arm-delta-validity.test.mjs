@@ -296,17 +296,23 @@ test("an archived record carrying no `type` is still read as an attempt", async 
   assert.equal(patch.arm_delta.b.resolution_rate, 0.5);
 });
 
-// ── the wall is deliberately NOT filtered ────────────────────────────────────
+// ── validity gates the DELTA, and only the delta ─────────────────────────────
+//
+// This module no longer builds a gate wall. That derivation lived here, could
+// only ever describe gates OBSERVED FAILING, rendered nowhere, and has been
+// deleted — the wall's one source is the control plane's GET /api/wall, folded
+// from the write-once roster plus per-gate `gate_results` (control/wall.mjs).
+// The display-vs-measurement rule below is unchanged; only the delta is filtered.
 
-test("the wall still shows a void cell's gates — it is display, not measurement", async () => {
-  // The wall claims "these gates were red", which is TRUE for a void cell and
-  // checkable line-by-line against the log. Only the causal surface (the delta)
-  // requires validity. Blanking the wall would hide a real observation.
+test("a void cell is excluded from the delta while its record is still read", async () => {
   const patch = await boardFrom([
     attempt({ seq: 0, attempt: 1, mode: "off", terminalReason: "harness_error", truncatedTurns: 11 }),
   ]);
-  assert.equal(patch.wall.totals.b.red, 2);
+  // Read and counted as an exclusion — never silently dropped, which is what
+  // makes the exclusion auditable rather than invisible.
   assert.equal(patch.arm_delta.b.cells, 0);
+  assert.equal(patch.arm_delta.b.excluded.total, 1);
+  assert.equal(patch.arm_delta.b.excluded.void_instrument, 1);
 });
 
 // ── ONE RUN ON SCREEN: no cross-run contamination ────────────────────────────
@@ -319,7 +325,7 @@ test("the wall still shows a void cell's gates — it is display, not measuremen
 // against the live run's failed_gates list finds gates that are not in it, and
 // the arm delta counted abandoned cells toward the live arm's exclusions.
 
-test("ONE RUN: the wall carries only the active run's gates", async () => {
+test("ONE RUN: only the active run's cells are read", async () => {
   const res = await boardFromRuns({
     "cumulative.burned-old": [
       attempt({ seq: 0, attempt: 1, mode: "off", gates: ["[G91] REQ-OLD — dead", "[G92] REQ-OLD — dead"] }),
@@ -328,10 +334,11 @@ test("ONE RUN: the wall carries only the active run's gates", async () => {
   });
 
   assert.equal(res.ok, true);
-  const ids = res.patch.wall.gates.map((g) => g.id).sort();
-  assert.deepEqual(ids, ["G01", "G02"], "an abandoned run's gates must not appear on the wall");
-  assert.equal(res.patch.wall.totals.b.unobserved, 0, "no phantom unobserved slots from a dead run");
   assert.equal(res.provenance.run, "cumulative");
+  // The abandoned run contributes no cell to the delta and no row to history.
+  assert.equal(res.patch.arm_delta.b.cells, 1, "an abandoned run's cell must not score");
+  assert.equal(res.patch.arm_delta.b.excluded.total, 0, "nor be charged as an exclusion here");
+  assert.equal(res.patch.history.length, 1);
 });
 
 test("ONE RUN: an abandoned run's cells never reach the arm delta", async () => {

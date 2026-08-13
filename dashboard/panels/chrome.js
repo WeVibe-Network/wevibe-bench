@@ -26,12 +26,29 @@ export function renderTopbar(board, { stale, lastError }) {
     : "";
 
   // A stopped cell is not a running cell. Never imply motion in a stopped cell.
+  //
+  // STALLED IS ITS OWN BRANCH, AND IT IS LOUD. A wedged cell used to fall
+  // through to "no run observed" — the most dangerous possible rendering, since
+  // a run burning hours in an unbounded nudge loop read as nothing happening at
+  // all. Recovery is unbounded by design (WO-NUDGE-INF-1) and hang detection was
+  // delegated to a poller that did not exist; this chip is that poller's output
+  // and it sits in the most-read spot on the board.
+  //
+  // IT CLAIMS A STALL, NOT A FAILURE. The run may still recover — the harness
+  // is nudging. What it asserts is only what was measured: nothing has been
+  // written for this long.
   const state =
     r.state === "complete"
       ? `<span class="tag">CELL COMPLETE${r.terminal_status ? ` · ${esc(r.terminal_status)}` : ""}</span>`
-      : r.state === "running"
-        ? `<span class="tag on">RUNNING${r.elapsed_s !== null && r.elapsed_s !== undefined ? ` ${esc(dur(r.elapsed_s))}` : ""}</span>`
-        : `<span class="chip dimchip">${nul("no run observed")}</span>`;
+      : r.state === "stalled"
+        ? `<span class="chip danger">CELL STALLED${
+            r.log_silent_s === null || r.log_silent_s === undefined
+              ? ""
+              : ` — SILENT ${esc(dur(r.log_silent_s))}`
+          }</span>`
+        : r.state === "running"
+          ? `<span class="tag on">RUNNING${r.elapsed_s !== null && r.elapsed_s !== undefined ? ` ${esc(dur(r.elapsed_s))}` : ""}</span>`
+          : `<span class="chip dimchip">${nul("no run observed")}</span>`;
 
   const stackId = s.id ? String(s.id).split("|")[0] : null;
 

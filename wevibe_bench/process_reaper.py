@@ -40,6 +40,44 @@ _LOG = logging.getLogger("wevibe_bench.process_reaper")
 # of the current process are touched — never unrelated host processes.
 _RUN_BINARIES = frozenset({"node", "opencode", "playwright", "report.mjs"})
 
+
+def _is_run_binary(comm: str) -> bool:
+    """Does this ``comm`` name one of the run's worker binaries?
+
+    MATCHED ON THE BASENAME, AND ON THE WHOLE STRING. ``ps -o comm=`` is not
+    portable in the one way that matters here: some platforms print a bare
+    command name and others print the absolute path of the executable. Measured
+    on this host (darwin 25.2.0, 2026-08-13)::
+
+        $ ps -o pid=,ppid=,comm= | head -3
+         1660  1649 -zsh
+         2242  1660 /bin/bash
+         2247  2242 /opt/homebrew/opt/node@22/bin/node
+
+    So ``comm in _RUN_BINARIES`` was False for every real worker, and the ORPHAN
+    branch of ``_default_process_provider`` — the only branch that can reap a
+    process whose parent is already gone — never fired at all. Direct children
+    were still reaped, but an orphan is by definition not a direct child, which
+    is the entire case that branch exists to handle.
+
+    THAT IS THE 341-CPU-MINUTE CLASS. The gate spawns ``npm -> vitest ->
+    workers`` and Playwright spawns browsers; when the parent dies they reparent
+    to PID 1 and this walked straight past them. ``runs/`` still carries
+    ``cumulative.void-truncation-orphan-contention-20260812T0253``, a run voided
+    over exactly this.
+
+    NOT WIDENED BEYOND THE BASENAME. The caller still requires ``ppid == 1``, so
+    this only ever admits an orphan whose binary the run owns. The scoping
+    discipline in ``_remove_cell_containers`` (an unscoped prefix sweep once
+    killed a parallel run's live cell) is deliberate and unchanged.
+    """
+    if comm in _RUN_BINARIES:
+        return True
+    # `os.path.basename` and not a split on "/" — it is the same thing here and
+    # says what it means. A login shell prints as "-zsh", which has no separator
+    # and simply fails to match, as it should.
+    return os.path.basename(comm) in _RUN_BINARIES
+
 # Bounded retries for a port probe before a persistent non-refusal OSError is
 # treated as a probe ERROR (never a false "clear"). Mirrored in the reaper's
 # "after %d attempts" error log so the number reported matches the retries run.
@@ -109,7 +147,7 @@ def _default_process_provider() -> Sequence[int]:
         # comm matches a known run binary. Only match when it could plausibly
         # belong to this run (its PPID chain is not resolvable here); this is
         # conservative and only runs on the exit path.
-        if comm in _RUN_BINARIES and ppid == 1:
+        if _is_run_binary(comm) and ppid == 1:
             candidates.append(pid)
     return candidates
 

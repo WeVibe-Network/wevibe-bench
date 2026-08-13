@@ -26,7 +26,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const id = "control-plane";
-export const fields = ["control", "events", "extraction", "hold", "tui", "profile", "profiles", "suite", "live", "models_ledger"];
+export const fields = ["control", "events", "extraction", "hold", "tui", "profile", "profiles", "suite", "models_ledger"];
 export function describe() {
   return "host-side control plane — roster, run control, event feed, extraction (opt-in)";
 }
@@ -135,7 +135,7 @@ export async function read(ctx) {
 
   // The remaining calls are independent: any one may be unwired without
   // invalidating the others, so each failure is recorded rather than aborting.
-  const [roster, run, events, extraction, hold, tui, profiles, wall, live, mledger] = await Promise.all([
+  const [roster, run, events, extraction, hold, tui, profiles, wall, mledger] = await Promise.all([
     get(`${base}/api/roster`, 2500),
     get(`${base}/api/run`),
     // DELTA, not a full refetch. See the eventCursor note above.
@@ -150,13 +150,6 @@ export async function read(ctx) {
     // decides colour. Re-deriving state here would let two surfaces disagree
     // about whether a gate was abandoned or merely untested.
     get(`${base}/api/wall`, 2500),
-    // THE LIVE LANE. Provisional per-gate outcomes + the build-population axis,
-    // both measured off one worktree snapshot while the agent is still working.
-    // Passed through UNTOUCHED and kept in its OWN group: it is explicitly NOT
-    // the scored source of truth (RC-5), and merging it into `suite` here is
-    // what would break that. A short timeout — this surface is optional and must
-    // never delay the rest of the board.
-    get(`${base}/api/live`, 1500),
     // THE MODEL LEDGER. One row per bench-eligible model with every launch gate
     // already resolved server-side. Passed through untouched: the board must
     // never re-derive a gate, or a button's enabled state could disagree with
@@ -173,10 +166,6 @@ export async function read(ctx) {
   if (!tui.ok) notes.push(`tui unwired — ${tui.reason}`);
   if (!profiles.ok) notes.push(`profiles unwired — ${profiles.reason}`);
   if (!wall.ok) notes.push(`gate suite unwired — ${wall.reason}`);
-  // NOT a note when the lane is simply not running: /api/live answers ok:true
-  // with its own stated reason in that case. A note here would report the
-  // normal, expected absence of an optional instrument as a board fault.
-  if (!live.ok) notes.push(`live lane unwired — ${live.reason}`);
   if (!mledger.ok) notes.push(`model ledger unwired — ${mledger.reason}`);
 
   // ── MERGE THE DELTA INTO THE BOUNDED WINDOW ────────────────────────────
@@ -294,12 +283,6 @@ export async function read(ctx) {
       // surface is unavailable rather than drawing an empty grid, because
       // "no roster" and "a suite of zero gates" are different facts.
       suite: wall.ok && wall.data?.ok === true ? wall.data : null,
-      // PASSED THROUGH VERBATIM, and deliberately NOT folded into `suite`.
-      // Null when the control plane predates /api/live (404) or the call failed.
-      // When the lane is merely not running the endpoint still answers ok:true
-      // with `running:false` and a reason — an absent instrument that says so is
-      // a different fact from a surface that could not be reached.
-      live: live.ok && live.data?.ok === true ? live.data : null,
       // Null when the endpoint is absent or failed. The panel then states that
       // the gates cannot be evaluated rather than drawing ungated buttons —
       // an unverifiable gate must fail closed, not open.

@@ -51,7 +51,6 @@ function healthyBoard(over = {}) {
     events: { connected: true, total: 5 },
     tui: { running: false, status: null, frame: null },
     hold: null,
-    live: { ok: true, running: false, unwired: ["live-lane"], unwired_reasons: { "live-lane": "no live-gates.json" } },
     extraction: { state: "idle" },
     profile: { exists: false },
     ...over,
@@ -67,7 +66,7 @@ test("every process reports a state, and nothing is silently omitted", () => {
   // invisible in exactly the way this surface exists to prevent.
   for (const id of [
     "control-plane", "run-lifecycle", "runner", "model-proxy", "event-feed",
-    "tui-mirror", "hold-gate", "extraction", "live-lane", "profile-gate",
+    "tui-mirror", "hold-gate", "extraction", "profile-gate",
   ]) {
     assert.ok(ids.includes(id), `${id} is missing from the startup feed`);
   }
@@ -128,11 +127,14 @@ test("a lifecycle the panel did not report reads unknown, never ok", () => {
 
 // ── NEVER CRY WOLF, NEVER GREEN-LIGHT BY OMISSION ───────────────────────────
 
-test("an absent live lane is off, not bad — its absence is the normal state", () => {
+test("the deleted live lane no longer occupies a row", () => {
+  // The live-lane / choreography surface was torn out (control/live-lane.mjs,
+  // live-surface.mjs, choreography.mjs, build-scan.mjs). Its startup row stayed
+  // behind and reported "off · not running" forever — a permanent status line
+  // for a subsystem that cannot exist. A row that can only ever say one thing
+  // teaches the operator to stop reading the feed.
   const feed = startupFeed(healthyBoard(), null);
-  const lane = byId(feed, "live-lane");
-  assert.equal(lane.state, "off");
-  assert.ok(!feed.blocking.includes(lane));
+  assert.equal(byId(feed, "live-lane"), undefined);
 });
 
 test("a disconnected event feed is off while idle but bad while a cell runs", () => {
@@ -229,7 +231,7 @@ test("worst-first: a blocking row is rendered before a healthy one", () => {
     healthyBoard({ hold: { reason: "held for review" } }),
     { armed: false, pending: false, starting: false, startedAt: null, refusal: null },
   );
-  assert.ok(html.indexOf("hold gate") < html.indexOf("live lane (optional)"));
+  assert.ok(html.indexOf("hold gate") < html.indexOf("extraction pipeline"));
 });
 
 // ── THE YIELD RULE ──────────────────────────────────────────────────────────

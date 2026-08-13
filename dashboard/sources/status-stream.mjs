@@ -19,19 +19,22 @@
 // ATTEMPT END — roughly every 30 minutes. This module is the source of truth,
 // but it is NOT the live pulse. run-log and opencode-serve carry that.
 //
-// THE WALL: gate identity comes from `failed_gates`. A gate is:
-//   red        — present in this attempt's failed_gates
-//   green      — seen red in an EARLIER attempt of this cell, absent now
-//   unobserved — never seen in this arm at all
-// A gate absent from attempt 1 was never failing, so it is not evidence of a
-// resolution and must not be counted as green.
+// THIS MODULE DOES NOT BUILD THE GATE WALL. It used to, from `failed_gates`,
+// which could only ever describe gates OBSERVED FAILING — no suite total, so a
+// gate that passed was never drawn at all. That derivation was a second,
+// weaker implementation of a fold the control plane already does properly from
+// the write-once roster plus per-gate `gate_results` (GET /api/wall), and it
+// rendered nowhere for months while still costing a walk of every cell on every
+// board tick. The wall has ONE source; this is not it.
+//
+// `failed_gates` is still read here, for `resolved_gates` and the arm delta.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { parseGate, int, str, median, finalizeDelta, cellValidity } from "../contract.mjs";
 import { readTail, parseJsonl, activeRun } from "./_runtime.mjs";
 
 export const id = "status-stream";
-export const fields = ["wall", "arm_delta", "run.arm", "history", "honesty.transport"];
+export const fields = ["arm_delta", "run.arm", "history", "honesty.transport"];
 export function describe() {
   return "append-only per-attempt status stream (RC-5) — authoritative for gates, arm, verdict";
 }
@@ -57,7 +60,6 @@ export async function read(ctx) {
 
   cells.sort((a, b) => (b.last_seen ?? 0) - (a.last_seen ?? 0));
 
-  const wall = buildWall(cells);
   const arm_delta = buildDelta(cells);
   const history = cells
     .filter((c) => c.complete)
@@ -95,7 +97,6 @@ export async function read(ctx) {
           injected_block: newest.injected_block_est_tokens,
         },
       },
-      wall,
       arm_delta,
       history,
       honesty: {
@@ -258,70 +259,6 @@ function resolvedGates(cell) {
   const first = cell.attempts.get(attempts[0]);
   const last = cell.attempts.get(attempts[attempts.length - 1]);
   return [...first].filter((g) => !last.has(g));
-}
-
-/** Every gate id ever observed, in first-seen order, so grid slots never move. */
-function buildWall(cells) {
-  const meta = new Map();
-  const order = [];
-  for (const c of [...cells].reverse()) {
-    for (const [gid, g] of c.gateMeta) {
-      if (!meta.has(gid)) {
-        meta.set(gid, g);
-        order.push(gid);
-      }
-    }
-  }
-
-  const arms = { on: pickCell(cells, "on"), off: pickCell(cells, "off") };
-  const gates = order.map((gid) => {
-    const g = meta.get(gid);
-    return {
-      id: g.id,
-      req: g.req,
-      title: g.title,
-      a: gateState(arms.on, gid),
-      b: gateState(arms.off, gid),
-      a_flipped_at_attempt: flipAttempt(arms.on, gid),
-      b_flipped_at_attempt: flipAttempt(arms.off, gid),
-    };
-  });
-
-  return {
-    gates,
-    totals: { a: tally(gates, "a"), b: tally(gates, "b") },
-  };
-}
-
-function pickCell(cells, arm) {
-  return cells.find((c) => c.arm === arm) ?? null;
-}
-
-function gateState(cell, gid) {
-  if (!cell || !cell.attempts.size) return "unobserved";
-  const attempts = [...cell.attempts.keys()].sort((a, b) => a - b);
-  const last = cell.attempts.get(attempts[attempts.length - 1]);
-  if (last.has(gid)) return "red";
-  const everRed = attempts.some((a) => cell.attempts.get(a).has(gid));
-  return everRed ? "green" : "unobserved";
-}
-
-function flipAttempt(cell, gid) {
-  if (!cell) return null;
-  const attempts = [...cell.attempts.keys()].sort((a, b) => a - b);
-  let wasRed = false;
-  for (const a of attempts) {
-    const red = cell.attempts.get(a).has(gid);
-    if (wasRed && !red) return a;
-    wasRed = wasRed || red;
-  }
-  return null;
-}
-
-function tally(gates, side) {
-  const t = { red: 0, green: 0, unobserved: 0 };
-  for (const g of gates) t[g[side]] += 1;
-  return t;
 }
 
 /**

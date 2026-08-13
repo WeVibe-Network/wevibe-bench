@@ -37,7 +37,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { join } from "node:path";
-import { int, str } from "../contract.mjs";
+import { int, str, STALL_THRESHOLD_S } from "../contract.mjs";
 import { readTail, listDir, statOrNull } from "./_runtime.mjs";
 
 export const id = "run-log";
@@ -224,6 +224,30 @@ export async function read(ctx) {
   // exactly the thing the panel claims: how long since the runner last wrote.
   const silentFor = Math.max(0, Math.round((Date.now() - log.mtime) / 1000));
 
+  // ── THE WEDGE, NAMED ────────────────────────────────────────────────────
+  //
+  // WO-NUDGE-INF-1 deliberately removed the self-termination that used to end a
+  // wedged run: "a permanently wedged relay is no longer self-terminating, so
+  // hang detection is the operator's / poller's job on the status stream, never
+  // a nudge cap" (RUNBOOK.md:329). THIS IS THE POLLER. The compensating control
+  // that rule assumes was never actually implemented anywhere, so a wedge was
+  // invisible on every surface.
+  //
+  // MEASURED, 2026-08-13. A cell logged
+  // `step=transport-recovery phase=feedback-1 terminal=transport_error
+  // action=nudge nudge=1 budget=unbounded` at 11:39:52 and then wrote nothing
+  // for 41 minutes until the host went down. For that entire window this module
+  // reported `state:"running"` — it computed `log_silent_s` on the very next
+  // line and never let it reach the state. The board's topbar has no branch for
+  // a stalled run, so a wedged cell rendered as "no run observed": not merely
+  // unreported, but reported as nothing-happening.
+  //
+  // A STALL IS NOT A VERDICT and this does not make it one. `complete` still
+  // wins outright — a terminal record is a real ending and silence after it is
+  // expected. This only names the state where the runner has neither ended nor
+  // written anything for longer than the harness's own threshold.
+  const stalled = !terminal && silentFor >= STALL_THRESHOLD_S;
+
   return {
     ok: true,
     provenance: { path: log.path, mtime: log.mtime, bytes: log.size },
@@ -234,7 +258,7 @@ export async function read(ctx) {
         turns: scoringTurns, // SCORING turns. never session_turns.
         session_turns: sessionTurns, // raw, carried for the anomaly rail only
         arm: mode,
-        state: terminal ? "complete" : "running",
+        state: terminal ? "complete" : stalled ? "stalled" : "running",
         terminal_status: terminal,
         log_silent_s: silentFor,
       },

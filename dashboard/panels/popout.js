@@ -64,8 +64,6 @@ import { esc } from "../board.js";
  * board re-renders every 2s and this must survive that untouched.
  */
 const open = new Map();
-/** Which popout is asking for confirmation, and for what action. */
-let confirming = null;
 
 export function isPopoutOpen(id) {
   return open.get(id) === true;
@@ -73,32 +71,6 @@ export function isPopoutOpen(id) {
 
 export function togglePopout(id) {
   open.set(id, !isPopoutOpen(id));
-  confirming = null;
-}
-
-export function openPopout(id) {
-  open.set(id, true);
-}
-
-export function closePopout(id) {
-  open.set(id, false);
-  confirming = null;
-}
-
-export function askConfirm(id, action) {
-  confirming = { id, action };
-}
-
-export function cancelConfirm() {
-  confirming = null;
-}
-
-export function confirmState() {
-  return confirming;
-}
-
-export function isConfirming() {
-  return confirming !== null;
 }
 
 /**
@@ -179,26 +151,5 @@ function tabs(cfg) {
             }</button>`,
         )
         .join("")}
-    </div>`;
-}
-
-/**
- * A confirmation scrim for a destructive action.
- *
- * Carried here so every popout confirms the same way and says what is LOST —
- * "are you sure?" with no statement of consequence is not informed consent.
- */
-export function renderPopConfirm({ title, body, yes, no }) {
-  return `
-    <div class="modal-scrim" data-pop-cancel="1">
-      <div class="modal pop-confirm" role="dialog" aria-modal="true">
-        <span class="ttl danger">ARE YOU SURE? (Y/N)</span>
-        <span class="modal-title">${esc(title)}</span>
-        <span class="note body">${esc(body)}</span>
-        <div class="confirm-actions">
-          <button class="btn destroy solid" data-pop-confirm-yes="1">${esc(yes)}</button>
-          <button class="btn" data-pop-cancel="1">${esc(no)}</button>
-        </div>
-      </div>
     </div>`;
 }

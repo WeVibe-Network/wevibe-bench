@@ -41,8 +41,6 @@ import { readModelsLedger } from "./models-ledger.mjs";
 import {
   attemptRecords,
   foldGateStates,
-  inFlightAtStop,
-  maxAttemptsFrom,
   readStatusRecords,
   readWall,
   resolveRunDir,
@@ -332,6 +330,78 @@ test("an unmapped event is counted, never silently dropped", () => {
   assert.equal(snap.capped, false, "unmapped frames are not lost renderable events");
 });
 
+// ── ADMIT: the out-of-ring rows, and the re-append defect ───────────────────
+//
+// Harness grading rows and the verbatim messages the model was sent are
+// rebuilt FROM FILES on every poll. They are already in BoardEvent shape, so
+// they cannot go through `push()`, and giving them a seq at request time from
+// the ring's moving cursor made the same row arrive with a NEW seq every poll.
+// The renderer appends anything with `seq > renderedSeq`, so it appended the
+// same row again and again. Measured on a live run: one `task chunk
+// (attempt 1)` came back as seq 706, then 713, then higher.
+
+test("ADMIT: the same row keeps its seq no matter how far the ring advances", () => {
+  const ring = new EventRing(50);
+  const row = { id: "user-event:1", kind: "user", type: "user:chunk", name: "task chunk (attempt 1)" };
+
+  const first = ring.admit(row);
+  assert.ok(first, "the first admission returns the row");
+  const assigned = first.seq;
+
+  // The ring moves on, exactly as it does during a live run.
+  for (let i = 0; i < 12; i += 1) {
+    ring.push({ id: `e${i}`, type: "file.edited", properties: { file: `/f${i}` } });
+  }
+
+  // Every later poll re-offers the SAME row, rebuilt from the same file.
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(ring.admit(row), null, "a row already admitted is refused");
+  }
+
+  const rows = ring.snapshot({ limit: 100 }).events.filter((e) => e.id === "user-event:1");
+  assert.equal(rows.length, 1, "it must appear EXACTLY once, however many polls occurred");
+  assert.equal(rows[0].seq, assigned, "and its seq must never be recomputed");
+});
+
+test("ADMIT: an admitted seq can never collide with a pushed one", () => {
+  // The reason admission goes through the ring's own counter rather than being
+  // numbered from `cursor` at request time: a shared counter makes a collision
+  // structurally impossible. A collision would make the renderer drop one of
+  // the two rows, since it only ever appends strictly-increasing seqs.
+  const ring = new EventRing(50);
+  ring.push({ id: "a", type: "file.edited", properties: { file: "/a" } });
+  ring.admit({ id: "harness:x", kind: "harness", type: "harness:gate-start" });
+  ring.push({ id: "b", type: "file.edited", properties: { file: "/b" } });
+  ring.admit({ id: "harness:y", kind: "harness", type: "harness:gate-end" });
+
+  const seqs = ring.snapshot({ limit: 100 }).events.map((e) => e.seq);
+  assert.deepEqual(seqs, [...new Set(seqs)], "no two rows share a seq");
+  assert.deepEqual(seqs, [...seqs].sort((x, y) => x - y), "and the line stays monotonic");
+});
+
+test("ADMIT: a row with no identity is REFUSED, never admitted repeatedly", () => {
+  // Without an id the row cannot be recognised next poll, so admitting it would
+  // reproduce the exact re-append defect. Refusing is the honest failure: the
+  // row is absent and traceable, rather than present five hundred times.
+  const ring = new EventRing(10);
+  assert.equal(ring.admit({ kind: "harness", type: "harness:gate-start" }), null);
+  assert.equal(ring.admit({ id: "", kind: "harness" }), null);
+  assert.equal(ring.snapshot().events.length, 0);
+});
+
+test("ADMIT: `since` excludes an already-rendered row, so it is sent once", () => {
+  // The client's incremental contract. Once it has rendered up to `cursor`, the
+  // admitted row must not come back on the next request.
+  const ring = new EventRing(50);
+  ring.admit({ id: "user-event:1", kind: "user", type: "user:chunk" });
+  const first = ring.snapshot({ limit: 100 });
+  assert.equal(first.events.length, 1);
+
+  ring.admit({ id: "user-event:1", kind: "user", type: "user:chunk" });
+  const next = ring.snapshot({ limit: 100, since: first.cursor });
+  assert.equal(next.events.length, 0, "nothing new — the row is already on screen");
+});
+
 test("the ring is bounded and reports that it capped", () => {
   const ring = new EventRing(5);
   for (let i = 0; i < 20; i += 1) {
@@ -606,6 +676,52 @@ test("gate events are parsed from the harness's own PROGRESS lines", () => {
   assert.equal(rows[0].kind, "harness");
   assert.equal(rows[1].phase, "conformance");
   assert.match(rows[2].detail, /conformance fail · 2 problems/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT SEQ CONTRACT — the defect that made the harness feed invisible.
+//
+// Gate rows and feedback rows are built OUTSIDE EventRing, so they never pass
+// through push() — the only place `seq` is assigned. They reached the client
+// with `seq: undefined`, and the renderer appends incrementally with
+//   rows.filter((e) => (e.seq ?? -1) > renderedSeq)          [panels/live.js]
+// so every one scored -1 and NOTHING was ever appended. Observed live: a
+// harness filter chip counting 282 events beside a completely empty feed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("EVENTS: appended gate/feedback rows carry a seq that CONTINUES the ring", () => {
+  // The exact merge the endpoint performs. Restarting the numbering at 0 would
+  // place these rows at or below the client's cursor and reproduce the silence,
+  // so the assertion is specifically that they continue PAST the ring cursor.
+  const ringCursor = 40;
+  const appended = [
+    { kind: "harness", type: "harness:gate-phase-start" },
+    { kind: "harness", type: "harness:gate-phase-end" },
+    { kind: "user", type: "user:chunk" },
+  ];
+
+  let tailSeq = ringCursor;
+  const sequenced = appended.map((r) => ({ ...r, seq: (tailSeq += 1) }));
+
+  assert.deepEqual(sequenced.map((r) => r.seq), [41, 42, 43]);
+  assert.ok(
+    sequenced.every((r) => Number.isInteger(r.seq)),
+    "a row without an integer seq can never pass the renderer's append filter",
+  );
+  assert.ok(
+    sequenced.every((r) => (r.seq ?? -1) > ringCursor),
+    "appended rows must sort AFTER the ring's own rows, never at 0",
+  );
+  assert.equal(tailSeq, 43, "the reported cursor must cover the appended rows");
+});
+
+test("EVENTS: a row with no seq is invisible to the renderer's append filter", () => {
+  // Encodes WHY the bug was silent, so a future change that drops seq fails
+  // here with the reason rather than shipping an empty feed again.
+  const renderedSeq = 0; // the state after any first paint
+  const unsequenced = [{ kind: "harness" }, { kind: "harness" }];
+  const fresh = unsequenced.filter((e) => (e.seq ?? -1) > renderedSeq);
+  assert.equal(fresh.length, 0, "this is the defect: real rows, none renderable");
 });
 
 test("the doubled PROGRESS emission yields ONE row, not two", () => {
@@ -928,152 +1044,91 @@ test("WALL: a gate that never ran is never reported as passed", () => {
       ],
     },
   ];
-  const { gates } = foldGateStates({
-    roster,
-    attempts,
-    grading: null,
-    stopped: { stopped: false, phase: null },
-  });
+  const { gates } = foldGateStates({ roster, attempts });
   const byId = Object.fromEntries(gates.map((g) => [g.id, g]));
-  assert.equal(byId.G01.state, "resolved");
+  assert.equal(byId.G01.state, "passing");
   assert.equal(byId.G02.state, "failing");
   assert.equal(byId.G03.state, "untested", "a not_run gate must never be resolved");
-  assert.equal(byId.G03.last_status, "not_run");
   // A gate absent from the results array entirely is the same class of fact.
   assert.equal(byId.F01.state, "untested", "an unreported gate must never be resolved");
-  assert.equal(byId.F01.last_status, null);
+});
+
+test("WALL: not_run is untested, but error is a failure", () => {
+  // The two ways the three-way split goes wrong, pinned in one place.
+  // `not_run`  — the runner never reached it. No measurement exists.
+  // `error`    — it ran and could not complete. It has NOT been shown to work.
+  const roster = fakeRoster();
+  const attempts = [
+    {
+      attempt: 1,
+      gate_results: [
+        { id: "G01", status: "not_run" },
+        { id: "G02", status: "error" },
+      ],
+    },
+  ];
+  const byId = Object.fromEntries(
+    foldGateStates({ roster, attempts }).gates.map((g) => [g.id, g]),
+  );
+  assert.equal(byId.G01.state, "untested", "an unreached gate must not invent a red square");
+  assert.equal(byId.G02.state, "failing", "a broken gate must not hide in the not-yet bucket");
 });
 
 test("WALL: totals partition the suite exactly", () => {
-  // Every gate lands in exactly one state, so the four totals must sum to the
-  // suite size. If they ever do not, the board is rendering a suite that does
-  // not exist.
+  // Every gate lands in exactly one of THREE states, so the totals must sum to
+  // the suite size. If they ever do not, the board is rendering a suite that
+  // does not exist.
   const roster = fakeRoster();
   const attempts = [
     { attempt: 1, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "fail" }] },
   ];
-  const { gates, totals } = foldGateStates({
-    roster,
-    attempts,
-    grading: null,
-    stopped: { stopped: false, phase: null },
-  });
-  const sum = totals.resolved + totals.failing + totals.untested + totals.abandoned;
+  const { gates, totals } = foldGateStates({ roster, attempts });
+  const sum = totals.passing + totals.failing + totals.untested;
   assert.equal(sum, roster.total, "totals must sum to the suite total");
   assert.equal(sum, gates.length);
+  assert.equal(Object.keys(totals).length, 3, "three states, and no more");
 });
 
-test("WALL: blue vs green — resolved_at_attempt is the FIRST passing attempt", () => {
-  // The design distinguishes "solved on the first try" from "solved only after
-  // feedback". That distinction is the entire information content of the
-  // blue/green split, and it is lost if a later attempt overwrites the first.
+test("WALL: the LAST completed test run wins — a fixed gate turns green", () => {
+  // The wall reports the current state of the code, not the history of how it
+  // got there. Attempt 2 supersedes attempt 1 outright.
   const roster = fakeRoster();
   const attempts = [
-    { attempt: 1, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "fail" }] },
-    { attempt: 2, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "pass" }] },
+    { attempt: 1, gate_results: [{ id: "G01", status: "fail" }, { id: "G02", status: "fail" }] },
+    { attempt: 2, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "fail" }] },
   ];
   const byId = Object.fromEntries(
-    foldGateStates({ roster, attempts, grading: null, stopped: { stopped: false, phase: null } })
-      .gates.map((g) => [g.id, g]),
+    foldGateStates({ roster, attempts }).gates.map((g) => [g.id, g]),
   );
-  assert.equal(byId.G01.resolved_at_attempt, 1, "passed in attempt 1 → blue");
-  assert.equal(byId.G02.resolved_at_attempt, 2, "passed only in attempt 2 → green");
+  assert.equal(byId.G01.state, "passing", "fixed in attempt 2");
+  assert.equal(byId.G02.state, "failing", "still broken in attempt 2");
 });
 
-test("WALL: a gate that passed then regressed stays resolved at its first pass", () => {
-  // A later failure does not un-resolve the gate: the run DID demonstrate the
-  // capability once, and the attempt number records when.
+test("WALL: a gate that REGRESSED reads red, not green", () => {
+  // The mirror image, and the reason the fold takes the latest result rather
+  // than "passed at least once". A gate that passed attempt 1 and broke in
+  // attempt 2 is broken NOW, and a wall that showed it green would be reporting
+  // a pass that no longer holds.
   const roster = fakeRoster();
   const attempts = [
     { attempt: 1, gate_results: [{ id: "G01", status: "pass" }] },
     { attempt: 2, gate_results: [{ id: "G01", status: "fail" }] },
   ];
-  const g = foldGateStates({
-    roster, attempts, grading: null, stopped: { stopped: false, phase: null },
-  }).gates.find((x) => x.id === "G01");
-  assert.equal(g.state, "resolved");
-  assert.equal(g.resolved_at_attempt, 1);
-  assert.equal(g.last_status, "fail", "the regression must still be visible");
+  const byId = Object.fromEntries(
+    foldGateStates({ roster, attempts }).gates.map((g) => [g.id, g]),
+  );
+  assert.equal(byId.G01.state, "failing");
 });
 
-test("WALL: a stall is not a verdict — in-flight gates go slate, never red", () => {
-  // INVARIANT I-3. When the gate runner is killed mid-phase, the gates it was
-  // executing were never measured. Calling them failed would attribute a
-  // harness death to the model under test.
+test("WALL: a gate row carries NO phase and no live signal", () => {
+  // The wall is a dumb surface: the server hands it three states and the
+  // identity needed to check a square against the log. Anything else is a
+  // second axis the panel would have to decide about, which is exactly what
+  // this rebuild removed.
   const roster = fakeRoster();
-  const { gates, totals } = foldGateStates({
-    roster,
-    attempts: [],
-    grading: { grading: true, phase: "backend", timed_out: true, phases: [] },
-    stopped: { stopped: true, phase: "backend" },
-  });
-  const byId = Object.fromEntries(gates.map((g) => [g.id, g]));
-  assert.equal(byId.G01.state, "abandoned");
-  assert.equal(byId.G03.state, "abandoned");
-  assert.equal(byId.F01.state, "untested", "a phase never reached is untested, not abandoned");
-  assert.equal(totals.failing, 0, "an abandoned gate must never be counted as failing");
-});
-
-test("WALL: a cold log is not a stop — a silent live run keeps its gates untested", () => {
-  // MEASURED REGRESSION (2026-08-13). `readRunState` reports "failed" for any
-  // run it did not launch once the log goes cold — which is what a live,
-  // CLI-launched campaign looks like mid-grade. Treating that as a stop marked
-  // all 14 frontend gates abandoned while they were still executing.
-  //
-  // Abandonment is a verdict; only the run's OWN terminal record may declare it.
-  const grading = { grading: true, phase: "frontend", timed_out: false, phases: [] };
-  const coldButAlive = { state: "failed", terminal_status: null, log_silent_s: 976 };
-  assert.deepEqual(inFlightAtStop(grading, coldButAlive), { stopped: false, phase: null });
-
-  const declaredOver = { state: "failed", terminal_status: "harness_error" };
-  assert.deepEqual(inFlightAtStop(grading, declaredOver), { stopped: true, phase: "frontend" });
-});
-
-test("WALL: an abandoned gate is never also shown as under test", () => {
-  // Amber says "being measured right now". An abandoned gate never will be.
-  const roster = fakeRoster();
-  const { gates } = foldGateStates({
-    roster,
-    attempts: [],
-    grading: { grading: true, phase: "backend", timed_out: true, phases: [] },
-    stopped: { stopped: true, phase: "backend" },
-  });
-  const abandoned = gates.filter((g) => g.state === "abandoned");
-  assert.ok(abandoned.length > 0);
-  assert.ok(abandoned.every((g) => g.under_test === false));
-});
-
-test("WALL: a live grading run does NOT abandon its own in-flight gates", () => {
-  // The mirror-image error: marking gates abandoned while the phase is still
-  // running would show slate squares for work in progress.
-  const roster = fakeRoster();
-  const { totals } = foldGateStates({
-    roster,
-    attempts: [],
-    grading: { grading: true, phase: "backend", timed_out: false, phases: [] },
-    stopped: inFlightAtStop(
-      { grading: true, phase: "backend", timed_out: false, phases: [] },
-      { state: "running" },
-    ),
-  });
-  assert.equal(totals.abandoned, 0);
-  assert.equal(totals.untested, 4);
-});
-
-test("WALL: under_test marks the open phase's gates as a set", () => {
-  // PER-PHASE-SET is what the harness can actually publish live; the response
-  // says so in `live_signal` so the board never implies per-test precision it
-  // was not given.
-  const roster = fakeRoster();
-  const { gates } = foldGateStates({
-    roster,
-    attempts: [],
-    grading: { grading: true, phase: "backend", timed_out: false, phases: [] },
-    stopped: { stopped: false, phase: null },
-  });
-  const byId = Object.fromEntries(gates.map((g) => [g.id, g]));
-  assert.equal(byId.G01.under_test, true);
-  assert.equal(byId.F01.under_test, false, "a phase that is not running is not under test");
+  const attempts = [{ attempt: 1, gate_results: [{ id: "G01", status: "pass" }] }];
+  const [row] = foldGateStates({ roster, attempts }).gates;
+  assert.deepEqual(Object.keys(row).sort(), ["id", "req", "state", "title"]);
 });
 
 test("WALL: run_dir is confined to a child of the runs root", () => {
@@ -1085,13 +1140,6 @@ test("WALL: run_dir is confined to a child of the runs root", () => {
   assert.equal(resolveRunDir("/runs", ".."), null);
   assert.equal(resolveRunDir("/runs", "cumulative")?.name, "cumulative");
   assert.equal(resolveRunDir("/runs", "")?.name, "cumulative", "empty falls back to the default run dir");
-});
-
-test("WALL: the attempt ceiling is read from the harness, never assumed", () => {
-  assert.equal(maxAttemptsFrom("run_cumulative.pacing max_attempts=3 max_steps=40"), 3);
-  // Unobservable is null, not a plausible-looking default.
-  assert.equal(maxAttemptsFrom("nothing here"), null);
-  assert.equal(maxAttemptsFrom(""), null);
 });
 
 // ── THE WIPE BOUNDARY ───────────────────────────────────────────────────────
@@ -1194,8 +1242,8 @@ test("WIPE: an orphan is skipped in favour of an older log that is still live", 
   }
 });
 
-test("WALL: a wiped bench is ARMED — suite known, nothing evaluated, no phantom grading", async () => {
-  const root = mkdtempSync(join(tmpdir(), "armed-"));
+test("WALL: a wiped bench shows the suite defined and every gate untested", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wiped-"));
   try {
     const runs = join(root, "runs");
     mkdirSync(runs, { recursive: true });
@@ -1203,7 +1251,6 @@ test("WALL: a wiped bench is ARMED — suite known, nothing evaluated, no phanto
     const wall = await readWall({ runsRoot: runs, runDir: null, benchRoot: BENCH });
 
     assert.equal(wall.ok, true);
-    assert.equal(wall.armed, true, "roster present + zero outcomes + no grading = ARMED");
     assert.equal(wall.suite_source, "enumerated", "the suite came from the harness, not a run");
     // The count is whatever the harness enumerates — asserted as a real number
     // rather than a literal, so adding a gate does not fail this test.
@@ -1213,9 +1260,12 @@ test("WALL: a wiped bench is ARMED — suite known, nothing evaluated, no phanto
       wall.suite.total,
       "every gate is untested: defined, not yet evaluated",
     );
-    assert.equal(wall.totals.resolved, 0);
-    assert.equal(wall.totals.failing, 0, "ARMED must never read as everything-failed");
-    assert.equal(wall.grading, null, "a wiped bench reports no grading in flight");
+    assert.equal(wall.totals.passing, 0);
+    assert.equal(
+      wall.totals.failing,
+      0,
+      "a bench that has not run must never read as everything-failed",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1230,7 +1280,6 @@ test("WALL: the suite denominator is never fabricated when the harness cannot be
     const wall = await readWall({ runsRoot: runs, runDir: null, benchRoot: root });
 
     assert.equal(wall.ok, true, "a missing enumerator is a state, not a 500");
-    assert.equal(wall.armed, false, "armed requires a KNOWN suite");
     assert.equal(wall.suite.total, null, "unknowable stays null, never 0 (invariant I-2)");
     assert.ok(wall.unwired.includes("gate-roster"));
   } finally {

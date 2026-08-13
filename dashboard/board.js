@@ -404,7 +404,7 @@ function bindInteraction() {
 }
 
 function onClick(e) {
-  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-model-expand],[data-run-baseline],[data-baseline-continue],[data-baseline-back],[data-run-dismiss],[data-run-scrim],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
+  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-scrim],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-model-expand],[data-run-baseline],[data-baseline-continue],[data-baseline-back],[data-run-dismiss],[data-run-scrim],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
   if (!t) return;
 
   if (t.dataset.metric) { setCurveMetric(t.dataset.metric); render(); return; }
@@ -420,7 +420,15 @@ function onClick(e) {
   if (t.hasAttribute("data-tui-cancel")) { cancelDetach(); render(); return; }
   if (t.hasAttribute("data-hold-release")) { void releaseHold(); return; }
   if (t.hasAttribute("data-profile-open")) { openProfileModal(); render(); return; }
-  if (t.hasAttribute("data-profile-cancel")) { closeProfileModal(); render(); return; }
+  // The scrim closes the modal, but ONLY when the scrim ITSELF was clicked — a
+  // click that lands inside the dialog also bubbles through it. The two sibling
+  // modals (run, inspector) already close this way; this one silently did not,
+  // so an identical-looking scrim behaved differently depending on which modal
+  // was open.
+  if (
+    t.hasAttribute("data-profile-cancel")
+    || (t.hasAttribute("data-profile-scrim") && e.target === t)
+  ) { closeProfileModal(); render(); return; }
   if (t.hasAttribute("data-profile-ack")) { toggleAck(); render(); return; }
   // Subject is checked BEFORE model: a row in the subject picker carries only
   // `data-subject`, but keeping the order explicit stops a future row that

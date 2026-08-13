@@ -61,7 +61,15 @@ export function parseGateEvents(text) {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    rows.push(rowFor(step, kv));
+    // THE DEDUPE KEY IS ALSO THE ROW'S IDENTITY, and it is now carried.
+    //
+    // These rows are rebuilt from the log on EVERY poll, so the consumer needs
+    // a way to tell "the same harness event, seen again" from "a new one".
+    // Without it the feed cannot admit them once — see the EventRing.admit()
+    // contract and the re-append defect it closes.
+    const row = rowFor(step, kv);
+    if (row) row.id = `harness:${key}`;
+    rows.push(row);
   }
   return rows.filter(Boolean);
 }

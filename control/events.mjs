@@ -289,6 +289,51 @@ export class EventRing {
   }
 
   /**
+   * Admit an ALREADY-MAPPED row into the ring, exactly once.
+   *
+   * ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+   *
+   * `push()` is for RAW upstream events and runs them through `mapEvent()`.
+   * Two row families never come from upstream — the harness's grading rows
+   * (`control/gate-events.mjs`) and the verbatim messages the model was sent
+   * (`control/feedback.mjs`). Both are rebuilt FROM FILES on every poll, and
+   * both are already in BoardEvent shape, so they cannot go through `push()`.
+   *
+   * They were therefore given a `seq` at request time, computed from the ring's
+   * CURRENT cursor. That cursor moves. So the same row was re-sequenced on every
+   * poll, and the renderer — which appends anything with
+   *   rows.filter((e) => (e.seq ?? -1) > renderedSeq)      [live.js]
+   * — cleared that gate again each time and appended a fresh copy. Measured on a
+   * live run: one `task chunk (attempt 1)` row came back as seq 706, then 713,
+   * then higher, and the operator saw it repeated down the whole feed.
+   *
+   * ADMITTING ONCE FIXES IT AT THE SOURCE. The row enters the ring like any
+   * other event, takes a seq from the SAME counter (so a collision with a real
+   * upstream seq is structurally impossible, not merely unlikely), and every
+   * downstream mechanism — `since`, `cursor`, `capped` — works with no special
+   * case. The caller keeps no seq bookkeeping of its own.
+   *
+   * IDENTITY IS REQUIRED. A row with no `id` cannot be recognised on the next
+   * poll, so it is REFUSED rather than admitted repeatedly — silently letting it
+   * in is precisely the defect above.
+   *
+   * Returns the admitted event, or null if it was a duplicate or had no id.
+   */
+  admit(ev) {
+    if (!ev || typeof ev.id !== "string" || ev.id.length === 0) return null;
+    if (this.admitted === undefined) this.admitted = new Set();
+    if (this.admitted.has(ev.id)) return null;
+    this.admitted.add(ev.id);
+
+    this.seq += 1;
+    const row = { ...ev, seq: this.seq };
+    this.last_event_at = Date.now();
+    this.items.push(row);
+    if (this.items.length > this.max) this.items.splice(0, this.items.length - this.max);
+    return row;
+  }
+
+  /**
    * A window of the ring, plus the honest counters.
    *
    * ORDER IS OLDEST-FIRST, and that is a design decision, not an accident.

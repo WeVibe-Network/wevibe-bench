@@ -43,7 +43,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -327,4 +327,41 @@ test("STATIC does not advertise panels that no longer exist", async () => {
     }
   }
   assert.deepEqual(dead, [], `STATIC lists files that do not exist: ${dead.join(", ")}`);
+});
+
+test("no panel is served, styled and tested but reachable from nothing", async () => {
+  // ── THE THIRD DIRECTION ────────────────────────────────────────────────
+  //
+  // The two tests above check served-but-missing and imported-but-unserved.
+  // The third case — a file that EXISTS, is SERVED, and is imported by nothing
+  // — was not asserted, and it is the one that is invisible to every other
+  // check in the tree: the panel still parses, its tests still pass, its
+  // stylesheet rules are still there, and it never executes in a browser.
+  //
+  // index.html loads exactly ONE module (`<script type="module"
+  // src="./board.js">`). If a panel is not in board.js's transitive import
+  // graph it cannot run, however healthy it looks.
+  //
+  // TRANSITIVE, NOT DIRECT. `livePanels()` already walks the whole graph, and
+  // that distinction is load-bearing: an audit that checked only board.js's own
+  // import list concluded `panels/startup.js` was dead code and nearly deleted
+  // it. It is reached through `panels/tui.js`, which board.js imports. A
+  // one-level check answers a different question than the one being asked.
+  //
+  // Scope note: `style-coverage`'s own rule that "a file sitting in panels/ that
+  // nothing imports is NOT covered here" is about the STYLESHEET — dead files
+  // must not hold rules hostage. Reachability is a different question and this
+  // is where it is answered.
+  const live = new Set(await livePanels());
+  const orphans = [];
+  for (const f of await readdir(join(HERE, "panels"))) {
+    if (!f.endsWith(".js")) continue;
+    if (!live.has(`panels/${f}`)) orphans.push(`panels/${f}`);
+  }
+  assert.deepEqual(
+    orphans,
+    [],
+    "unreachable from board.js — built, served, and it can never render: "
+      + `${orphans.join(", ")}. Import it or delete it.`,
+  );
 });

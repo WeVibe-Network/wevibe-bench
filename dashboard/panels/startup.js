@@ -72,7 +72,6 @@ export function startupFeed(board, lifecycle = null) {
     tuiMirror(b),
     holdGate(b),
     extraction(b),
-    liveLane(b),
     profileGate(b),
   ];
 
@@ -329,23 +328,6 @@ function extraction(b) {
       x.reason ?? "extraction failed without a stated reason");
   }
   return proc("extraction", "extraction pipeline", "idle", x.state ?? "idle", null, why);
-}
-
-/**
- * THE LIVE LANE — optional and provisional BY DESIGN. Its absence is the normal
- * state and is never an alarm; the control plane says as much in its own words,
- * which are passed straight through.
- */
-function liveLane(b) {
-  const l = b.live ?? null;
-  const why = "an optional, provisional gate lane. Its numbers are never scored and its absence changes nothing.";
-  if (!l) return proc("live-lane", "live lane (optional)", "off", "not running", null, why);
-  if (l.running === false) {
-    const reason = l.unwired_reasons?.["live-lane"] ?? l.stale_reason ?? "the live lane is not running";
-    return proc("live-lane", "live lane (optional)", "off", "not running", null, why, reason);
-  }
-  if (l.stale) return proc("live-lane", "live lane (optional)", "idle", `stale · ${l.age_s ?? "?"}s`, null, why, l.stale_reason ?? null);
-  return proc("live-lane", "live lane (optional)", "ok", "publishing", null, why);
 }
 
 /**

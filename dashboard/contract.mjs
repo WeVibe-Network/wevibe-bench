@@ -60,6 +60,26 @@ export const PHASES_PER_CELL = 3;
 export const CHUNKS_IN_BUILD = 6;
 
 /**
+ * How long a live cell's log may go silent before the run reads as STALLED.
+ *
+ * WHY A THRESHOLD EXISTS AT ALL. WO-NUDGE-INF-1 made transport recovery
+ * unbounded on purpose — a wedged relay no longer self-terminates — and moved
+ * hang detection to "the operator's / poller's job on the status stream, never
+ * a nudge cap" (RUNBOOK.md:329). This board is that poller, and this is the
+ * number it polls against.
+ *
+ * DELIBERATELY THE SAME 900 THE CONTROL PLANE USES
+ * (control/contract.mjs STALL_THRESHOLD_S). The two tiers cannot import from
+ * each other, so the value is duplicated rather than shared; if it changes,
+ * both move together or the board and the control plane will disagree about
+ * whether the same run is wedged.
+ *
+ * MEASURED AGAINST MTIME, NEVER A PARSED TIMESTAMP — see run-log.mjs for the
+ * phantom-7.1h-silence defect that rule exists to prevent.
+ */
+export const STALL_THRESHOLD_S = 900;
+
+/**
  * The five states of the transfer curve. The curve renderer consumes this
  * decision; it does not re-derive it. See sources/stack-ledger.mjs.
  *
@@ -150,7 +170,7 @@ export function emptyBoard() {
       attempt: { current: null, max: null },
       turns: null,
       tokens: { input: null, output: null, injected_block: null },
-      state: null, // running | complete | aborted | null
+      state: null, // running | stalled | complete | aborted | null
       session_id: null,
       log_silent_s: null,
       terminal_status: null,
@@ -307,53 +327,27 @@ export function emptyBoard() {
       note: "gate-level results are clustered within cell — 68 gates from one cell are not 68 independent samples. no CI over gate counts.",
     },
 
-    wall: { gates: [], totals: { a: gateTotals(), b: gateTotals() } },
-
-    // ── THE GATE SUITE, AS THE HARNESS ITSELF PUBLISHES IT ────────────────────
+    // ── THE GATE SUITE — THE GATE WALL'S ONE AND ONLY SOURCE ─────────────────
     //
     // Served whole by the control plane's GET /api/wall (control/wall.mjs), which
-    // folds three artifacts the board must NOT stitch itself: the write-once
-    // gate-roster.json, the per-attempt gate_results, and the live phase signal.
+    // folds the two artifacts the board must NOT stitch itself: the write-once
+    // gate-roster.json and the per-attempt gate_results.
     //
-    // WHY THIS IS SEPARATE FROM `wall` ABOVE. `wall` is derived locally from the
-    // status stream and can only ever describe gates OBSERVED FAILING — the old
-    // harness published no suite total, so a gate that passed was never drawn at
-    // all. `suite` is the true enumerated universe, so it can finally answer
-    // "what has NOT been tested", which no amount of client-side derivation
-    // could produce from failure lists.
+    // THERE IS NO SECOND WALL. A local derivation from the status stream used to
+    // sit beside this one; it could only describe gates OBSERVED FAILING, so a
+    // gate that passed was never drawn at all, and it rendered nowhere. `suite`
+    // is the true enumerated universe, which is what lets the wall answer "what
+    // has NOT been tested" — a question no client-side fold over failure lists
+    // can answer.
+    //
+    // EVERY GATE HAS EXACTLY ONE OF THREE STATES: passing, failing, untested.
+    // No phase, no attempt axis, no live signal. The server assigns the state;
+    // the panel picks the colour.
     //
     // NULL IS A DESIGNED STATE. `total: null` means the suite size is UNKNOWABLE
     // (a run predating the roster artifact) and must never render as 0. The
     // reason lives in `unwired_reasons` and is meant to be shown, not swallowed.
     suite: null,
-
-    // ── THE LIVE LANE — PROVISIONAL, AND NEVER THE SCORE ──────────────────────
-    //
-    // Served whole by GET /api/live (control/live-surface.mjs). Two axes from
-    // one worktree snapshot, taken WHILE THE AGENT IS STILL WORKING:
-    //
-    //   `lane`   per-gate live pass/fail for the 55 gates the lane can measure
-    //   `build`  per-file population — how much of the scaffold's stub surface
-    //            has actually been replaced with code
-    //
-    // ── THIS IS NOT A SECOND SOURCE OF TRUTH, AND THE SHAPE ENFORCES IT ──────
-    //
-    // RC-5 names ONE scored source. That is `suite` above, folded from
-    // manifest.status.jsonl. The lane's numbers are measured off a SNAPSHOT,
-    // exclude 16 gates by construction, and may be taken mid-edit — so they live
-    // in their own group, carry `provisional: true` on every payload, and are
-    // NEVER merged into `suite.gates[].state`. A renderer that copies a live
-    // result into a suite square has broken the invariant, not fixed a gap.
-    //
-    // NULL IS THE NORMAL STATE. The lane is an optional instrument that the
-    // operator starts by hand; most runs will not have one. Null means "no live
-    // lane", which is not "everything failed" and not "nothing was tested" —
-    // the authoritative wall is completely unaffected by its absence.
-    //
-    // STALENESS IS PUBLISHED, NOT INFERRED. `running:false` + `age_s` say the
-    // lane stopped and this grid is a PAST measurement. The board must show that
-    // rather than presenting a frozen grid as live.
-    live: null,
 
     // ── THE MODEL LEDGER — one row per bench-eligible model ───────────────────
     //
@@ -441,10 +435,6 @@ function armSlot() {
 
 function excludedSlot() {
   return { total: 0, void_instrument: 0, resolution_unmeasurable: 0 };
-}
-
-function gateTotals() {
-  return { red: null, green: null, unobserved: null };
 }
 
 // ── helpers used by every source module ──────────────────────────────────────

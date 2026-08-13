@@ -20,6 +20,9 @@ import pytest
 from wevibe_bench.process_reaper import (
     ProcessReaper,
     ReapReport,
+    _default_process_provider,
+    _is_run_binary,
+    _parse_ps,
     run_reaper_unconditional,
 )
 
@@ -290,3 +293,100 @@ def test_reap_report_fields_and_unconditional():
             os.kill(child.pid, 15)
         except ProcessLookupError:
             pass
+
+# ── THE ORPHAN BRANCH ────────────────────────────────────────────────────────
+#
+# Every other test in this file injects a `process_provider`, so
+# `_default_process_provider` — the function that decides what is reapable on a
+# real host — was never exercised, and a bug in it was invisible to the whole
+# suite. It carried one: `ps -o comm=` prints an ABSOLUTE PATH on darwin, so the
+# orphan match was False for every real worker and the branch never fired. These
+# tests run against real `ps` output shapes rather than an injected list.
+
+
+@pytest.mark.parametrize(
+    "comm",
+    [
+        "node",
+        "opencode",
+        "playwright",
+        "report.mjs",
+        "/opt/homebrew/opt/node@22/bin/node",
+        "/opt/homebrew/Cellar/node@22/22.22.2_2/bin/node",
+        "/usr/local/bin/opencode",
+        "/some/path/to/playwright",
+    ],
+)
+def test_run_binaries_match_bare_name_and_absolute_path(comm):
+    """The measured darwin failure: comm is a path, not a basename."""
+    assert _is_run_binary(comm) is True
+
+
+@pytest.mark.parametrize(
+    "comm",
+    [
+        "-zsh",
+        "/bin/bash",
+        "/usr/bin/python3",
+        "postgres",
+        "/Applications/Docker.app/Contents/MacOS/Docker",
+        "nodemon",  # NOT node: the basename must match whole, never as a prefix
+        "/usr/bin/node-inspector",
+        "",
+    ],
+)
+def test_unrelated_binaries_are_never_reapable(comm):
+    """The match must not widen. An unrelated host process is never a candidate."""
+    assert _is_run_binary(comm) is False
+
+
+def test_default_provider_finds_an_orphaned_worker_by_absolute_path(monkeypatch):
+    """An orphan (ppid == 1) named by absolute path is a candidate.
+
+    This is the exact row shape measured on this host, and the case that burned
+    341 CPU-minutes on 2026-08-12: the gate's npm/vitest/playwright workers
+    reparent to PID 1 when their parent dies, and the reaper walked past them.
+    """
+    own = os.getpid()
+    ps_out = "\n".join(
+        [
+            f" {own}  1660 /usr/bin/python3",
+            " 4001     1 /opt/homebrew/Cellar/node@22/22.22.2_2/bin/node",
+            " 4002     1 /usr/local/bin/opencode",
+            " 4003     1 /bin/bash",  # orphan, but not ours — must be skipped
+            " 4004  9999 /opt/homebrew/opt/node@22/bin/node",  # ours? no: not an orphan, not our child
+            f" 4005 {own} /usr/bin/python3",  # direct child — always a candidate
+        ]
+    )
+
+    class _Result:
+        stdout = ps_out
+
+    monkeypatch.setattr(
+        "wevibe_bench.process_reaper.subprocess.run",
+        lambda *a, **k: _Result(),
+    )
+    pids = set(_default_process_provider())
+
+    assert 4001 in pids, "an orphaned node named by absolute path must be reaped"
+    assert 4002 in pids, "an orphaned opencode named by absolute path must be reaped"
+    assert 4005 in pids, "a direct child is reaped regardless of its binary"
+    assert 4003 not in pids, "an unrelated orphan must never be touched"
+    assert 4004 not in pids, "a live process owned by another parent is not ours"
+    assert own not in pids, "the reaper must never list itself"
+
+
+def test_parse_ps_keeps_absolute_paths_intact():
+    rows = _parse_ps(
+        [
+            "",
+            " 1660  1649 -zsh",
+            " 2247  2242 /opt/homebrew/opt/node@22/bin/node",
+            "garbage",
+            " x y z",
+        ]
+    )
+    assert rows == [
+        (1660, 1649, "-zsh"),
+        (2247, 2242, "/opt/homebrew/opt/node@22/bin/node"),
+    ]

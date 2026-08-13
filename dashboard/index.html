@@ -649,144 +649,35 @@ a:hover{color:var(--type)}
    for every suite size; wall.js sets it inline from one constant so the wall
    reads as the same object from cell to cell. Only cell metrics live here.
 
-   SIX STATES. The design fills five of them SOLID and distinguishes them by
-   hue, keeping one shape difference: untested is dashed with no fill, so the
-   single most common state — "nothing has happened here yet" — is legible with
-   no colour at all. The five solid fills do differ in luminance (#82aaff
-   blue · #6dff9e check · #ffb454 amber · #ff6b6b danger · #7e8aa3 slate), so a
-   greyscale screenshot separates them, but hue is doing real work here and the
-   legend below the grid is what carries the meaning in words.
+   TWO COLOURS AND AN ABSENCE. The wall is a dumb component: it reports the
+   per-gate outcome of the last completed test run and nothing else. There is no
+   phase, no attempt axis, no live signal, and no motion of any kind.
 
-     unobserved dashed, no fill — not yet tested; NOT a weaker pass
-     testing    amber, pulsing  — under test now, no outcome claimed
-     blue       solid           — passed on attempt 1
-     green      solid check     — passed on a later attempt
-     slate      solid, still    — abandoned mid-test, no verdict ever
-     red        solid danger    — tested and failed */
+     green      solid check    — passing in the last completed test run
+     red        solid danger   — failing in the last completed test run
+     unobserved dashed, no fill — no result yet; NOT a weaker pass
+
+   The two fills differ in luminance (#6dff9e check · #ff6b6b danger) so a
+   greyscale screenshot separates them, and untested keeps a SHAPE difference
+   rather than a hue one — the single most common state is legible with no
+   colour at all. The legend below the grid carries the meaning in words. */
 .gwall{display:grid;gap:3px;grid-auto-rows:1fr}
 .gcell{aspect-ratio:1;border-radius:2px;background:var(--check);border:1px solid transparent;min-width:0}
 .gcell.green{background:var(--check);border-color:var(--check)}
 .gcell.red{background:var(--danger);border-color:var(--danger)}
 .gcell.unobserved{background:transparent;border:1px dashed var(--dim)}
-/* LIVE CHOREOGRAPHY (ask 3). Palette verbatim from the design comp.
-   blue    passed on ATTEMPT 1 — the comp says "phase 1", but the harness's
-           phases partition the suite rather than sequencing it, so attempt is
-           the only axis a single gate can be resolved along
-   testing amber, pulsing — under test now, no outcome claimed
-   slate   still, never pulsing — abandoned mid-test; a stall is not a verdict */
-.gcell.blue{background:#82aaff;border-color:#82aaff}
-.gcell.testing{background:#ffb454;border-color:#ffb454;animation:gpulse 1.4s ease-in-out infinite}
-.gcell.slate{background:#7e8aa3;border-color:#7e8aa3}
-@keyframes gpulse{0%,100%{opacity:1}50%{opacity:.34}}
-/* ── CHOREOGRAPHY: fill × motion × mark (WO-LIVE-GATES) ─────────────────────
-   THREE INDEPENDENT AXES, THREE CLASS FAMILIES. The server publishes them
-   separately (control/choreography.mjs) and they compose here, so motion can be
-   suppressed WITHOUT touching the fill that carries the verdict.
-
-     gf-*  FILL    what the square IS
-     gm-*  MOTION  whether it moves — motion NEVER means "passing"
-     gk-*  MARK    a persistent overlay glyph
-     gl-*  LIVE    the provisional lane's annotation, never a verdict
-
-   WHITE IS THE FIRST LOOK, and nothing else may produce it. It is the one
-   moment when the board has no information about a gate at all, so it must not
-   be confusable with amber "working" or dashed "untested". */
-.gcell.gf-none{background:transparent;border:1px dashed var(--dim)}
-.gcell.gf-white{background:#f2f5ff;border-color:#f2f5ff}
-.gcell.gf-blue{background:#82aaff;border-color:#82aaff}
-.gcell.gf-green{background:var(--check);border-color:var(--check)}
-.gcell.gf-red{background:var(--danger);border-color:var(--danger)}
-.gcell.gf-slate{background:#7e8aa3;border-color:#7e8aa3}
-.gcell.gm-pulse{animation:gpulse 1.4s ease-in-out infinite}
-/* STILL IS DECLARED, NOT IMPLIED. `animation:none` is stated so a square that
-   must not move cannot inherit motion from a future rule, and so the "does not
-   move" state is as auditable in CSS as it is in the payload. */
-.gcell.gm-still{animation:none}
-/* THE REGRESSION STAR — an overlay, never a colour.
-   The square keeps whatever verdict it currently earns (red now, green if it
-   recovers) and carries the mark on top, so the current state is never lost to
-   the historical one. Drawn with a radial-gradient dot rather than a glyph:
-   it needs no font, no child node, and cannot reflow the grid. */
-.gcell.gk-regression{background-image:radial-gradient(circle at 50% 50%,#fff 0,#fff 26%,transparent 27%)}
-/* THE LIVE LANE OVERLAY — provisional, and visibly subordinate.
-   An inset ring, never a fill: the graded colour must always win the square.
-   A skeptic can tell a provisional reading from a scored one at a glance. */
-.gcell.gl-pass{box-shadow:inset 0 0 0 2px rgba(130,170,255,.85)}
-.gcell.gl-fail{box-shadow:inset 0 0 0 2px rgba(255,90,90,.85)}
-.gcell.gl-not_loaded{box-shadow:inset 0 0 0 2px rgba(255,180,84,.75)}
-/* Deferred and unmeasured get NO ring, and that is DECLARED rather than left to
-   the absence of a rule. The live lane makes no claim about these squares, so
-   the honest rendering is no overlay at all — but an emitted class with no
-   declaration is indistinguishable from a forgotten one, and this board's own
-   style-coverage test exists because a missing rule renders silently. */
-.gcell.gl-deferred{box-shadow:none}
-.gcell.gl-unmeasured{box-shadow:none}
-.gwall.still .gcell.gm-pulse{animation:none;opacity:.62}
-@media (prefers-reduced-motion:reduce){
-  .gcell.gm-pulse{animation:none;opacity:.62}
-}
-/* ── BUILD STRIP — the construction axis, adjacent to correctness ───────────
-   Bars, never squares: anything square-shaped on this panel reads as a gate,
-   and a file's fill is not a gate outcome. */
-.wall-build{display:flex;flex-direction:column;gap:5px;padding-top:10px;border-top:1px solid var(--hairline);min-width:0}
-.bfile{display:grid;grid-template-columns:minmax(90px,1.1fr) minmax(60px,2fr) minmax(0,1.6fr);gap:10px;align-items:center;font:400 11.5px var(--font);color:var(--dim)}
-.bf-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}
-.bf-bar{display:block;height:6px;border-radius:3px;background:var(--bg);border:1px solid var(--border);overflow:hidden}
-.bf-bar>i{display:block;height:100%;background:var(--dim)}
-.bfile.complete .bf-bar>i{background:var(--check)}
-.bfile.partial .bf-bar>i{background:#82aaff}
-.bfile.stub .bf-bar>i{background:var(--dim)}
-.bf-detail{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-/* TWO KILL-SWITCHES, BOTH LEAVING A DISTINGUISHABLE STATIC STATE.
-   `.still` is the takeover freeze (a gate pulsing beside a serve that just fired
-   would assert causation the data cannot support). The media query is the
-   accessibility guarantee. Neither changes a colour — amber stays amber, so the
-   wall loses its motion and none of its meaning. */
-.gwall.still .gcell.testing{animation:none;opacity:.62}
-@media (prefers-reduced-motion:reduce){
-  .gcell.testing{animation:none;opacity:.62}
-}
-/* THE ARRIVAL MARK — the one motion a gate square is allowed.
-   Design-system rule: "Nothing fades in." So this is a one-shot RING that
-   contracts onto the cell, not an opacity fade. It touches box-shadow ONLY:
-   never size, never position, never the fill colour — a square that flashes
-   must still be reporting the same verdict during and after the flash, or the
-   motion would be making a claim the data does not support.
-   SLOTS NEVER REFLOW: box-shadow does not participate in layout. */
-@keyframes wv-settle{
-  from{box-shadow:0 0 0 3px var(--glow)}
-  to{box-shadow:0 0 0 0 transparent}
-}
-.gcell.settled{animation:wv-settle var(--trail-life,600ms) var(--ease) 1}
-@media (prefers-reduced-motion:reduce){.gcell.settled{animation:none}}
-.wall-live{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:8px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font:400 12px var(--font);color:var(--dim);min-width:0}
-.wall-live.stalled{border-color:#7e8aa3}
-.wall-live .note{flex:1 1 260px;min-width:0}
 /* the legend's inline swatches — fixed 9px, never stretched by the grid */
 .gcell.sm{width:9px;height:9px;aspect-ratio:auto;display:inline-block;vertical-align:baseline;flex:none}
 .wall-legend{display:flex;align-items:center;gap:18px;flex-wrap:wrap;font:400 12px var(--font);color:var(--dim)}
 .wall-legend>span{display:inline-flex;align-items:center;gap:7px;min-width:0}
 .wall-legend .note{flex:1 1 220px;min-width:0}
 .wall-empty{display:flex;flex-direction:column;gap:7px;padding:18px;border:1px dashed var(--border-strong);border-radius:var(--radius-md)}
-/* PER-PHASE GRADING PROGRESS. Shown only while the grader is working and the
-   authoritative gate list has not been written yet. Deliberately drawn as ROWS,
-   never as squares: a phase problem count is not a gate identity, and anything
-   square-shaped on this panel reads as a gate. */
+/* THE UNWIRED REASONS. Rows, never squares: anything square-shaped on this
+   panel reads as a gate, and a reason is not one. */
 .gphases{display:flex;flex-direction:column;gap:5px;margin-top:4px}
 .gphase{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font:400 12.5px var(--font);color:var(--fg)}
-.gphase.running{border-color:var(--fg);background:var(--bg)}
-.gphase.running .gp-detail{color:var(--type)}
-.gphase.fail{border-color:var(--danger)}
-.gphase.fail .gp-detail{color:var(--danger)}
-.gphase.timeout{border-color:var(--danger);border-top-width:2px;border-bottom-width:2px}
-.gphase.pass .gp-detail{color:var(--fg)}
 .gp-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:.06em}
 .gp-detail{flex:none;font-weight:700}
-.wall-clusters{display:flex;flex-direction:column;gap:6px;padding-top:10px;border-top:1px solid var(--hairline);min-width:0}
-.cl{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font:400 12.5px var(--font);color:var(--fg)}
-.cl>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cl>span:last-child{flex:none}
 
 /* ── TRANSFER CURVE — the empty/void frames ──────────────────────────────
    These are the states where there is nothing to plot. They are designed
@@ -1080,7 +971,6 @@ a:hover{color:var(--type)}
    survive a greyscale screenshot. */
 .pop-tab.on{color:var(--type);border-color:var(--fg);background:color-mix(in srgb, var(--fg) 10%, transparent)}
 .pop-n{color:var(--fg);font-weight:400}
-.pop-confirm{width:min(420px,calc(100vw - 48px))}
 
 /* ── EXTRACTION: PROCESS VIEW ─────────────────────────────────────────── */
 .xproc{display:flex;flex-direction:column;gap:9px}

@@ -69,7 +69,6 @@ import { readRunState } from "./runstate.mjs";
 import { EventRing, subscribe } from "./events.mjs";
 import { readGateActivity } from "./gate-events.mjs";
 import { readWall, WALL_CONTRACT_VERSION } from "./wall.mjs";
-import { readLive } from "./live-surface.mjs";
 import { readFeedback, feedbackRows, FEEDBACK_CONTRACT_VERSION } from "./feedback.mjs";
 import { readModelsLedger, baselineFor, collectOffCells } from "./models-ledger.mjs";
 import { ExtractionTracker } from "./extraction.mjs";
@@ -768,7 +767,9 @@ const server = createServer(async (req, res) => {
       const since = Number(url.searchParams.get("since") ?? 0) || 0;
       const kindsRaw = url.searchParams.get("kinds");
       const kinds = kindsRaw ? kindsRaw.split(",").filter(Boolean) : null;
-      const snapshot = ring.snapshot({ limit, kinds, since });
+      // THE SNAPSHOT IS TAKEN BELOW, AFTER the out-of-ring rows are admitted —
+      // otherwise a row admitted on this request would not appear until the
+      // next poll, and `cursor` would advance past it in the meantime.
 
       // Never let a log-read failure take the agent feed down: grading rows are
       // additive instrumentation, and the feed must degrade to exactly its
@@ -780,9 +781,10 @@ const server = createServer(async (req, res) => {
         gate = { rows: [], status: null, error: String(err?.message ?? err) };
       }
 
-      const gateRows = kinds && kinds.length
-        ? gate.rows.filter((r) => kinds.includes(r.kind))
-        : gate.rows;
+      // NO `kinds` FILTER HERE ANY MORE. These rows now go into the ring, and
+      // `ring.snapshot()` applies the filter to everything uniformly — filtering
+      // before admission would permanently withhold a row from the ring merely
+      // because a filter chip happened to be off when it first appeared.
 
       // GRADED TEXT ROWS ARE MERGED IN TOO (WO-FEEDBACK-1). The harness renders
       // gate results into prose and hands it to the model AS A USER TURN. That
@@ -803,23 +805,49 @@ const server = createServer(async (req, res) => {
         // previous behaviour, never take the agent stream down with it.
         feedback = { rows: [], error: String(err?.message ?? err) };
       }
-      const feedbackRowsOut = kinds && kinds.length
-        ? feedback.rows.filter((r) => kinds.includes(r.kind))
-        : feedback.rows;
+
+      // ── ADMIT THE OUT-OF-RING ROWS ONCE, THEN LET THE RING DO EVERYTHING ───
+      //
+      // THE ORIGINAL DEFECT: gate rows and feedback rows are built OUTSIDE
+      // EventRing, so they never passed through `push()` — the only thing that
+      // assigns `seq`. They reached the client with `seq: undefined`, and the
+      // renderer appends incrementally with
+      //   rows.filter((e) => (e.seq ?? -1) > renderedSeq)     [live.js]
+      // so every one of them scored -1 and NOTHING WAS EVER APPENDED.
+      //
+      // THE DEFECT THAT FIX INTRODUCED, AND THIS ONE CLOSES: numbering them at
+      // request time from `snapshot.cursor` made the seq a function of a MOVING
+      // base. These rows are rebuilt from files on every poll, so the same row
+      // was re-sequenced every time, cleared the append gate again, and was
+      // appended again. Measured on a live run: one `task chunk (attempt 1)`
+      // came back as seq 706, then 713, then higher, and the operator saw it
+      // repeated down the whole feed.
+      //
+      // Admitting each row ONCE, by identity, fixes both at the source: the row
+      // takes a seq from the ring's own counter (so it cannot collide with a
+      // real upstream seq), and `since` / `cursor` / `capped` need no special
+      // case here at all. See EventRing.admit().
+      //
+      // Admission happens BEFORE the snapshot is taken, so a newly-admitted row
+      // appears in this very response rather than one poll later.
+      for (const r of [...gate.rows, ...feedback.rows]) ring.admit(r);
+      const snapshot = ring.snapshot({ since, limit, kinds });
 
       // Counts must reflect what the operator can filter on, including the
       // grading rows — a chip whose count is always 0 reads as "never happens".
+      // `snapshot.counts` initialises only the five agent kinds and skips any
+      // others, so `harness` and `user` are still tallied here; they are counted
+      // from the RING (not from the freshly-read files) so the number describes
+      // the same population the filter chips actually select from.
       const counts = { ...snapshot.counts };
-      for (const r of gate.rows) counts[r.kind] = (counts[r.kind] ?? 0) + 1;
-      for (const r of feedback.rows) counts[r.kind] = (counts[r.kind] ?? 0) + 1;
+      for (const r of ring.items) {
+        if (r.kind === "harness" || r.kind === "user") {
+          counts[r.kind] = (counts[r.kind] ?? 0) + 1;
+        }
+      }
 
       sendJson(res, 200, {
         ...snapshot,
-        events: [
-          ...snapshot.events,
-          ...gateRows.slice(-limit),
-          ...feedbackRowsOut.slice(-limit),
-        ],
         counts,
         // The live grading verdict: which phase is open, how long it has been
         // silent, and whether that exceeds the alarm threshold.
@@ -944,46 +972,28 @@ const server = createServer(async (req, res) => {
     }
 
     // ── GET /api/wall ────────────────────────────────────────────────────
-    // The GATE WALL's single source: roster + per-gate outcomes + live grading,
-    // already merged. The board must not stitch three artifacts together — a
-    // second implementation of this fold would disagree with the first, and
-    // every disagreement shows up as a wrong colour on a square.
+    // The GATE WALL's single source: the gate roster folded with the per-gate
+    // outcomes of the last completed test run. The board must not stitch the
+    // two artifacts together — a second implementation of this fold would
+    // disagree with the first, and every disagreement shows up as a wrong
+    // colour on a square.
     //
     // The server decides `state`; the board decides colour. Nothing here emits
-    // colours, CSS, or presentation.
+    // colours, CSS, or presentation. NO LIVE SIGNAL AND NO PHASE: a square
+    // carries a recorded verdict or it carries none.
     //
     // Never 500s on a missing roster: that is a real state (the run predates
     // the artifact), reported as ok:true + unwired + a reason.
     if (path === "/api/wall" && req.method === "GET") {
-      const runState = await readRunState({ runsRoot: RUNS_ROOT, launcher });
       const wall = await readWall({
         runsRoot: RUNS_ROOT,
         runDir: url.searchParams.get("run_dir"),
-        launcher,
-        runState,
         benchRoot: BENCH_ROOT,
       });
       sendJson(res, wall.ok ? 200 : 400, wall);
       return;
     }
 
-    // ── GET /api/live ────────────────────────────────────────────────────
-    // The LIVE LANE's provisional surface: per-gate live outcomes measured
-    // against a worktree snapshot while the agent is still working, plus the
-    // build-population axis from that same snapshot.
-    //
-    // DELIBERATELY SEPARATE FROM /api/wall. RC-5 names one scored source of
-    // truth, and these numbers are not it: they are measured off a snapshot,
-    // exclude 16 gates by design, and may be taken mid-edit. Merging them into
-    // the wall's `state` would make the scored grid disagree with
-    // manifest.status.jsonl. The board renders them as a labelled overlay.
-    //
-    // Absent artifact = the lane is not running = ok:true + unwired + reason.
-    // The lane is optional; the authoritative wall never depends on it.
-    if (path === "/api/live" && req.method === "GET") {
-      sendJson(res, 200, await readLive({ runsRoot: RUNS_ROOT }));
-      return;
-    }
 
     // ── GET /api/models-ledger ───────────────────────────────────────────
     // One row per bench-eligible model with its profiles nested, and every
