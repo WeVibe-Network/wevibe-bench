@@ -20,8 +20,22 @@ import { join } from "node:path";
 /** Never read more than this from the tail of any log. */
 export const TAIL_BYTES = 256 * 1024;
 
-/** A single module read may not exceed this. */
-export const READ_TIMEOUT_MS = 2000;
+/**
+ * A single module read may not exceed this.
+ *
+ * MUST BE LARGER THAN ANY TIMEOUT A MODULE APPLIES INTERNALLY. It was 2000ms
+ * while control-plane.mjs gave four of its own fetches 2500ms — so those inner
+ * timeouts could never fire, and the module was killed by this budget instead
+ * of failing the one call that was actually slow. The result was
+ * indistinguishable from "the control plane is down": `board.control` came back
+ * null and every control on the board went dead, including the one that starts
+ * a run, while the service itself answered in ~2ms.
+ *
+ * 4000ms sits above the 2500ms inner timeouts with headroom, so a slow
+ * SUB-CALL now surfaces as that call's own failure with its own reason, and
+ * this budget only fires for a module that has genuinely hung.
+ */
+export const READ_TIMEOUT_MS = 4000;
 
 export async function withTimeout(promise, ms, label) {
   let timer;

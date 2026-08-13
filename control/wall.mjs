@@ -103,9 +103,44 @@ async function readJsonOrNull(path) {
  * Written to NO file. The per-run roster is a write-once artifact pinned to the
  * run it grades; caching this one to disk would create a second, unpinned copy
  * that could go stale against the suite and silently re-baseline a comparison.
- * Recomputing is cheap and cannot drift.
+ *
+ * MEMOIZED IN PROCESS, THOUGH — "recomputing is cheap" was wrong. Measured on
+ * this host: 1.903s per call, and this runs on EVERY /api/wall request, which
+ * the dashboard polls twice a second. That single call was ~1.9s of the source's
+ * 2000ms budget (sources/_runtime.mjs READ_TIMEOUT_MS), so the control-plane
+ * read intermittently timed out, `board.control` came back null, and EVERY
+ * control on the board went dead — including the one that starts a run. An
+ * operator clicking [+ baseline] in that window got
+ * `control_plane_unwired: the board does not know where the control plane is`
+ * for a control plane that was healthy and answering in 2ms.
+ *
+ * The cache is in MEMORY and short-lived, which keeps both properties: nothing
+ * unpinned is ever written to disk, and the suite still cannot go stale for
+ * longer than the TTL. It is only ever consulted for the ARMED state (no run
+ * dir yet); a run's own pinned roster always wins and is never cached here.
  */
+const ROSTER_CACHE_TTL_MS = 30_000;
+// KEYED BY benchRoot, never global. A single global slot let one root's result
+// answer for a DIFFERENT root — caught by "the suite denominator is never
+// fabricated when the harness cannot be reached", which pointed a benchRoot
+// with no gates dir at a cache warmed by the real one and got a fabricated
+// suite. That test is exactly right: a denominator invented from another tree
+// is the fabrication invariant I-2 forbids.
+const rosterCache = new Map(); // benchRoot -> { at, value }
+
 async function enumerateSuite(benchRoot) {
+  // Serve from memory while fresh. A null result is cached too: an enumerator
+  // that cannot run must not be retried at 1.9s a poll — that is the exact cost
+  // this cache exists to remove, and the failure is reported as unwired either
+  // way.
+  const hit = rosterCache.get(benchRoot);
+  if (hit && Date.now() - hit.at < ROSTER_CACHE_TTL_MS) return hit.value;
+  const value = await enumerateSuiteUncached(benchRoot);
+  rosterCache.set(benchRoot, { at: Date.now(), value });
+  return value;
+}
+
+async function enumerateSuiteUncached(benchRoot) {
   const script = join(benchRoot, "tasks", "backgammon", "gates", "roster.mjs");
   // Written to a temp file rather than read from stdout: roster.mjs calls
   // process.exit() immediately after its final write (roster.mjs:375-377), which

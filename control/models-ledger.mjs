@@ -303,9 +303,30 @@ export async function readModelsLedger({ runsRoot, benchModels, runInFlight, blo
       ? (blockedReason ?? "a cell is already in flight — bench runs are serial, never parallel")
       : null;
 
+    // THE SUBJECT RULE, RESOLVED HERE TOO.
+    //
+    // /api/run/start refuses any model that is not the ACTIVE profile's frozen
+    // subject (server.mjs `model_not_subject`). The ledger did not resolve that
+    // gate, so it offered an enabled [+ baseline] on all five bench models
+    // while four of them could only ever be refused — the operator clicked,
+    // the arm came back REFUSED, and nothing started. A button whose enabled
+    // state disagrees with the refusal the server would apply is worse than no
+    // button, which is the rule the rest of this file is built on.
+    //
+    // The active profile is the newest one; it is what activeProfile() resolves
+    // and what every launched cell is attributed to.
+    const activeProfile = profiles.length ? profiles[0] : null;
+    const subjectBlock =
+      activeProfile?.subject_model && id !== activeProfile.subject_model
+        ? `profile ${activeProfile.id} froze '${activeProfile.subject_model}' as its subject and ` +
+          `both arms must be that model — a cell on '${id}' would be refused at launch. ` +
+          `To benchmark '${id}', freeze a new profile with it as the subject.`
+        : null;
+
     const canBaseline = {
-      allowed: !runInFlight && !baseline.scorable,
+      allowed: !runInFlight && !baseline.scorable && !subjectBlock,
       reason: serialBlock
+        ?? subjectBlock
         ?? (baseline.scorable
           ? `${id} already has a valid baseline; re-baselining is a declared act, not a button`
           : null),
