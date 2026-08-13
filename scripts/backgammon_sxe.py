@@ -14,6 +14,7 @@ from typing import Any
 
 from seed_corpus import _bring_up_for_resume, _load_identity, _required_env
 from wevibe_bench.benv import load_bench_env
+from wevibe_bench.extraction_telemetry import ExtractionTelemetry
 from wevibe_bench.lifecycle.lconfig import (
     DEFAULT_CONTRIB_KEYSTORE_PATH,
     DEFAULT_LEADER_KEYSTORE_PATH,
@@ -253,12 +254,23 @@ def _normalize_memory(memory: dict[str, Any], *, fallback_keywords: list[str]) -
         raise RuntimeError("memory keywords empty after normalization")
 
     stack_hint = _normalize_stack_hint(memory.get("stack_hint"))
-    return {
+    # ── THE SECOND WHITELIST ─────────────────────────────────────────────────
+    # This function also kept only four keys, so even after m2_proof stopped
+    # discarding the measurement fields they died again here. The submit path
+    # below reads only text/keywords/stack_hint/memory_type, so carrying the
+    # rest changes nothing about what is submitted — it only keeps the data
+    # alive long enough for the telemetry sink to store it.
+    normalized: dict[str, Any] = {
         "text": text,
         "keywords": keywords,
         "stack_hint": stack_hint,
         "memory_type": "memory",
     }
+    for carried in ("near_dup", "extraction_hash", "keywords_raw"):
+        value = memory.get(carried)
+        if value is not None:
+            normalized[carried] = value
+    return normalized
 
 
 def _memory_fragment(text: str) -> str:
@@ -340,6 +352,22 @@ def main() -> int:
     # working, and it raises afterwards to void the cell.
     _terminal_stages: set[str] = set()
 
+    # ── TELEMETRY SINK ──────────────────────────────────────────────────────
+    # Durable, queryable per-memory detail so the memory system can be TUNED
+    # rather than guessed at. Stores plaintext by explicit operator ratification
+    # — see wevibe_bench/extraction_telemetry.py's header for why that is sound
+    # here and nowhere else.
+    #
+    # FAIL-OPEN: a telemetry failure must never cost a benchmark cell, so the
+    # sink swallows its own errors. It is NOT silent — `last_error` is read
+    # below and printed on the progress stream.
+    telemetry = ExtractionTelemetry()
+
+    def _telemetry_note() -> None:
+        if telemetry.last_error:
+            progress(f"telemetry degraded err={telemetry.last_error}")
+            telemetry.last_error = None
+
     def emit_stage(
         name: str,
         state: str,
@@ -364,6 +392,17 @@ def main() -> int:
             "BACKGAMMON_SXE_STAGE " + json.dumps(payload, separators=(",", ":"), sort_keys=True),
             flush=True,
         )
+        # The stage stream is ephemeral (it lives in the control plane's memory
+        # and dies with the process). The same transition is persisted so a
+        # PAST extraction's timing can still be read — the dashboard's queue is
+        # a read over these rows, which is what makes it cross-session.
+        telemetry.record_stage(
+            name,
+            state,
+            at=payload["at"],
+            count=count,
+            detail=payload.get("detail"),
+        )
 
     result_payload: dict[str, Any] = {
         "status": "error",
@@ -380,6 +419,17 @@ def main() -> int:
     }
 
     stage = "init"
+    # The job row MUST open before the first emit_stage: a stage row with no
+    # parent job is orphaned and the queue cannot attribute it.
+    telemetry.start_job(
+        run_label=str(args.run_label),
+        source_mode=str(args.source_mode),
+        org_id=resolved_org_id,
+        producer_model=str(args.session_model),
+        extract_model=str(extract_model),
+        logfile=logfile,
+    )
+    _telemetry_note()
     emit_stage("init", "running")
     extract_path = ""
     leader_instance: McpInstance | None = None
@@ -429,6 +479,9 @@ def main() -> int:
         emit_stage("substrate", "complete", detail=integrity.summary())
         session_id = None
         progress(f"substrate source session_db={session_db_path}")
+        # Recorded once the substrate is proven sound — before this point the
+        # path is a claim, not a verified source.
+        telemetry.finish_job(session_db_path=str(session_db_path))
 
         stage = "identity"
         emit_stage("identity", "running")
@@ -605,6 +658,25 @@ def main() -> int:
         # count is always emitted rather than omitted when empty.
         emit_stage("extract", "complete", count=len(memories))
 
+        # ── THE TUNING ROWS ─────────────────────────────────────────────────
+        # Written BEFORE submit, so a candidate is recorded even if submission
+        # later fails. A memory that was extracted and then failed to commit is
+        # a real and interesting measurement; recording only successes would
+        # bias the table toward the happy path.
+        n_rows = telemetry.record_memories(memories)
+        _telemetry_note()
+        n_flagged = sum(1 for m in memories if isinstance(m.get("near_dup"), dict))
+        progress(
+            "telemetry candidates "
+            f"rows={n_rows} near_dup_flagged={n_flagged} db={telemetry.db_path}"
+        )
+        telemetry.finish_job(
+            n_candidates=len(memories),
+            extract_dur_ms=extract_dur_ms,
+            extract_path=extract_path,
+            provider=extract_provider,
+        )
+
         committed_memories: list[dict[str, Any]] = []
         delivery_targets: list[dict[str, str]] = []
         if memories:
@@ -622,6 +694,15 @@ def main() -> int:
             approve_status = _commit_status_label(verify_payload, submission_hash)
 
             fp_fields = _memory_fingerprint_fields(str(memory["text"]))
+            # Stamp the commit outcome onto the candidate row written above, so
+            # one row carries the whole life of a memory: what was extracted,
+            # what it was flagged against, and what became of it.
+            telemetry.update_memory_commit(
+                index,
+                submission_hash=submission_hash,
+                approve_status=approve_status,
+                memory_fp=fp_fields["memory_fp"],
+            )
             committed_memories.append(
                 {
                     "submission_hash": submission_hash,
@@ -671,6 +752,11 @@ def main() -> int:
         for index, item in enumerate(per_memory_delivery, start=1):
             if not isinstance(item, dict):
                 continue
+            telemetry.update_memory_delivery(
+                index,
+                delivered=bool(item.get("matched")),
+                delivery_mode=str(item.get("delivery_mode") or "") or None,
+            )
             progress(
                 "delivery probe "
                 f"idx={index}/{len(delivery_targets)} fragment_fp={item.get('fragment_fp')} "
@@ -724,6 +810,13 @@ def main() -> int:
             + json.dumps(result_payload, separators=(",", ":"), sort_keys=True),
             flush=True,
         )
+        telemetry.finish_job(
+            status=status,
+            delivery=delivery,
+            n_committed=len(committed_memories),
+            session_id=session_id,
+        )
+        _telemetry_note()
         return 0 if status == "ok" else 1
 
     except Exception as exc:
@@ -748,9 +841,15 @@ def main() -> int:
             + json.dumps(result_payload, separators=(",", ":"), sort_keys=True),
             flush=True,
         )
+        # A FAILED extraction is the one most worth inspecting later — closing
+        # the job row here is what makes the failure visible in the queue at all
+        # rather than leaving an eternally-"running" row.
+        telemetry.finish_job(status="error", error=str(exc), session_id=session_id)
         return 1
 
     finally:
+        _telemetry_note()
+        telemetry.close()
         if procman is not None:
             if contributor_instance is not None:
                 procman.stop(contributor_instance)

@@ -1,12 +1,32 @@
 <!doctype html>
-<html lang="en" data-theme="midnight">
+<html lang="en" data-theme="green">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WeVibe Bench — live</title>
+<title>WeVibe Bench Board v2</title>
 <!--
 ─────────────────────────────────────────────────────────────────────────────
- JSON CONTRACT v1.1 — what this board consumes. Diff against contract.mjs and
+ WEVIBE BENCH BOARD v2 — LONGITUDINAL FRAME
+
+ ONE QUESTION THIS BOARD ANSWERS:
+   does a growing memory corpus make the SAME local model finish the SAME
+   build in fewer turns, fewer tokens and less time — and at what corpus size
+   does that stop being true?
+
+ TWO AXES, NEVER BLENDED (hard rule):
+   CORRECTNESS  gates passed / total          → GATE WALL
+   EFFICIENCY   turns · tokens · wall time    → TRANSFER CURVE
+ They sit adjacent, at equal weight. They are never multiplied, averaged or
+ collapsed into a score. An ON run CAN be faster AND worse — the last OFF cell
+ was FAIL with 25 failed gates — and a layout that makes faster-and-worse read
+ as a win is a broken layout.
+
+ CELL = 3 PHASES:
+   1 BUILD   harness label `initial`   — internally 6 work orders (phase 1 only)
+   2 GRADE   verdict-pass-1 / feedback-1
+   3 GRADE   verdict-pass-2 / feedback-2
+
+ JSON CONTRACT v2.0 — what this board consumes. Diff against contract.mjs and
  against what the backend actually emits.
 
  {
@@ -15,372 +35,806 @@
                  chunk{current,total}, attempt{current,max}, turns,
                  session_turns, tokens{input,output,injected_block}, state,
                  session_id, log_silent_s, terminal_status }
+   stack:      { id, baseline, runs[], metrics{turns,tokens,seconds},
+                 state, corpus_source }
+                 baseline = the ONE OFF cell. n=1 BY DESIGN, never a
+                 distribution. runs[] = ON cells in sequence order.
    provenance: { attestation, gate_mode, gate_mode_source, policy_version,
                  policy_anchor_status, worker_image_fp, leader_fp, corpus, seed }
-   arm_delta:  { sufficient, min_cells_per_arm, delta, ci, statement, note,
-                 a|b:{ cells, gates_resolved, gates_total, resolution_rate,
-                       median_turns_to_green,
-                       excluded{total,void_instrument,resolution_unmeasurable} } }
-                 `cells` counts SCORED cells only. A void-instrument cell
-                 (RUNBOOK 5.10) or a single-attempt cell is excluded and
-                 counted in `excluded` — never scored as a measured 0.
-   wall:       { gates:[{id,req,title,a,b,a_flipped_at_attempt,
-                         b_flipped_at_attempt}], totals:{a,b} }
-   episodes:   [{ failure_key, arm, state, turns, elapsed_s, error, opened_at }]
-   recall_moment: null | { failure_key, fired_at, error, latency_ms, gate_mode,
-                 gate_decision_ms, candidates[], guard{detections,scanned},
-                 chosen{cid,implement,context,dnd,stack}, outcome }
-   memories:   [{ cid, implement, context, dnd, stack, serves,
-                 outcomes_resolved, outcomes_unresolved, outcomes_unobserved,
-                 standing_bps, self_authored_discounted }]
-   honesty:    { coverage{concluded,total,note}, unresolved, guard_detections{},
-                 recall_latency_ms{p50,p95,n}, wasted_turns, recovered_turns,
-                 serves{sent,rejected,confirmed_on_chain,note},
-                 transport{truncations,finalize_timeouts,finalize_timeout_turns,
-                           guard_aborts,recovery_nudges,recoveries} }
-   history:    [{ cell_label, arm, started_at, duration_s,
-                 segments[{kind,from_s,to_s}], triggers[], gates_resolved,
-                 verdict }]
+   wall:       { gates:[{id,req,title,a,b,...}], totals:{a,b} }
+   hold:       null | { url, ui_healthy, boot_detail, server_log, started_at,
+                        held_seconds, release{path,...}, bind{...}, ... }
+   profile:    { exists, models[], created_at, enforced:false, stack_id }
+   honesty:    { … the rail … }
    sources:    [{ id, ok, fields[], reason, provenance, ms }]
  }
 
  EVERY FIELD IS NULLABLE. null = NOT OBSERVED and renders as an explicit state.
  Three null-ish states stay visually distinct: unobserved / unwired / zero.
-
- THREE CLAIMS, NEVER MERGED:
-   serve   = a memory was injected. NOT that it helped.
-   outcome = the episode resolved or didn't. NOT that memory caused it.
-   delta   = the only causal surface on this board.
+ A MEASURED ZERO IS NOT MISSING DATA and never renders like one.
 ─────────────────────────────────────────────────────────────────────────────
 -->
 <style>
-/* ── WeVibe Midnight ────────────────────────────────────────────────────────
-   Palette C. Midnight is the one sanctioned theme that is not a single-hue
-   ramp — it ships two accents on the same surface, so the two arms are
-   separated by BRAND tokens rather than invented colour.
+/* ══════════════════════════════════════════════════════════════════════════
+   WeVibe Design System — GREEN phosphor.
+   Values below are lifted VERBATIM from the design source's own token file
+   (`WeVibe Bench Board v2.html`, unpacked). They are not approximations and
+   must not be "tidied" — the board is judged against that artifact.
+   ══════════════════════════════════════════════════════════════════════════ */
 
-   ARM A  --accent #82aaff (blue,   L*≈70)
-   ARM B  --num    #f78c6c (orange, L*≈68)
-   Separated in luminance AND hue, so they survive 4:2:0 chroma subsampling at
-   720p and stay distinct in greyscale and for red-green CVD.
+:root,
+[data-theme="green"] {
+  /* surfaces */
+  --bg:        #02100a;   /* canvas — deepest screen black-green */
+  --bg-2:      #04190f;   /* raised surface / panel */
 
-   Red #ff6b6b and green #5ad27a are RESERVED for gate fail/pass and are never
-   used for arm identity — an arm accent that reads as a verdict is a lie.
-─────────────────────────────────────────────────────────────────────────── */
-:root{
-  --bg:#0a0e16; --bg-2:#0d121c; --panel:#0f1520; --raised:#131a27;
-  --fg:#aeb9cc; --dim:#43506a; --type:#e6edf6;
-  --arm-a:#82aaff; --arm-b:#f78c6c;
-  --fail:#ff6b6b; --pass:#5ad27a; --null:#5b6b86;
-  --rule:#1c2534; --rule-2:#26314a;
-  --font:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  --fs-hero:56px; --fs-metric:28px; --fs-body:16px; --fs-ident:15px; --fs-label:14px;
+  /* text */
+  --fg:        #2fe07a;   /* default foreground — phosphor text */
+  --dim:       #0f5e32;   /* de-emphasis: notes, axis, hints */
+  --comment:   #1d7a44;
+  --type:      #e2ffec;   /* brightest — titles & headline numbers */
+  --cmd:       #e2ffec;
+
+  /* signal */
+  --accent:    #54f59a;
+  --ok:        #b8ffcf;
+  --check:     #6dff9e;
+  --link:      #aaffc8;
+  --link-glow: #27ff7eaa;
+  --cursor:    #6dff9e;
+  /* THE ONLY OFF-HUE. Reserved for: gate failure, regression, the
+     DECLARED-NOT-ENFORCED debt, and a LAN-exposed hold. Never decorative. */
+  --danger:    #ff6b6b;
+
+  /* semantic aliases — product code uses THESE */
+  --surface:        var(--bg);
+  --surface-raised: var(--bg-2);
+  --text-bright:    var(--type);
+  --text-body:      var(--fg);
+  --text-muted:     var(--dim);
+  --border:         color-mix(in srgb, var(--fg) 14%, transparent);
+  --border-strong:  color-mix(in srgb, var(--fg) 22%, transparent);
+  --hairline:       color-mix(in srgb, var(--fg) 10%, transparent);
+  --selection:      color-mix(in srgb, var(--accent) 38%, transparent);
+  --focus-ring:     color-mix(in srgb, var(--accent) 18%, transparent);
+  --glow:           color-mix(in srgb, var(--accent) 12%, transparent);
+
+  /* typography — one typeface, hierarchy from weight/size/colour/tracking */
+  --font: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* spacing / radii / elevation */
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px;
+  --space-5:24px; --space-6:32px; --space-7:44px;
+  --radius-sm:6px; --radius-md:8px; --radius-lg:10px; --radius-xl:12px;
+  --radius-pill:999px;
+  --shadow-raise: 0 10px 30px rgba(0,0,0,.4);
+  --shadow-term:  0 30px 80px rgba(0,0,0,.5);
+
+  --ease: cubic-bezier(.2,.6,.2,1);
+  --dur-fast:.12s; --dur-base:.15s;
+
+  /* board geometry — measured off the design source.
+     §8.1 of the artifact is a 1920px board with curve|wall at 50/50. */
+  --pad: 14px;
+  --gap: 14px;
+  --board-max: 1920px;
+
+  /* ── TYPE SCALE ──────────────────────────────────────────────────────────
+     recall.js consumes --fs-label / --fs-ident and rail.js consumes
+     --fs-metric. They were dropped in the token rewrite, so every rule
+     keyed on them silently resolved to nothing and the text rendered at
+     inherited size. Restored at the artifact's own measured values. */
+  --fs-label:  11px;   /* kickers, axis labels, rail captions */
+  --fs-ident:  12px;   /* identifiers, cids, verbatim strings */
+  --fs-body:   12.5px; /* body copy inside panels */
+  --fs-row:    13px;   /* ledger + feed rows */
+  --fs-metric: 22px;   /* headline numbers (rail derives .8 of this) */
+
+  /* ── SEMANTIC SIGNAL ALIASES ─────────────────────────────────────────────
+     The panels were written against these names and they outlived the
+     rewrite that removed them. --fail/--pass/--arm-a/--arm-b/--rule/--null
+     are what recall.js, live.js and the wall actually reference. They are
+     ALIASES onto the one palette above, never a second palette: --fail is
+     --danger, the only off-hue on the board. */
+  --fail:  var(--danger);
+  --pass:  var(--fg);
+  --arm-a: var(--fg);      /* MEMORY ON */
+  --arm-b: var(--dim);     /* CONTROL   */
+  --rule:  var(--hairline);
+  --null:  var(--dim);
+  --panel: var(--bg-2);
 }
 
-/* ── TYPE SCALE AT LAPTOP WIDTH ──────────────────────────────────────────────
-   The scale above is sized for the 1920+ stream target. On a 1440-or-narrower
-   screen the SAME text in narrower columns wrapped short labels onto two and
-   three lines — measured: "median turns to green", "scoring turns",
-   "injected block", "serves · delivery only", and every `.railnote` (up to 4
-   lines). Wrapped labels are what read as "text rendering weird": the value
-   they label gets pushed away from them and the six rail boxes stop aligning.
+/* ── WEBFONT ────────────────────────────────────────────────────────────────
+   JetBrains Mono is the brand's ONE typeface and it is NOT installed on the
+   operator's host (verified: 0 matches in ~/Library/Fonts and the system font
+   list), so every `font-family:'JetBrains Mono'` rule was silently falling
+   back to SF Mono. The artifact bundles the woff2 binaries; the board is
+   containerised and must not reach the network to render, so the faces are
+   declared against Google's CDN with a local() first — if the operator ever
+   installs it, no fetch happens at all.
 
-   One step down at the breakpoint keeps those labels on one line. The hero
-   number and metrics shrink with it so the visual hierarchy is preserved
-   rather than flattened. Nothing here is a per-panel patch — the scale is one
-   place, so the whole board moves together. */
+   font-display:swap is deliberate: the board is a long-lived operations
+   surface, and blocking first paint on a font is worse than one reflow. */
+@font-face{
+  font-family:'JetBrains Mono'; font-style:normal; font-weight:400 800;
+  font-display:swap;
+  src:local('JetBrains Mono'), local('JetBrainsMono-Regular'),
+      url('https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxTOlOVigKp2Q.woff2') format('woff2');
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face{
+  font-family:'JetBrains Mono'; font-style:italic; font-weight:400 800;
+  font-display:swap;
+  src:local('JetBrains Mono Italic'), local('JetBrainsMono-Italic'),
+      url('https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbX2o-flEEny0FZhsfKu5WU4xD-IQ-PuZJJXxfpAO-Lf1OQk6OThxPA.woff2') format('woff2');
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+/* ── VIEWPORT STEP-DOWN ──────────────────────────────────────────────────
+   1920+ is the primary target. The board must ALSO survive 1440×900,
+   1366×768 and 1280×800 — measured breakpoints, not guesses. The ledger's
+   fixed track list is the thing that overflows first, so the narrow steps
+   shrink the identity columns (model, corpus) rather than the numbers, and
+   the rail reflows from 6 fixed columns to auto-fit. Nothing is hidden. */
+:root { --ledger-cols: 52px 62px 210px 128px 78px 96px 84px 96px 104px 104px 1fr; }
 @media (max-width:1600px){
-  :root{ --fs-hero:44px; --fs-metric:24px; --fs-body:15px; --fs-ident:14px; --fs-label:13px; }
+  :root { --ledger-cols: 46px 56px 150px 116px 70px 84px 78px 90px 88px 96px 1fr; --pad:12px; --gap:12px; }
 }
 @media (max-width:1400px){
-  :root{ --fs-hero:38px; --fs-metric:22px; --fs-body:14px; --fs-ident:13px; --fs-label:12px; }
+  :root { --ledger-cols: 42px 50px 118px 104px 62px 76px 72px 84px 78px 88px 1fr; }
 }
+
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
+html{background:var(--bg)}
 body{
-  background:var(--bg); color:var(--fg); font-family:var(--font);
-  font-size:var(--fs-body); font-variant-numeric:tabular-nums;
-  -webkit-font-smoothing:antialiased; overflow:hidden;
+  background:var(--bg); color:var(--fg);
+  font-family:var(--font); font-size:13px;
+  font-variant-numeric:tabular-nums;
+  -webkit-font-smoothing:antialiased;
+  min-height:100vh;
+  display:flex;
+  justify-content:center;
+  align-items:flex-start;
 }
-#root{height:100vh;display:flex;flex-direction:column}
+::selection{background:var(--selection);color:var(--type)}
+a{color:var(--link);text-decoration:none}
+a:hover{color:var(--type)}
 
-/* NO AMBIENT ANIMATION. The board is on screen for hours; constant motion is
-   exhausting and reads as filler. The entire motion budget belongs to the
-   recall-moment takeover. State changes announce once and settle. */
-@keyframes settle{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
-.settle{animation:settle .2s ease-out}
-@media (prefers-reduced-motion:reduce){.settle{animation:none}}
+/* The board is a VERTICAL DOCUMENT, not a fixed viewport grid.
+   v1 pinned everything to 100vh with overflow:hidden, which silently
+   AMPUTATED panel tails on a laptop — content clipped without a mark is
+   indistinguishable from content that was never rendered, the exact
+   dishonesty the null-state rules exist to stop. Eight surfaces do not fit
+   in 800px of height honestly, so the page scrolls and the chrome sticks. */
+#root{
+  display:flex; flex-direction:column; gap:var(--gap);
+  padding:var(--pad);
+  padding-bottom:64px;
+  min-height:100vh;
+  width:min(100vw, var(--board-max));
+}
+.shell{max-width:var(--board-max);margin:0 auto;display:flex;flex-direction:column;gap:var(--gap);width:100%;min-width:0}
 
-.label{font-size:var(--fs-label);font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
-.ident{font-size:var(--fs-ident);font-weight:500;color:var(--type)}
-.null{color:var(--null)}
-.a{color:var(--arm-a)} .b{color:var(--arm-b)}
-.pass{color:var(--pass)} .fail{color:var(--fail)}
+/* NO AMBIENT ANIMATION. The board is on screen for hours. The entire motion
+   budget is one settling flash on a newly arrived event row. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important}
+}
 
-.panel{background:var(--panel);border:1px solid var(--rule);display:flex;flex-direction:column;min-height:0}
-.phead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 14px;border-bottom:1px solid var(--rule)}
-/* `auto`, NOT `hidden`. On a short screen (measured: 1366x768 and 1280x800)
-   the arm-delta content genuinely exceeds the space the layout can give it,
-   even after the row minimums and the type step-down. `overflow:hidden` there
-   silently AMPUTATES the tail of a panel — on this board that meant the
-   standing "no CI over gate counts" note and part of an arm's cell counts
-   simply disappeared, with nothing on screen indicating anything was missing.
-   Content that is present but scrolled is recoverable; content that is clipped
-   without a mark is indistinguishable from content that was never rendered,
-   which is the exact class of dishonesty the null-state rules exist to stop.
-   At the 1920+ stream target nothing scrolls — this only ever engages below it. */
-.pbody{padding:12px 14px;overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:var(--rule-2) transparent}
-.pbody::-webkit-scrollbar{width:6px}
-.pbody::-webkit-scrollbar-thumb{background:var(--rule-2)}
+/* ── shared atoms ───────────────────────────────────────────────────────── */
 
-/* The right-hand column: arm delta stacked over the recall moment.
-   SAME COLLAPSE CLASS AS THE GRID ROWS, one level down. The hero panel was
-   `flex:0 1 auto` and sized itself from content, leaving the recall panel —
-   `flex:1 1 0` with `min-height:0` — to absorb every shortfall. Measured at
-   1440x900: recall rendered 2px tall against 78px of content, so the panel
-   carrying the gate-mode disclosure vanished entirely.
+.ttl{font:700 11px var(--font);letter-spacing:.18em;color:var(--type)}
+.sub{font:400 12px var(--font);color:var(--dim)}
+.kick{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--dim)}
+.note{font:400 12px/1.6 var(--font);color:var(--dim)}
+.bright{color:var(--type)}
+.danger{color:var(--danger)}
+.muted{color:var(--dim)}
 
-   Both panels now hold a floor and share the surplus proportionally, so
-   pressure is distributed instead of dumped onto whichever panel is last. */
-.stack{display:flex;flex-direction:column;gap:10px;min-height:0}
-.stack>.panel:first-child{flex:1 1 auto;min-height:132px}
-.stack>.panel:last-child{flex:1 1 auto;min-height:104px}
+/* THE null renderer. Three kinds of nothing stay visually distinct:
+   unobserved (not measured yet) · unwired (source absent) · zero (measured). */
+.null{color:var(--dim);font-style:normal}
 
-/* ── top bar ─────────────────────────────────────────────────────────────── */
-/* NOWRAP IS LOAD-BEARING. These children are single-line identity chips: a run
-   label, an arm tag, a model name. With default wrapping they broke INTERNALLY
-   the moment natural content width exceeded the bar (measured: 1294px of
-   content at 1440px viewport), turning every item into two lines and growing
-   the bar 49px → 73px. That extra height then cascaded into the grid below and
-   collapsed the ticker row. The bar must stay one line and give up characters
-   instead, so the long identifiers ellipsize rather than reflow the board. */
-.topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;background:var(--bg-2);border-bottom:1px solid var(--rule-2);flex-wrap:nowrap;white-space:nowrap}
+.panel{
+  background:var(--bg-2); border:1px solid var(--border);
+  border-radius:var(--radius-xl); padding:var(--pad);
+  display:flex; flex-direction:column; gap:12px; min-width:0;
+}
+.phead{display:flex;align-items:baseline;gap:12px;min-width:0}
+.phead .sub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.tag{
+  font:700 11px var(--font);letter-spacing:.14em;
+  color:var(--dim);border:1px solid var(--border-strong);
+  border-radius:var(--radius-sm);padding:4px 8px;white-space:nowrap;
+}
+.tag.on{color:var(--type)}
+.tag.bad{color:var(--danger);border-color:var(--danger)}
+
+/* THE DEBT BADGE. Double rule + the words, so it survives a greyscale
+   screenshot. It is not decoration — it is the visible debt, and it
+   disappears the day the recall filter ships. */
+.debt{
+  font:700 11.5px var(--font);letter-spacing:.14em;color:var(--danger);
+  border-top:2px solid var(--danger);border-bottom:2px solid var(--danger);
+  padding:2px 0;white-space:nowrap;
+}
+
+/* segmented control — the curve's metric + scope switches */
+.seg{display:flex;border:1px solid var(--border-strong);border-radius:var(--radius-sm);overflow:hidden;flex:none}
+.seg button{
+  font:400 11px var(--font);letter-spacing:.12em;
+  padding:5px 11px;background:transparent;color:var(--fg);
+  border:0;border-left:1px solid var(--border-strong);cursor:pointer;
+}
+.seg button:first-child{border-left:0}
+.seg button.on{font-weight:700;background:var(--fg);color:var(--bg)}
+.seg button:hover:not(.on){color:var(--type)}
+
+.btn{
+  font:700 12px var(--font);letter-spacing:.12em;
+  background:transparent;color:var(--fg);
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  padding:8px 14px;cursor:pointer;
+}
+.btn:hover:not(:disabled){color:var(--type);border-color:var(--fg)}
+.btn:disabled{color:var(--dim);border-color:var(--hairline);cursor:not-allowed}
+.btn.primary{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.btn.primary:hover:not(:disabled){background:var(--check);border-color:var(--check);color:var(--bg)}
+.btn.destroy{color:var(--danger);border-color:var(--danger)}
+.btn.destroy:hover:not(:disabled){background:var(--danger);color:var(--bg)}
+.btn.sm{font-size:11px;padding:3px 8px}
+
+.sel,.inp{
+  font:400 12px var(--font);
+  background:var(--bg);color:var(--type);
+  border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  padding:6px 8px;width:100%;
+}
+.sel:disabled,.inp:disabled{color:var(--dim);opacity:.6;cursor:not-allowed}
+
+/* ── topbar ─────────────────────────────────────────────────────────────── */
+/* NOWRAP IS LOAD-BEARING: these are single-line identity chips. Wrapping them
+   grows the bar and cascades height into every row below. The long, repeated
+   identifiers (model, campaign) are the only things allowed to ellipsize. */
+.topbar{
+  display:flex;align-items:center;gap:16px;
+  padding:0 4px 12px;border-bottom:1px solid var(--hairline);
+  flex-wrap:nowrap;white-space:nowrap;
+  position:sticky;top:0;z-index:30;background:var(--bg);
+  padding-top:2px;
+}
 .topbar>*{flex:0 0 auto}
-.brand{font-size:20px;font-weight:700;color:var(--type);letter-spacing:.04em}
-.attest{font-size:var(--fs-label);color:var(--dim);letter-spacing:.06em}
-/* The two long, low-priority identifiers are the ONLY things allowed to shrink:
-   truncating a model name costs a viewer nothing (it is repeated in the
-   provenance strip), whereas truncating the arm tag or the attestation label
-   would hide a claim the board is required to state in full. */
-.topbar .ident{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.brand{font:800 15px/1 var(--font);color:var(--type);letter-spacing:.02em}
+.brand u{text-decoration-color:var(--fg);text-underline-offset:3px}
+.vr{width:1px;height:18px;background:var(--border-strong)}
+.chip{font:400 13px var(--font);color:var(--fg)}
+.chip.dimchip{color:var(--dim)}
+.chip.shrink{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .spacer{flex:1 1 auto;min-width:0}
-.armtag{font-size:var(--fs-label);font-weight:700;letter-spacing:.08em;padding:3px 10px;border:1px solid currentColor}
 
-/* ── layout: wall-dominant (1c) ──────────────────────────────────────────── */
-/* ROW MINIMUMS ARE LOAD-BEARING, NOT PADDING.
-   These rows were `auto 1fr auto`. Row 1 (`auto`) is sized by its content, so
-   the hero panel took whatever it wanted and row 2 (`1fr`) received only the
-   remainder. Below roughly 1500px of usable height the remainder reached ZERO
-   and the Episode ticker rendered as a 2px sliver — measured 2px tall against
-   61px of content at 1440x900, 1366x768 and 1280x800, i.e. every laptop
-   screen. A panel silently collapsing to nothing is indistinguishable from a
-   panel that has no data, which is the one confusion this board exists to
-   prevent.
-
-   Both rows now carry an explicit minimum AND a proportional share, so they
-   shrink together under pressure and neither can be starved to zero by the
-   other. The 1.35:1 ratio preserves the wall-dominant intent. */
-.grid{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:minmax(150px,1.35fr) minmax(112px,1fr) auto auto;gap:10px;padding:10px;min-height:0}
-.rail{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
-
-/* ── the wall ────────────────────────────────────────────────────────────── */
-.wallrow{margin-bottom:14px}
-.wallhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
-.strip{display:grid;gap:2px;grid-auto-flow:column;grid-auto-columns:1fr}
-.cellbox{height:26px;border:1px solid var(--rule-2);background:transparent}
-.cellbox.red{background:var(--fail);border-color:var(--fail)}
-.cellbox.green{background:var(--pass);border-color:var(--pass)}
-.cellbox.unobserved{background:repeating-linear-gradient(45deg,#141b28 0 3px,transparent 3px 6px)}
-.wallgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(22px,1fr));gap:3px}
-.wallgrid .cellbox{height:22px}
-.changed{margin-top:10px;font-size:var(--fs-label);color:var(--fg);line-height:1.5}
-
-/* ── hero ────────────────────────────────────────────────────────────────── */
-.hero{display:flex;align-items:flex-start;gap:22px}
-.heronum{font-size:var(--fs-hero);font-weight:700;line-height:1;color:var(--type)}
-/* Derived from the hero scale rather than pinned: COLLECTING is the empty
-   state that sits on screen for most of a run, so it must shrink with the
-   number it stands in for instead of overpowering it on a small screen. */
-.collect{font-size:calc(var(--fs-hero) * .58);font-weight:700;letter-spacing:.06em;color:var(--dim)}
-.armcol{flex:1}
-.armrate{font-size:var(--fs-metric);font-weight:600}
-.note{font-size:var(--fs-label);color:var(--dim);line-height:1.5;margin-top:8px;border-top:1px solid var(--rule);padding-top:8px}
-
-/* ── ticker ──────────────────────────────────────────────────────────────── */
-.trow{display:grid;grid-template-columns:96px 40px 1fr 54px 62px;gap:8px;align-items:center;padding:6px 8px;border-bottom:1px solid var(--rule);font-size:var(--fs-body)}
-
-/* The live-cell metric grid. Six FIXED tracks forced short labels
-   ("scoring turns", "injected block") to wrap onto two lines below ~1500px,
-   which pushes each label away from the number it names. auto-fit lets the row
-   reflow to fewer, wider columns instead of squeezing all six. */
-.cellgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:12px}
-.cellgrid>div{min-width:0}
-.cellval{font-size:calc(var(--fs-metric) * .8);font-weight:600;color:var(--type)}
-/* red-again: the pre-trigger tension. STATIC — double rule + inset, no pulse. */
-.trow.tense{border-left:3px double var(--fail);box-shadow:inset 0 0 0 1px rgba(255,107,107,.22);background:rgba(255,107,107,.05)}
-.state{font-size:var(--fs-label);font-weight:700;letter-spacing:.04em}
-
-/* ── recall moment ───────────────────────────────────────────────────────── */
-.takeover{border-color:var(--arm-a);box-shadow:0 0 0 1px var(--arm-a),0 0 34px rgba(130,170,255,.14)}
-.atomic{display:grid;grid-template-columns:76px 1fr;gap:4px 10px;font-size:var(--fs-body);line-height:1.45}
-.cand{display:grid;grid-template-columns:1fr 52px 62px 96px;gap:8px;padding:4px 0;border-bottom:1px solid var(--rule);font-size:var(--fs-ident)}
-.disp{font-size:12px;font-weight:600;letter-spacing:.04em}
-
-.railbox{background:var(--panel);border:1px solid var(--rule);padding:8px 10px;min-width:0}
-.railval{font-size:calc(var(--fs-metric) * .8);font-weight:600;color:var(--type);margin:2px 0}
-.railnote{font-size:calc(var(--fs-label) - 1px);color:var(--dim);line-height:1.35}
-.prov{display:flex;gap:16px;flex-wrap:wrap;padding:6px 18px;background:var(--bg-2);border-top:1px solid var(--rule-2);font-size:13px;color:var(--dim)}
-
-/* ── the drawer ──────────────────────────────────────────────────────────────
-   Anchored to the BOTTOM edge, sitting ABOVE the provenance strip — the strip
-   is the board's permanent attestation and must never be occluded, so the
-   drawer's travel stops short of it rather than covering it.
-
-   ONE drawer, three tabs. Three separate popouts would let two live surfaces
-   fight for the same screen edge; a single drawer makes the choice explicit.
-
-   Height is a discrete STOP, never a drag-anywhere resize: a stream viewer
-   should not be able to leave the board in a half-broken layout, and fixed
-   stops keep every row height (34px event, 44px stage) landing on the same
-   pixel grid at every size.
-
-   NO new accent hue. The drawer borrows --arm-a/--arm-b/--fail/--pass with
-   their existing reserved meanings and adds none of its own. */
-.drawer{
-  position:fixed; left:0; right:0; bottom:var(--prov-h,28px);
-  background:var(--bg-2); border-top:1px solid var(--rule-2);
-  display:flex; flex-direction:column;
-  height:var(--drawer-h,34px);
-  max-height:calc(100vh - 120px);
-  z-index:40;
-  /* Height is the ONLY animated property and only on an explicit stop change.
-     The board's motion budget belongs to the recall takeover, so this is a
-     single short ease with no bounce, and it never runs on a data update. */
-  transition:height .16s ease-out;
+/* ── provenance strip ───────────────────────────────────────────────────── */
+.prov{
+  display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+  padding-top:10px;border-top:1px solid var(--hairline);
+  font:400 11.5px var(--font);color:var(--dim);
 }
-.drawer.dragging{transition:none}
+</style>
+<style id="panelcss">
+/* panel CSS is appended below — see the second style block */
+.axes-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--gap);align-items:stretch}
+/* THE PANEL. 12px radius + --border (not --hairline) is the artifact's own
+   §8.1 measurement; the rewrite had flattened every panel to a 4px box with
+   box-shadow:none, which read as a wireframe rather than a raised surface. */
+.curve,.wall,.ledger,.live,.hold,.profile-card,.rail{background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-xl);padding:var(--pad);display:flex;flex-direction:column;gap:12px;min-width:0}
+.curve-frame,.curve-foot,.hold-line,.hold-diag,.modal-title,.tui-head,.tui-foot,.ledger-head,.ledger-cols,.ledger-row,.axis,.big,.prov,.live-spine,.feed-head,.stages,.profile-models{font-family:var(--font)}
+.curve-frame{padding:22px;border:1px solid var(--border);border-radius:var(--radius-md);background:linear-gradient(180deg,color-mix(in srgb,var(--bg-2) 85%, transparent),var(--bg-2))}
+.curve-svg{overflow:visible}
+.c-axis,.c-legend,.c-note,.c-base-lbl,.c-annot,.c-val,.c-delta,.c-gate,.c-corpus{fill:var(--dim);font-size:11px}
+.c-base,.c-path,.c-ax{stroke:var(--fg);stroke-width:1.5;fill:none;stroke-dasharray:8 6}
+.c-pt{fill:var(--fg);stroke:var(--fg);stroke-width:2}
+.c-pt.worse{fill:var(--bg-2);stroke:var(--danger)}
+.c-delta.bad,.c-gate.bad{fill:var(--danger)}
+.ledger-head,.ledger-cols,.ledger-row,.axes,.axis,.prov,.feed-head,.tui-bar,.tui-head,.tui-foot,.modal-actions,.confirm-actions{display:flex;align-items:center;gap:12px;min-width:0}
+.ledger-cols,.ledger-row{display:grid;grid-template-columns:var(--ledger-cols);gap:12px;align-items:center}
+.ledger-cols{font:700 10px var(--font);letter-spacing:.16em;color:var(--dim);padding-bottom:8px;border-bottom:1px solid var(--hairline)}
+.ledger-row{padding:10px 0;border-bottom:1px solid color-mix(in srgb, var(--fg) 8%, transparent)}
+.ledger-row.live{color:var(--type)}
+.ledger-row.void{color:var(--dim)}
+.ledger-foot{display:flex;align-items:stretch;justify-content:space-between;gap:var(--gap);padding-top:12px;border-top:1px solid var(--hairline)}
+.pin,.axis{flex:1 1 0;min-width:0}
+.big{display:flex;flex-direction:column;gap:4px;font:700 13px var(--font)}
+.hold{gap:10px}
+.hold.lan,.hold.dead{border-color:var(--danger)}
+.hold-url,.hold-actions,.hold-diag{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.muted-box{padding:8px 10px;border:1px solid var(--danger);border-radius:var(--radius-sm)}
+.profile-card .debt,.profile-modal .debt{margin-top:2px}
+.mrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer}
+.mrow.on{border-color:var(--fg);background:color-mix(in srgb, var(--fg) 8%, transparent)}
+/* The subject row carries a fourth cell (the SUBJECT tag). The model id keeps
+   the larger share: it is the identifier being read, and the note beside it
+   ("memory count unobserved") is the part that can afford to truncate. */
+.mrow.subj{grid-template-columns:24px minmax(0,1.4fr) auto minmax(0,1fr)}
+.mrow .mid{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrow.radio{cursor:pointer}
+.subjtag{font:700 9.5px var(--font);letter-spacing:.16em;color:var(--bg);background:var(--accent);border-radius:var(--radius-pill);padding:2px 8px;white-space:nowrap}
 
-/* The lip is always visible and always the same 34px, so the handle never
-   moves. A control that relocates when you open it is a control you have to
-   re-find every time. */
-.dlip{
-  height:34px; min-height:34px; display:flex; align-items:center; gap:14px;
-  padding:0 18px; cursor:pointer; user-select:none;
-  border-bottom:1px solid transparent;
-}
-.drawer.open .dlip{border-bottom-color:var(--rule)}
-.dlip:hover{background:var(--raised)}
-.dgrip{width:26px;height:3px;background:var(--rule-2);border-radius:2px;flex:0 0 auto}
-.dlip:hover .dgrip{background:var(--dim)}
+/* ── PROFILE: THE TWO FROZEN AXES ────────────────────────────────────────
+   Subject and memory roster are drawn as two separate blocks, never one list.
+   They answer different questions (what is measured / what is varied) and the
+   single flat list they replaced is exactly what made transfer direction
+   unrecordable. */
+.skick{font:700 10px var(--font);letter-spacing:.18em;color:var(--dim)}
+.sval{font:700 var(--fs-ident)/1.4 var(--font);color:var(--type)}
+.profile-subject{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+.profile-models{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline}
+.insp-subject{display:flex;flex-direction:column;gap:4px;padding:9px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)}
+/* A baseline belonging to another model voids every Δ on the board, so it is
+   drawn at danger weight rather than as a note. */
+.insp-mismatch{padding:9px 11px;border:1px solid var(--danger);border-radius:var(--radius-sm);color:var(--fg);font:400 var(--fs-body)/1.5 var(--font)}
 
-.dtabs{display:flex;gap:2px;flex:0 0 auto}
-.dtab{
-  font:inherit; font-size:var(--fs-label); letter-spacing:.04em;
-  background:transparent; border:1px solid transparent; color:var(--dim);
-  padding:3px 10px; cursor:pointer; white-space:nowrap;
-}
-.dtab:hover{color:var(--fg)}
-.dtab.on{color:var(--type);border-color:var(--rule-2);background:var(--panel)}
-/* A tab carrying a live count earns emphasis; an empty one must not pretend to. */
-.dtab .dcount{color:var(--dim);margin-left:6px}
-.dtab.on .dcount{color:var(--fg)}
+/* ── THE INFERRED TRANSFER EDGE ──────────────────────────────────────────
+   Never a control. `self` is the only edge that can be stated completely, so
+   it is the only one drawn settled; everything else carries the unranked mark
+   so a cross-model edge can never read as though its direction were known. */
+.xfer{display:flex;flex-direction:column;gap:5px;padding:10px 11px;border:1px solid var(--border);border-radius:var(--radius-sm)}
+.xfer.self{border-color:var(--accent)}
+.xfer.cross,.xfer.mixed{border-style:dashed;border-color:var(--border-strong)}
+.xfer.unset{border-style:dashed;border-color:var(--hairline)}
+.xfer-kind{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--type)}
+.xfer-dir{font:700 10px var(--font);letter-spacing:.14em}
+.xfer-dir.settled{color:var(--accent)}
+.xfer-dir.unranked{color:var(--dim)}
 
-.dbody{flex:1;min-height:0;display:none;overflow:hidden}
-.drawer.open .dbody{display:flex}
-.dpane{flex:1;min-height:0;display:none;flex-direction:column}
-.dpane.on{display:flex}
-.dscroll{
-  flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
-  scrollbar-width:thin;scrollbar-color:var(--rule-2) transparent;
+/* The creation modal's three numbered sections. */
+.pick-sec{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid var(--hairline)}
+.pick-sec:last-child{border-bottom:0}
+.pick-rows{display:flex;flex-direction:column;gap:5px}
+.ackrow{display:flex;gap:10px;align-items:flex-start}
+.ackbox{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid var(--border-strong);border-radius:4px}
+.ackbox.on{background:var(--fg);color:var(--bg)}
+
+/* THE FREEZE REFUSAL. Rendered where the click happened, because a refusal the
+   operator cannot see is a swallowed error no matter where it was logged. The
+   server's own prose is shown verbatim — this surface never paraphrases it. */
+.freeze-refusal{display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--danger);border-radius:var(--radius-md)}
+.fr-head{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--danger)}
+.fr-code{font:700 12px var(--font);color:var(--fg)}
+.fr-reason{font:400 var(--fs-body)/1.5 var(--font);color:var(--fg);white-space:pre-line}
+.fr-note{font:400 11.5px/1.45 var(--font);color:var(--dim)}
+
+/* CONTROL PLANE UNREACHABLE. Full-width, directly under the top bar, because
+   it invalidates every write control on the board at once. Stated before the
+   operator clicks rather than as a failure afterwards. */
+.reach-warn{display:flex;flex-direction:column;gap:6px;padding:11px 14px;border:1px solid var(--danger);border-radius:var(--radius-lg);background:var(--surface-raised)}
+.rw-head{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--danger)}
+.rw-body{font:400 var(--fs-body)/1.55 var(--font);color:var(--fg)}
+.rw-fix{font:400 12px/1.5 var(--font);color:var(--fg);padding:7px 9px;border:1px solid var(--hairline);border-radius:var(--radius-sm);background:var(--bg);white-space:pre-wrap;word-break:break-word}
+.rw-note{font:400 11.5px/1.45 var(--font);color:var(--dim)}
+.modal-scrim{position:fixed;inset:0;background:rgba(2,16,10,.82);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:24px;z-index:100}
+.modal{width:min(920px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--radius-xl);padding:var(--pad);box-shadow:var(--shadow-term);display:flex;flex-direction:column;gap:12px}
+
+/* ── PROFILE INSPECTOR ─────────────────────────────────────────────────────
+   The read-only record of a frozen policy, and the ONLY surface that starts a
+   run. Two columns: the policy on the left, the evidence produced under it on
+   the right, with run start welded beneath the evidence.
+
+   WIDER THAN .modal ON PURPOSE. It carries a two-column layout with a run
+   table; at the shared 920px the history columns collapse into each other and
+   the log names — which are how an operator finds a cell on disk — ellipsize
+   to uselessness. It collapses to ONE column below 1100px rather than
+   compressing, because a squeezed two-column table is less legible than a
+   stacked one. */
+.inspector{width:min(1360px,calc(100vw - 48px));gap:0;padding:0}
+.insp-head{display:flex;align-items:baseline;gap:12px;padding:13px 16px;border-bottom:1px solid var(--hairline);flex-wrap:wrap}
+.insp-head .sub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.insp-body{display:grid;grid-template-columns:392px minmax(0,1fr);align-items:stretch;min-width:0}
+.insp-left{display:flex;flex-direction:column;border-right:1px solid var(--hairline);min-width:0}
+.insp-right{display:flex;flex-direction:column;min-width:0}
+.insp-sec{display:flex;flex-direction:column;gap:9px;padding:14px 16px;border-bottom:1px solid var(--hairline);min-width:0}
+.insp-secline{display:flex;align-items:baseline;gap:12px;min-width:0}
+/* Pushes the terminal block of each column to the bottom edge, so CREATION
+   SIDE EFFECTS and the run control align on one baseline regardless of how
+   many models or runs the columns above them carry. */
+.insp-spacer{flex:1 1 auto;min-height:0}
+.insp-sfx{border-bottom:0}
+.insp-models{display:flex;flex-direction:column;gap:5px;min-width:0}
+/* Rows here are NOT selectable — the profile is frozen. No pointer cursor and
+   no hover affordance, so nothing implies an edit that does not exist. */
+.insp-models .mrow{cursor:default;border-color:var(--hairline)}
+.insp-models .mrow.on{border-color:var(--fg);background:color-mix(in srgb, var(--fg) 8%, transparent)}
+.insp-models .mrow.off{color:var(--dim)}
+/* The doubled debt rule, inside the inspector. Same double border as .debt so
+   it survives greyscale, with room for the explanatory body. */
+.insp-debt{display:flex;flex-direction:column;gap:4px;margin:0 16px;padding:10px 0;border-top:2px solid var(--danger);border-bottom:2px solid var(--danger)}
+.debt-kick{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--danger)}
+.debt-body{font:400 12px/1.55 var(--font);color:var(--fg)}
+.insp-baseline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+.insp-baseline.bad .note{color:var(--fg)}
+.insp-overlay{display:flex;flex-direction:column;gap:5px;font:400 11.5px/1.5 var(--font);color:var(--dim)}
+.ov-row{display:flex;align-items:baseline;gap:8px;min-width:0}
+/* Solid = this profile. Hollow = a prior profile under a DIFFERENT allowlist,
+   drawn as its own series and never joined by a line — connecting them would
+   draw a trend across two different experiments. */
+.ov-dot{width:8px;height:8px;border-radius:50%;flex:none;border:1px solid var(--fg)}
+.ov-dot.solid{background:var(--fg)}
+.ov-dot.hollow{background:transparent;border-color:var(--dim)}
+.insp-cols,.insp-row{display:grid;grid-template-columns:58px minmax(0,1fr) 168px minmax(0,1.1fr);gap:12px;align-items:baseline;min-width:0}
+.insp-cols{font:700 10px var(--font);letter-spacing:.14em;color:var(--dim);padding:0 16px 6px;border-bottom:1px solid var(--hairline)}
+.insp-row{padding:7px 16px;font:400 12.5px var(--font);border-bottom:1px solid var(--hairline)}
+.insp-row .model,.insp-row .log{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.insp-row .arm{color:var(--type)}
+.insp-row .log{color:var(--dim)}
+.insp-empty{padding:14px 16px;font:400 12px/1.6 var(--font);color:var(--dim)}
+/* The ledger's profile chip is a BUTTON — it is the entry point to all of the
+   above. It must read as the tag it replaced, not as a form control. */
+.chip-btn{background:transparent;cursor:pointer;font-family:var(--font)}
+.chip-btn:hover{color:var(--type);border-color:var(--fg)}
+
+/* ── RUN CONTROL ───────────────────────────────────────────────────────────
+   Design 5b. Four states: idle · blocked (with the reason ON the control) ·
+   live (confirm, naming what is abandoned) · starting (bounded counter). */
+.runctl{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-top:1px solid var(--border-strong)}
+.runctl-head{display:flex;align-items:baseline;gap:12px;min-width:0}
+.runctl-form{display:flex;flex-direction:column;gap:8px}
+.rrow{display:grid;grid-template-columns:74px minmax(0,1fr);gap:12px;align-items:center}
+/* A pinned subject is a STATEMENT, not a disabled select. It is drawn as text
+   with its reason attached, so it never reads as a control awaiting unlock. */
+.rpin{display:flex;flex-direction:column;gap:2px;font:700 var(--fs-ident)/1.4 var(--font);color:var(--type);min-width:0}
+.rpin-why{font:400 10.5px/1.4 var(--font);letter-spacing:.02em;color:var(--dim)}
+.rrow label{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--dim)}
+.rsel{font:400 12px var(--font);background:var(--bg);color:var(--type);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:6px 8px;width:100%}
+.rsel:disabled{color:var(--dim);opacity:.6;cursor:not-allowed}
+/* The server's own words, verbatim. Pre-wrapped because the restatement is
+   composed as lines and its line breaks carry meaning. */
+.restate{white-space:pre-wrap;font:400 12px/1.6 var(--font);color:var(--type);padding:10px 12px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--bg)}
+.abandon{display:flex;flex-direction:column;gap:8px;padding:11px 13px;border:1px solid var(--danger);border-radius:var(--radius-md)}
+.abandon .note{color:var(--fg)}
+.rwhy{font:400 11.5px/1.5 var(--font);color:var(--dim)}
+.rwhy.bad{color:var(--danger)}
+.runbtn{font:700 11.5px var(--font);letter-spacing:.14em;padding:9px 16px;border-radius:var(--radius-sm);cursor:pointer;background:var(--check);color:var(--bg);border:1px solid var(--check);box-shadow:0 0 18px var(--glow);text-align:center}
+.runbtn:hover:not(:disabled){background:var(--type);border-color:var(--type)}
+.runbtn.armed{background:var(--danger);border-color:var(--danger);color:var(--bg);box-shadow:none}
+/* BLOCKED IS DASHED AND UNFILLED — it must not read as a button awaiting a
+   click. The reason rides the label itself, never a tooltip: nobody watching a
+   stream can hover, and a control disabled without saying why is
+   indistinguishable from one that is broken. */
+.runbtn.blocked,.runbtn:disabled{background:transparent;color:var(--dim);border:1px dashed var(--border-strong);box-shadow:none;cursor:not-allowed}
+.starting{display:flex;align-items:center;gap:11px;padding:9px 14px;border:1px solid var(--fg);border-radius:var(--radius-sm);flex-wrap:wrap}
+.starting .ttl{color:var(--type)}
+.dots{display:flex;gap:3px}
+.dots i{width:5px;height:5px;border-radius:50%;background:var(--fg);animation:dotsweep 315ms steps(1) infinite}
+.dots i:nth-child(2){animation-delay:105ms}
+.dots i:nth-child(3){animation-delay:210ms}
+/* The elapsed counter is the honest signal; the dots are decoration. Under
+   reduced motion the dots hold still and the counter still proves liveness. */
+@keyframes dotsweep{0%,32%{opacity:1}33%,100%{opacity:.18}}
+@media (prefers-reduced-motion:reduce){.dots i{animation:none;opacity:1}}
+
+@media (max-width:1100px){
+  .insp-body{grid-template-columns:minmax(0,1fr)}
+  .insp-left{border-right:0;border-bottom:1px solid var(--hairline)}
+  .insp-cols,.insp-row{grid-template-columns:52px minmax(0,1fr) 128px}
+  .insp-cols span:nth-child(4),.insp-row .log{display:none}
 }
 
-/* ── events pane ─────────────────────────────────────────────────────────── */
-/* Constant 34px row height per kind — the feed must never jitter as rows of
-   different kinds stream in, because a list that reflows is unreadable while
-   it is moving. */
-.evrow{
-  height:34px;min-height:34px;display:flex;align-items:center;gap:10px;
-  padding:0 18px;border-bottom:1px solid var(--rule);
-  font-size:var(--fs-label);white-space:nowrap;overflow:hidden;
+.tui-dock{position:fixed;right:14px;bottom:14px;z-index:80;max-width:calc(100vw - 28px)}
+.tui-bar,.tui-win{background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--radius-md);box-shadow:var(--shadow-raise)}
+.tui-bar{height:34px;padding:0 10px}
+.tui-win{padding:10px}
+.tui-screen{overflow:hidden;border:1px solid var(--hairline);border-radius:var(--radius-md);background:var(--bg)}
+.tui-pre{margin:0;padding:10px;font:400 13px/17px var(--font);white-space:pre;letter-spacing:0;font-variant-ligatures:none;overflow:auto}
+.tui-banner{padding:8px 10px;border-bottom:1px solid var(--hairline)}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PANEL INTERNALS
+
+   Everything below was EMITTED by the panel modules but had no definition
+   after the token rewrite — 69 classes and 8 custom properties across the
+   nine live panels. The Gate Wall in particular rendered as empty spans: an
+   entire axis of the board's two-axis argument was invisible on screen.
+
+   Rules here are keyed to the markup the panels ACTUALLY emit, captured by
+   rendering each module under Node against a live /api/board payload rather
+   than read off the source by eye.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── GATE WALL — the correctness axis ─────────────────────────────────────
+   Fixed square cells in a dense grid. The grid's column count is set inline
+   by wall.js from the gate count; only the cell metrics live here.
+
+   THE THREE STATES ARE THREE DIFFERENT SHAPES, not three colours — the board
+   has to survive a greyscale screenshot and a colour-blind reader:
+     green      solid fill          — was failing, now absent
+     red        hollow + danger rule — failing in the latest attempt
+     unobserved dashed, no fill      — never seen failing; NOT a weaker pass */
+.gwall{display:grid;gap:4px;grid-auto-rows:1fr}
+.gcell{aspect-ratio:1;border-radius:2px;background:var(--fg);border:1px solid var(--fg);min-width:0}
+.gcell.green{background:var(--fg);border-color:var(--fg)}
+.gcell.red{background:transparent;border-color:var(--danger)}
+.gcell.unobserved{background:transparent;border:1px dashed var(--dim)}
+/* LIVE CHOREOGRAPHY (ask 3). Palette verbatim from the design comp.
+   blue    resolved at attempt 1 — NOT "passed phase 1"; that square cannot exist
+   testing amber, pulsing — under test now, no outcome claimed
+   slate   still, never pulsing — abandoned mid-test; a stall is not a verdict */
+.gcell.blue{background:#82aaff;border-color:#82aaff}
+.gcell.testing{background:transparent;border-color:#ffb454;animation:gpulse 1.4s ease-in-out infinite}
+.gcell.slate{background:#7e8aa3;border-color:#7e8aa3}
+@keyframes gpulse{0%,100%{background:transparent}50%{background:#ffb454}}
+/* TWO KILL-SWITCHES, BOTH LEAVING A DISTINGUISHABLE STATIC STATE.
+   `.still` is the takeover freeze (a gate pulsing beside a serve that just fired
+   would assert causation the data cannot support). The media query is the
+   accessibility guarantee. Neither changes a colour — amber stays amber, so the
+   wall loses its motion and none of its meaning. */
+.gwall.still .gcell.testing{animation:none;background:color-mix(in srgb,#ffb454 34%,transparent)}
+@media (prefers-reduced-motion:reduce){
+  .gcell.testing{animation:none;background:color-mix(in srgb,#ffb454 34%,transparent)}
 }
-.evrow:hover{background:var(--panel)}
-.evt{color:var(--dim);flex:0 0 auto;font-size:calc(var(--fs-label) - 1px)}
-.evmark{flex:0 0 auto;width:12px;text-align:center;color:var(--dim)}
-.evname{color:var(--type);flex:0 0 auto}
-.evdetail{color:var(--fg);overflow:hidden;text-overflow:ellipsis;min-width:0}
-/* Paths truncate from the LEFT: the filename is the identifying token, not the
-   repo root every path shares. */
-.evpath{direction:rtl;text-align:left;unicode-bidi:plaintext}
-.evrow.thinking .evname,.evrow.thinking .evdetail{color:var(--dim)}
-.evrow.thinking{padding-left:36px}
-.evrow.error .evmark,.evrow.error .evname{color:var(--fail)}
+.wall-live{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:8px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font:400 12px var(--font);color:var(--dim);min-width:0}
+.wall-live.stalled{border-color:#7e8aa3}
+.wall-live .note{flex:1 1 260px;min-width:0}
+/* the legend's inline swatches — fixed 9px, never stretched by the grid */
+.gcell.sm{width:9px;height:9px;aspect-ratio:auto;display:inline-block;vertical-align:baseline;flex:none}
+.wall-legend{display:flex;align-items:center;gap:18px;flex-wrap:wrap;font:400 12px var(--font);color:var(--dim)}
+.wall-legend>span{display:inline-flex;align-items:center;gap:7px;min-width:0}
+.wall-legend .note{flex:1 1 220px;min-width:0}
+.wall-empty{display:flex;flex-direction:column;gap:7px;padding:18px;border:1px dashed var(--border-strong);border-radius:var(--radius-md)}
+.wall-clusters{display:flex;flex-direction:column;gap:6px;padding-top:10px;border-top:1px solid var(--hairline);min-width:0}
+.cl{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font:400 12.5px var(--font);color:var(--fg)}
+.cl>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cl>span:last-child{flex:none}
+
+/* ── TRANSFER CURVE — the empty/void frames ──────────────────────────────
+   These are the states where there is nothing to plot. They are designed
+   answers, not degraded plots, so they get real type hierarchy. */
+.curve-frame-head{font:700 13px var(--font);letter-spacing:.02em;color:var(--type)}
+.curve-frame-line{font:400 12.5px/1.6 var(--font);color:var(--fg);margin-top:6px}
+.curve-frame-note{font:400 12px/1.6 var(--font);color:var(--dim);margin-top:6px}
+.curve-frame.bad .curve-frame-head{color:var(--danger)}
+.curve-frame.bad{border-color:var(--danger)}
+.curve-foot{display:flex;gap:22px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--hairline);font:400 12px var(--font);color:var(--dim)}
+.curve{flex:1 1 0}
+
+/* ── RUN LEDGER — row cells ───────────────────────────────────────────────
+   The track list is on .ledger-row; these style the cells within it. The
+   long identity columns are the ONLY ones allowed to ellipsize — a truncated
+   number would be a lie, a truncated model name is merely abbreviated. */
+.ledger-row>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arm{font-weight:700;letter-spacing:.06em}
+.model{color:var(--fg)}
+.delta{color:var(--type);white-space:nowrap}
+.delta.worse{color:var(--danger)}
+.ledger-row.live .delta{color:var(--dim)}
+.ledger-empty{padding:18px;border:1px dashed var(--border-strong);border-radius:var(--radius-md);font:400 12.5px/1.6 var(--font);color:var(--dim)}
+/* THE PINNED FLOOR. 2px top rule + the row sitting on --bg while its peers
+   sit on --bg-2 is what makes the baseline read as a reference, not a peer. */
+.ledger-foot{background:var(--bg);border-top:2px solid var(--fg);margin:0 calc(var(--pad) * -1) calc(var(--pad) * -1);padding:12px var(--pad);border-radius:0 0 var(--radius-xl) var(--radius-xl)}
+.pin{display:flex;flex-direction:column;gap:4px;border-right:1px solid var(--hairline);padding-right:14px}
+.axes{display:grid;grid-template-columns:1fr 1fr;gap:0;flex:1 1 0;min-width:0}
+.axis{display:flex;flex-direction:column;gap:6px;padding:0 14px}
+.axis+.axis{border-left:1px solid var(--hairline)}
+/* EFFICIENCY and CORRECTNESS headline numbers — same size, side by side,
+   never combined. The hard rule made typographic. */
+.big{flex-direction:row;gap:26px;align-items:baseline;flex-wrap:wrap;font:700 var(--fs-metric)/1.1 var(--font);color:var(--type)}
+.big .null,.big .muted{font:400 14px var(--font)}
+
+/* ── LIVE RUN ─────────────────────────────────────────────────────────────
+   TWO columns: spine | feed. The third column (extraction) was removed in
+   WO-BOARD-EXTRACT-1 — extraction is now a popout, because a run-scoped
+   column could only ever show ONE extraction and vanished behind a live run.
+   The 380px track went with it: leaving it would reserve dead space that
+   nothing renders into, and the feed would stay artificially narrow. */
+.live{display:grid;grid-template-columns:340px minmax(0,1fr);gap:var(--gap);align-items:start}
+.live-spine,.live-feed{display:flex;flex-direction:column;gap:8px;min-width:0}
+.live-feed{min-height:0}
+.spine{display:flex;flex-direction:column;gap:8px}
+/* A PHASE. The running phase carries a 3px left rule; a done phase does not.
+   `.now` is the only bright tick — motion is never implied on a stopped cell. */
+.ph{border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 11px;display:flex;flex-direction:column;gap:7px;min-width:0}
+.ph.running{border-color:var(--fg);border-left-width:3px;background:var(--bg)}
+.ph.done{border-color:var(--border)}
+.ph.pending{border-color:var(--hairline);color:var(--dim)}
+.ph-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font:700 12px var(--font);color:var(--dim)}
+.ph.running .ph-top,.ph.done .ph-top{color:var(--type)}
+.ph-state{letter-spacing:.14em;flex:none}
+.ph-note{font:400 11.5px var(--font);color:var(--dim)}
+.ticks{display:flex;gap:3px}
+.tick{flex:1;height:6px;border:1px solid var(--border-strong);border-radius:1px}
+.tick.done{background:var(--fg);border-color:var(--fg)}
+.tick.now{background:var(--fg);border-color:var(--fg);opacity:.45}
+.prov-tot{display:flex;flex-direction:column;gap:5px;padding-top:9px;border-top:1px solid var(--hairline)}
+
+/* ── EVENT FEED ───────────────────────────────────────────────────────────
+   34px CONSTANT ROW HEIGHT is load-bearing, not cosmetic: sticky-bottom
+   arithmetic (BOTTOM_EPS=24 in live.js) assumes rows never change height.
+   Anything that alters row height silently breaks autoscroll. */
+.feed-head{flex-wrap:wrap;gap:8px}
+.evbox{flex:1;min-height:240px;max-height:420px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg)}
+.evrow{display:grid;grid-template-columns:74px 22px auto minmax(0,1fr);gap:10px;align-items:center;height:34px;padding:0 11px;border-bottom:1px solid var(--hairline);font:400 12.5px var(--font);color:var(--fg)}
+.evt{color:var(--dim);font-size:11.5px}
+.evmark{text-align:center;font-weight:700;color:var(--fg)}
+.evname{color:var(--type);white-space:nowrap}
+.evdetail{color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.evrow.error .evmark,.evrow.error .evname,.evrow.error .evdetail{color:var(--danger)}
+.evrow.thinking .evname,.evrow.thinking .evdetail{color:var(--dim);font-style:italic}
 .evrow.lifecycle .evname{color:var(--dim)}
+.evpath{font-size:12px}
+/* THE ONLY MOTION ON THE BOARD. Background + inset rule, one shot. Never
+   height/margin/transform — those would reflow the feed mid-scroll. */
+@keyframes evflash{from{background:color-mix(in srgb,var(--fg) 14%,transparent);box-shadow:inset 3px 0 0 var(--fg)}to{background:transparent;box-shadow:inset 3px 0 0 transparent}}
+.evrow.fresh{animation:evflash 1s var(--ease) 1}
+.evrow.fresh.error{animation-duration:1.6s}
+@media (prefers-reduced-motion:reduce){.evrow.fresh{animation:none;box-shadow:inset 3px 0 0 var(--fg)}}
+.pill{position:absolute;left:50%;transform:translateX(-50%);bottom:10px;font:700 11px var(--font);letter-spacing:.14em;color:var(--bg);background:var(--fg);border:0;border-radius:var(--radius-pill);padding:5px 14px;cursor:pointer;z-index:5}
+.live-feed{position:relative}
+.pad{padding:18px}
 
-.dfilters{
-  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-  padding:6px 18px;border-bottom:1px solid var(--rule);flex:0 0 auto;
-}
-.chip{
-  font:inherit;font-size:calc(var(--fs-label) - 1px);
-  background:transparent;border:1px solid var(--rule-2);color:var(--dim);
-  padding:2px 8px;cursor:pointer;white-space:nowrap;
-}
-.chip:hover{color:var(--fg)}
-.chip.on{color:var(--type);background:var(--panel)}
-.chip.off{opacity:.45;text-decoration:line-through}
+/* ── EXTRACTION STAGES ────────────────────────────────────────────────────
+   The state word is `complete`, NEVER `done`. A prior drift bug keyed the
+   CSS on `done`; every finished stage rendered blank and the counter read
+   0/10. The vocabulary here must match scripts/backgammon_sxe.py.
+   GATED is a double rule PLUS the word, so it survives greyscale. */
+.stages{display:flex;flex-direction:column;gap:4px;min-width:0}
+.stage{display:grid;grid-template-columns:14px minmax(0,1fr) auto;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font:400 12.5px var(--font);color:var(--fg);min-width:0}
+.sg{font-weight:700;text-align:center;color:var(--dim)}
+.sn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss{font-size:11px;letter-spacing:.14em;color:var(--dim);flex:none}
+.stage.complete .sg{color:var(--type)}
+.stage.running{border-color:var(--fg);background:var(--bg)}
+.stage.running .sg,.stage.running .ss{color:var(--type)}
+.stage.pending{border-color:var(--hairline);color:var(--dim)}
+.stage.failed{border-color:var(--danger);color:var(--danger)}
+.stage.failed .sg,.stage.failed .ss{color:var(--danger)}
+.stage.gated{border-color:var(--danger);border-top-width:2px;border-bottom-width:2px;color:var(--type)}
+.stage.gated .sg,.stage.gated .ss{color:var(--danger)}
 
-/* ── extraction pane ─────────────────────────────────────────────────────── */
-/* 44px minimum, but a gated stage carries a full-sentence reason and is allowed
-   to grow — truncating the reason a gate refused on would defeat the point. */
-.strow{
-  min-height:44px;display:flex;align-items:flex-start;gap:12px;
-  padding:9px 18px;border-bottom:1px solid var(--rule);font-size:var(--fs-label);
-}
-.stmark{flex:0 0 auto;width:14px;text-align:center;color:var(--dim);line-height:1.5}
-.stname{flex:0 0 auto;width:150px;color:var(--type);letter-spacing:.03em}
-.stdetail{flex:1;min-width:0;color:var(--fg);line-height:1.5;overflow-wrap:anywhere}
-.stright{flex:0 0 auto;color:var(--dim);text-align:right}
-.strow.done .stmark{color:var(--pass)}
-.strow.running .stmark{color:var(--arm-a)}
-.strow.failed .stmark,.strow.failed .stname{color:var(--fail)}
-/* GATED is not a failure — it is the system refusing to proceed on bad input.
-   It gets its own treatment (a left rule, not the fail hue) so a viewer never
-   reads a working integrity gate as a crash. */
-.strow.gated{background:rgba(255,107,107,.05);border-left:2px solid var(--fail)}
-.strow.gated .stmark{color:var(--fail)}
-.strow.pending{opacity:.5}
-.strow.pending .stname{color:var(--fg)}
+/* ── HONESTY RAIL ─────────────────────────────────────────────────────────
+   SIX ACROSS at 1920 (artifact §8.1), reflowing to auto-fit on narrow
+   viewports. It was inheriting flex-direction:column from the panel rule and
+   stacking as six full-width blocks down the page. */
+.rail{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;background:transparent;border:0;padding:0}
+.railbox{background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 12px;display:flex;flex-direction:column;gap:5px;min-width:0}
+.railbox.debt-box{border-color:var(--danger)}
+.label{font:700 10.5px var(--font);letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
+.railval{font:700 15px var(--font);color:var(--type);word-break:break-word}
+.railval .label{font-size:10.5px;color:var(--dim)}
+.railnote{font:400 11.5px/1.45 var(--font);color:var(--dim)}
 
-/* ── control region ──────────────────────────────────────────────────────── */
-.dctl{
-  flex:0 0 auto;min-height:168px;display:flex;flex-direction:column;gap:10px;
-  padding:12px 18px;border-left:1px solid var(--rule);width:340px;
+/* ── RECALL (demoted) ─────────────────────────────────────────────────────
+   Proves retrieval fires. Deliberately the quietest panel on the board. */
+.pbody{display:flex;flex-direction:column;gap:8px;min-width:0;padding:4px 0}
+.collect{font:700 15px var(--font);letter-spacing:.12em;color:var(--type)}
+.ident{font:400 var(--fs-ident) var(--font);color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.cand{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--hairline);font:400 12px var(--font)}
+.disp{font-weight:700;flex:none}
+.atomic{padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);font:400 12.5px/1.6 var(--font);color:var(--fg)}
+.state{font-weight:700;letter-spacing:.1em}
+.fail{color:var(--danger);font-family:var(--font)}
+
+/* ── MEMORY PROFILE ───────────────────────────────────────────────────────*/
+.modal-head{display:flex;flex-direction:column;gap:5px;padding-bottom:12px;border-bottom:1px solid var(--hairline)}
+.modal-title{font:700 17px var(--font);color:var(--type)}
+.modal-body{display:flex;flex-direction:column;gap:5px;max-height:352px;overflow-y:auto;min-height:0}
+.modal-foot{display:flex;flex-direction:column;gap:9px;padding-top:12px;border-top:1px solid var(--hairline)}
+.mcheck{font-weight:700;text-align:center;color:var(--type)}
+.mid{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.mnote{font-size:11.5px;color:var(--fg);flex:none}
+.mnote.muted{color:var(--dim)}
+.debt-body{border-top:2px solid var(--danger);border-bottom:2px solid var(--danger);padding:11px 0}
+.profile-models{gap:5px;flex-direction:column;flex-wrap:nowrap}
+
+/* ── TUI POPOUT ───────────────────────────────────────────────────────────
+   The window is sized to the 40×130 character grid by tui.js inline; these
+   rules must never impose a width that would squeeze that grid. */
+.tui-brand{font:700 12px var(--font);color:var(--type);flex:none}
+.tui-stat{font:400 12px var(--font);color:var(--fg);flex:none}
+.tui-state{display:flex;flex-direction:column;gap:7px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--bg-2);min-height:132px}
+.tui-line{font:400 12.5px/1.55 var(--font);color:var(--fg)}
+.tui-confirm{width:min(376px,calc(100vw - 48px))}
+.tui-confirm .body{line-height:1.65}
+.tui-pre.dim{opacity:.55}
+.btn.destroy.solid{background:var(--danger);color:var(--bg);border-color:var(--danger)}
+.confirm-actions{flex-direction:column;align-items:stretch;gap:8px}
+.confirm-actions .btn{text-align:center}
+
+/* ── POPOUT SHELL (panels/popout.js) ──────────────────────────────────────
+   Generalised from the TUI dock. Docks stack UPWARD from bottom-right and
+   their `bottom` is computed per dockIndex in JS, so two popouts can never
+   land on the same slot. The window width is set inline FROM its content —
+   these rules must never impose one, which is the defect the TUI panel
+   exists to fix ("the space was not made for the TUI"). */
+.pop-dock{position:fixed;right:14px;z-index:80;max-width:calc(100vw - 28px)}
+.pop-bar,.pop-win{background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--radius-md);box-shadow:var(--shadow-raise)}
+.pop-bar{height:34px;padding:0 10px;display:flex;align-items:center;gap:12px;min-width:0}
+.pop-win{padding:10px;display:flex;flex-direction:column;gap:9px;max-width:calc(100vw - 28px);max-height:calc(100vh - 40px)}
+.pop-head{display:flex;align-items:center;gap:12px;min-width:0}
+.pop-brand{font:700 12px var(--font);color:var(--type);flex:none}
+.pop-stat{font:400 12px var(--font);color:var(--fg);flex:none}
+.pop-body{overflow:auto;min-height:0;font-family:var(--font)}
+.pop-foot{font:400 11.5px var(--font);color:var(--dim);padding-top:8px;border-top:1px solid var(--hairline)}
+.pop-tabs{display:flex;gap:6px;border-bottom:1px solid var(--hairline);padding-bottom:8px}
+.pop-tab{font:700 10.5px var(--font);letter-spacing:.14em;color:var(--dim);background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);padding:5px 11px;cursor:pointer}
+/* The ACTIVE tab differs by fill AND border, not hue alone — the board has to
+   survive a greyscale screenshot. */
+.pop-tab.on{color:var(--type);border-color:var(--fg);background:color-mix(in srgb, var(--fg) 10%, transparent)}
+.pop-n{color:var(--fg);font-weight:400}
+.pop-confirm{width:min(420px,calc(100vw - 48px))}
+
+/* ── EXTRACTION: PROCESS VIEW ─────────────────────────────────────────── */
+.xproc{display:flex;flex-direction:column;gap:9px}
+/* A measured count sits beside the stage name. 0 is rendered, never blanked. */
+.scount{font:400 11.5px var(--font);color:var(--fg);flex:none}
+.stage{grid-template-columns:14px minmax(0,1fr) auto auto}
+
+/* ── EXTRACTION: QUEUE VIEW ───────────────────────────────────────────────
+   Column track is shared by the header and every row so they cannot drift. */
+.xq{display:flex;flex-direction:column;min-width:0}
+.xq-cols,.xq-row{display:grid;grid-template-columns:150px 118px 132px minmax(0,1fr) 128px 92px 116px;gap:12px;align-items:center;min-width:0}
+.xq-cols{font:700 10px var(--font);letter-spacing:.14em;color:var(--dim);padding:0 0 8px;border-bottom:1px solid var(--hairline)}
+.xq-row{padding:9px 0;border-bottom:1px solid var(--hairline);font:400 12.5px var(--font);color:var(--fg)}
+.xq-row.live{background:var(--bg-2)}
+.xq-sess{color:var(--type);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xq-origin,.xq-model,.xq-corpus,.xq-wrote{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.xq-origin{color:var(--dim)}
+.xq-stage{display:flex;align-items:center;gap:9px;min-width:0}
+.xq-slabel{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xq-state{font:700 10.5px var(--font);letter-spacing:.12em;color:var(--fg);flex:none}
+.xq-state.run{color:var(--type)}
+.xq-state.gated{color:var(--danger)}
+.xq-state.zero,.xq-state.pending{color:var(--dim)}
+/* STAGE PIPS. Distinguished by FILL and BORDER STYLE, never colour alone:
+   a dashed empty pip and a solid filled one are different in greyscale. */
+.pips{display:flex;gap:2px;flex:none}
+.pip{width:12px;height:7px;border-radius:1px;border:1px dashed var(--dim);background:transparent}
+.pip.done{background:var(--fg);border:1px solid var(--fg)}
+.pip.todo{background:transparent;border:1px dashed var(--dim)}
+.pip.gated,.pip.failed{background:transparent;border:1px solid var(--danger)}
+.xq-unwired{display:flex;flex-direction:column;gap:5px;padding-top:12px;margin-top:4px;border-top:1px solid var(--hairline)}
+
+/* ── EXTRACTION: DEDUP VIEW ───────────────────────────────────────────────
+   The threshold, the observed range and the flagged/kept split are the
+   tuning instrument — they are headline figures, not a footnote. */
+.xd-head{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding-bottom:10px}
+.xd-stat{background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 12px;display:flex;flex-direction:column;gap:5px;min-width:0}
+/* FLAGGED-NEVER-DROPPED is stated on the surface, bordered so it reads as a
+   standing invariant rather than a passing note. */
+.xd-invariant{display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--border-strong);border-radius:var(--radius-lg);margin-bottom:10px}
+.xd{display:flex;flex-direction:column;min-width:0}
+.xd-cols,.xd-row{display:grid;grid-template-columns:86px 124px 118px 150px minmax(0,1fr) 78px 96px;gap:12px;align-items:center;min-width:0}
+.xd-cols{font:700 10px var(--font);letter-spacing:.14em;color:var(--dim);padding-bottom:8px;border-bottom:1px solid var(--hairline)}
+.xd-row{padding:8px 0;border-bottom:1px solid var(--hairline);font:400 12.5px var(--font);color:var(--fg)}
+.xd-score{font-weight:700;color:var(--type)}
+.xd-score.hot{color:var(--danger)}
+.xd-src,.xd-fp,.xd-match,.xd-model{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.xd-fp,.xd-match{color:var(--dim)}
+.xd-size{color:var(--dim);font-size:11.5px}
+.xd-decision{font:700 10.5px var(--font);letter-spacing:.12em;color:var(--fg)}
+/* FLAGGED is not an error state — it is a decision recorded for review, and
+   the memory was KEPT. Marked with the type colour, never the danger colour. */
+.xd-decision.flagged{color:var(--type)}
+.xd-decision.kept{color:var(--dim)}
+.xd-bodies{display:flex;flex-direction:column;gap:6px;padding-top:12px;margin-top:8px;border-top:1px solid var(--hairline)}
+.xd-q{font:400 11.5px var(--font);color:var(--fg);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;overflow-x:auto;white-space:pre}
+
+/* ── VIEWPORT STEP-DOWN for the new grids ────────────────────────────────
+   Measured breakpoints. Nothing is ever hidden — the rail reflows and the
+   live panel stacks rather than clipping a column. */
+@media (max-width:1600px){
+  .live{grid-template-columns:300px minmax(0,1fr)}
+  .rail{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
-.dctl-row{display:flex;flex-direction:column;gap:4px}
-.dctl label{font-size:calc(var(--fs-label) - 1px);color:var(--dim);letter-spacing:.04em}
-.dsel{
-  font:inherit;font-size:var(--fs-label);
-  background:var(--panel);color:var(--type);
-  border:1px solid var(--rule-2);padding:5px 8px;width:100%;
+@media (max-width:1400px){
+  .live{grid-template-columns:minmax(0,1fr)}
+  .live-spine{grid-column:1 / -1}
 }
-.dsel:disabled{color:var(--dim);opacity:.6;cursor:not-allowed}
-.dbtn{
-  font:inherit;font-size:var(--fs-label);letter-spacing:.04em;
-  background:var(--panel);color:var(--type);
-  border:1px solid var(--rule-2);padding:7px 12px;cursor:pointer;
+@media (max-width:1100px){
+  .axes-row{grid-template-columns:minmax(0,1fr)}
+  .live{grid-template-columns:minmax(0,1fr)}
+  .rail{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .axes{grid-template-columns:1fr}
+  .axis+.axis{border-left:0;border-top:1px solid var(--hairline);padding-top:10px}
 }
-.dbtn:hover:not(:disabled){background:var(--raised);border-color:var(--dim)}
-.dbtn:disabled{color:var(--dim);opacity:.5;cursor:not-allowed}
-.dbtn.armed{border-color:var(--fail);color:var(--fail)}
-/* The restatement is what the operator is actually agreeing to. It is never
-   truncated and never collapsed behind a hover. */
-.drestate{
-  font-size:calc(var(--fs-label) - 1px);color:var(--fg);line-height:1.5;
-  background:var(--panel);border:1px solid var(--rule);padding:8px 10px;
-  overflow-wrap:anywhere;
-}
-.dwhy{font-size:calc(var(--fs-label) - 1px);color:var(--dim);line-height:1.45}
-.dwhy.bad{color:var(--fail)}
 </style>
 </head>
 <body>

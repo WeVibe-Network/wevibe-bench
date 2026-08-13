@@ -1,10 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// WEVIBE BENCH DASHBOARD — JSON CONTRACT v1.0
+// WEVIBE BENCH DASHBOARD — JSON CONTRACT v2.0
 //
 // This module is the SINGLE definition of what the board consumes. Diff it
 // against what the backend actually emits.
 //
-// THREE RULES THAT ARE NOT STYLE CHOICES:
+// THE QUESTION THE BOARD ANSWERS: does a growing memory corpus make the SAME
+// local model finish the SAME build in fewer turns, fewer tokens and less time
+// — and at what corpus size does that stop being true?
+//
+// FOUR RULES THAT ARE NOT STYLE CHOICES:
+//
+//   0. CORRECTNESS AND EFFICIENCY ARE TWO AXES, NEVER ONE NUMBER.
+//        correctness  gates passed / total
+//        efficiency   turns · tokens · wall time
+//      They are reported adjacent, at equal weight, and are NEVER multiplied,
+//      averaged, weighted or collapsed into a score. A run can be faster AND
+//      worse — that is a real and important outcome, and any presentation that
+//      lets faster-and-worse read as a win is a broken presentation.
 //
 //   1. Every field is nullable. `null` means NOT OBSERVED and must render as an
 //      explicit state — never as 0, never as absence. Three distinct null-ish
@@ -28,10 +40,46 @@
 //   - shadow recall              (would break arm comparability; killed)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const CONTRACT_VERSION = "1.1";
+export const CONTRACT_VERSION = "2.0";
 
 /** Gate-level counts cluster within cell. Below this, NO delta and NO CI. */
 export const MIN_CELLS_PER_ARM = 3;
+
+/**
+ * Phases per cell. THREE, not six.
+ *
+ *   1  BUILD   harness label `initial`
+ *   2  GRADE   verdict-pass-1 / feedback-1
+ *   3  GRADE   verdict-pass-2 / feedback-2
+ *
+ * The six work orders are CHUNKS INTERNAL TO PHASE 1. Rendering "6 phases"
+ * (an earlier misreading) makes a cell in phase 2 look 1/6 done when it is
+ * 2/3 done.
+ */
+export const PHASES_PER_CELL = 3;
+export const CHUNKS_IN_BUILD = 6;
+
+/**
+ * The five states of the transfer curve. The curve renderer consumes this
+ * decision; it does not re-derive it. See sources/stack-ledger.mjs.
+ *
+ *   no_baseline    no OFF cell exists — nothing may be drawn
+ *   baseline_void  an OFF cell exists but is void-instrument: no valid floor
+ *   baseline_only  the floor, labelled n=1, and no ON runs
+ *   n1_on          one ON run — a single delta, and NO LINE (two points would
+ *                  imply a trend one run cannot support)
+ *   curve          n≥2 — the only state where a line is legitimate
+ *   regression     the newest ON cell is at or above the floor. Drawn at FULL
+ *                  weight — this is the finding the benchmark exists to catch
+ */
+export const STACK_STATES = /** @type {const} */ ([
+  "no_baseline",
+  "baseline_void",
+  "baseline_only",
+  "n1_on",
+  "curve",
+  "regression",
+]);
 
 /**
  * Why a cell was kept out of the arm delta. `scored` is the only value that
@@ -96,16 +144,149 @@ export function emptyBoard() {
       turns: null,
       tokens: { input: null, output: null, injected_block: null },
       state: null, // running | complete | aborted | null
+      session_id: null,
+      log_silent_s: null,
+      terminal_status: null,
     },
+
+    // ── THE LONGITUDINAL SERIES ───────────────────────────────────────────
+    // Owned solely by sources/stack-ledger.mjs — the ONE source that spans run
+    // directories, because a cumulative campaign writes each cell to its own.
+    //
+    // TWO AXES, ADJACENT AND EQUAL, NEVER BLENDED:
+    //   turns/tokens/wall_seconds  EFFICIENCY
+    //   gates{failed,total}        CORRECTNESS
+    // Nothing in this contract multiplies, averages or ranks them together. An
+    // ON cell CAN be faster and worse; that must read as exactly that.
+    stack: {
+      id: null,
+      state: null, // STACK_STATES
+      baseline: null, // the ONE OFF cell. n=1 BY DESIGN, never a distribution
+      baseline_n: 0,
+      baseline_scorable: false,
+      baseline_candidates: 0,
+      runs: [], // ON cells, oldest first — the curve reads left to right
+      all: [],
+      excluded: { total: 0, different_experiment: 0 },
+      // The denominator is the count of gates OBSERVED FAILING, not the suite
+      // size. The harness publishes failed gates only (report.mjs writes no
+      // total), so a suite size does not exist on disk and is never invented.
+      gate_universe: null,
+      gate_universe_note: null,
+      // Corpus is accumulated from per-cell commit deltas. False = a cell in
+      // the chain reported null, so the running total has a hole in it and is
+      // not a total.
+      corpus_complete: false,
+      phases_per_cell: PHASES_PER_CELL,
+    },
+
+    // ── HOLD FOR REVIEW ───────────────────────────────────────────────────
+    // null = no hold file. The panel renders NOTHING — not an empty box, not a
+    // spinner. Absence is a specified state, not an omission.
+    // RELEASE IS NEVER BLOCKED BY A DEAD UI: when ui_healthy is false no link
+    // is shown (handing over a dead URL wastes the operator's time twice) but
+    // the release control is always present.
+    hold: null,
+
+    // ── MEMORY PROFILE ────────────────────────────────────────────────────
+    // One per ON stack, frozen at creation, never editable.
+    //
+    // TWO AXES, FROZEN SEPARATELY, NEVER CONFLATED (WO-BOARD-PROFILE-2):
+    //
+    //   subject_model   the OFF→ON pair — THE MEASUREMENT. Both arms are
+    //                   always this one model. An ON cell measured against an
+    //                   OFF floor on a DIFFERENT model yields a delta between
+    //                   two models' capabilities, which is not the claim.
+    //                   ENFORCED at /api/run/start.
+    //   memory_models   producer models eligible for injection — THE
+    //                   EXPERIMENT VARIABLE. NOT enforced (see below).
+    //
+    // `transfer` is DERIVED from those two on every read and is never stored:
+    // `self` (roster == [subject] — the base measurement running today),
+    // `cross`, or `mixed`. Its `direction` is `same` for self and `unranked`
+    // for everything else. There is no direction picker anywhere in the UI —
+    // ranking two models requires a measured floor for each, and this board
+    // ranks nothing by declaration.
+    //
+    // `enforced` refers ONLY to the memory roster and is hardcoded false: no
+    // recall request carries a producer-model allowlist today, so the roster is
+    // declared and not applied. The badge disappears the day the filter ships.
+    //
+    // DURABLE SINCE WO-BOARD-PROFILE-1. This group is populated by
+    // sources/control-plane.mjs from the control plane's on-disk profile store.
+    // It was previously written ONLY by the browser's create handler and was
+    // overwritten by the next poll — which is why creating a profile appeared
+    // to do nothing and did not survive a refresh.
+    //
+    // `runs` carries the cells the control plane launched while this profile
+    // was active. A cell launched at the CLI is real but UNATTRIBUTED and is
+    // deliberately absent: sweeping it in would inflate the history with cells
+    // never run under this allowlist.
+    profile: {
+      exists: false,
+      id: null,
+      subject_model: null,
+      memory_models: [],
+      transfer: null, // { kind, direction, self, foreign[], note } — derived
+      created_at: null,
+      enforced: false,
+      stack_id: null,
+      runs: [],
+    },
+
+    // Every frozen profile — `active` plus `prior`. The inspector draws prior
+    // profiles as a hollow overlay that is NEVER joined by a line to the active
+    // series: they were measured under a different allowlist, so connecting
+    // them would draw a trend across two different experiments.
+    profiles: null,
+
+    // ── THE UNIFIED EXTRACTION QUEUE ──────────────────────────────────────
+    //
+    // EVERY extraction on this machine, oldest trimmed — NOT the single job the
+    // control plane holds in memory, and deliberately NOT scoped to
+    // `board.profile`. A profile is a READ filter over one stack; extraction is
+    // a WRITE into one shared corpus, and the sessions that feed it are not
+    // profile-shaped. Scoping the queue to the loaded profile hides rows that
+    // are changing the very corpus the loaded profile reads from.
+    //
+    // Owned by sources/extraction-inventory.mjs, which reads the harness's
+    // telemetry DB. `null` = no extraction has ever run on this machine (the
+    // DB is created by the first one), which is a designed state and renders as
+    // such — not as an error.
+    //
+    // SERIAL EXECUTION IS UNCHANGED. This is a unified VIEW; the control plane
+    // still runs exactly one extraction at a time (control/extraction.mjs:106 —
+    // two concurrent extractions against one org interleave submissions into
+    // the shared corpus). Rows waiting behind the running one render PENDING.
+    extraction_queue: null,
+
+    // ── THE DEDUP DECISION VIEW ───────────────────────────────────────────
+    //
+    // Near-duplicate candidates, FLAGGED AND KEPT. The invariant this surface
+    // exists to make visible is that flagging never drops a memory: every row
+    // here was submitted. There is no mechanism anywhere in this path to
+    // discard one, and the panel states that in words rather than implying it.
+    //
+    // `distribution` is the actual tuning instrument — it spans every scored
+    // candidate, not just the flagged ones, so the question "is the threshold
+    // in the right place" is answerable rather than only "what did the current
+    // threshold catch".
+    //
+    // Carries FINGERPRINTS AND SCORES, never memory bodies: the board is a
+    // streaming surface and everything on it is public forever. The bodies are
+    // in the telemetry DB on the machine, and the panel names the query.
+    dedup: null,
 
     provenance: {
       attestation: ATTESTATION,
       gate_mode: null, // auto-approve | human | null
+      gate_mode_source: null,
       policy_version: null,
       policy_anchor_status: null,
       worker_image_fp: null,
       leader_fp: null,
       corpus: "benchmark",
+      seed: null,
     },
 
     arm_delta: {

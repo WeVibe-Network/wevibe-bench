@@ -1,22 +1,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// WEVIBE BENCH DASHBOARD — BOARD RENDERER
+// WEVIBE BENCH BOARD v2 — RENDERER
 //
-// DELIBERATE DEVIATION FROM THE BRIEF (single-file React):
-// This is dependency-free vanilla JS. React from a CDN would make the board a
-// blank page the moment the network hiccups — on a live stream, with the whole
-// stack running locally, that is an unacceptable failure mode for zero benefit.
-// The component structure is preserved (pure render functions over one state
-// object, diffed by a cheap key); there is simply no framework and no build
-// step. It runs from `node server.mjs` on stock Node with nothing installed.
+// Dependency-free vanilla JS. React from a CDN would make the board a blank
+// page the moment the network hiccups — on a live stream, with the whole stack
+// running locally, that is an unacceptable failure mode for zero benefit.
+//
+// THE QUESTION THE BOARD ANSWERS: does a growing memory corpus make the SAME
+// local model finish the SAME build in fewer turns, fewer tokens and less time
+// — and at what corpus size does that stop being true?
 //
 // RENDER RULES:
-//  - null is a designed state. Every renderer distinguishes three things:
+//  - null is a designed state. Three kinds of nothing stay visually distinct:
 //      unobserved  — not measured yet
 //      unwired     — the source that would carry it is not connected
 //      zero        — measured, and the answer is 0 (a real result)
-//  - No hover-dependent information. The streamer is talking, not pointing.
-//  - Panels re-render only when their slice actually changed, so the board does
-//    not flicker every poll.
+//  - CORRECTNESS and EFFICIENCY are two axes, never blended. Nothing anywhere
+//    combines them into one number.
+//  - A stopped cell must never imply motion.
+//  - No hover-dependent information.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const POLL_MS = 2000;
@@ -71,16 +72,16 @@ export function clip(s, n) {
 
 // ── arm vocabulary ───────────────────────────────────────────────────────────
 // Arm identity is carried by TWO channels — colour AND the literal words
-// "MEMORY ON" / "CONTROL" — so the board still reads correctly in greyscale,
-// under heavy compression, and for a viewer with colour vision deficiency.
+// "MEMORY ON" / "CONTROL" — so the board reads correctly in greyscale and for
+// a viewer with colour vision deficiency.
 
 export const ARM = {
-  on: { cls: "a", label: "MEMORY ON", short: "A", color: "var(--arm-a)" },
-  off: { cls: "b", label: "CONTROL", short: "B", color: "var(--arm-b)" },
+  on: { cls: "a", label: "MEMORY ON", short: "A", color: "var(--fg)" },
+  off: { cls: "b", label: "CONTROL", short: "B", color: "var(--dim)" },
 };
 
 export function armOf(arm) {
-  return ARM[arm] ?? { cls: "null", label: "UNKNOWN ARM", short: "—", color: "var(--null)" };
+  return ARM[arm] ?? { cls: "null", label: "UNKNOWN ARM", short: "—", color: "var(--dim)" };
 }
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -108,51 +109,362 @@ async function poll() {
 // ── render ───────────────────────────────────────────────────────────────────
 
 import { renderTopbar, renderProvenance } from "./panels/chrome.js";
+import { renderCurve, setCurveMetric } from "./panels/curve.js";
 import { renderWall } from "./panels/wall.js";
-import { renderHero } from "./panels/hero.js";
-import { renderRecall } from "./panels/recall.js";
-import { renderTicker, renderCell } from "./panels/ticker.js";
+import { renderLedger } from "./panels/ledger.js";
+import { renderLive, paintFeed, toggleKind, jumpToLive } from "./panels/live.js";
+import { renderHold } from "./panels/hold.js";
 import { renderRail } from "./panels/rail.js";
-import { mountDrawer, updateDrawer } from "./panels/drawer.js";
+import { renderRecall } from "./panels/recall.js";
+import {
+  renderProfile,
+  openProfileModal,
+  closeProfileModal,
+  toggleModel,
+  setSubject,
+  toggleAck,
+  profileSelection,
+  profileSubject,
+  openInspector,
+  closeInspector,
+  isInspectorOpen,
+  setRefusal,
+  setPending,
+} from "./panels/profile.js";
+import {
+  setRunSel,
+  armRun,
+  startRun,
+  disarm as disarmRun,
+} from "./panels/runstart.js";
+import {
+  renderTui, toggleTui, askDetach, cancelDetach,
+  isDetachConfirming, isTuiExpanded,
+} from "./panels/tui.js";
+import { renderExtraction, setExtractView } from "./panels/extraction.js";
+import { togglePopout } from "./panels/popout.js";
+import { renderOverlay } from "./overlay.js";
+import { patch } from "./dom.js";
 
 function render() {
   const root = document.getElementById("root");
 
   if (!board) {
-    root.innerHTML = `
+    patch(root, `
       <div class="topbar"><span class="brand">HOW GOOD IS <u>YOUR</u> MEMORY SYSTEM</span>
         <span class="spacer"></span>
-        <span class="attest">connecting to feed…</span></div>
-      <div style="flex:1;display:flex;align-items:center;justify-content:center">
+        <span class="chip dimchip">connecting to feed…</span></div>
+      <div style="display:flex;align-items:center;justify-content:center;padding:80px 0">
         <div style="text-align:center">
-          <div class="label" style="margin-bottom:10px">no board yet</div>
+          <div class="kick" style="margin-bottom:10px">no board yet</div>
           <div class="null">${esc(lastError ?? "waiting for /api/board")}</div>
         </div>
-      </div>`;
+      </div>`);
     return;
   }
 
-  root.innerHTML = `
-    ${renderTopbar(board, { stale: consecutiveErrors > 0, lastError })}
-    <div class="grid">
-      ${renderWall(board)}
-      <div class="stack">
-        ${renderHero(board)}
-        ${renderRecall(board)}
+  // PANEL ORDER IS THE ARGUMENT THE BOARD MAKES:
+  //   hold first  — a blocked run outranks everything, in the operator's face
+  //   curve|wall  — the two axes, adjacent and equal, 50/50
+  //   ledger      — every cell, floor pinned, both axes restated
+  //   live        — the running cell's pulse
+  //   recall      — proof retrieval fires, demoted
+  //   rail        — the honesty that buys credibility for all of the above
+  //   provenance  — what a skeptic checks first
+  //
+  // PATCHED, NOT REPLACED. This was `root.innerHTML = ...`, which rebuilt every
+  // node on the board twice a second and destroyed scroll position, focus, the
+  // caret and any live text selection along with them — the board could not be
+  // read or navigated while a run was in flight. `patch()` morphs the existing
+  // tree in place, so an unchanged panel is untouched and only real changes
+  // reach the DOM. See dom.js.
+  patch(root, `
+    <div class="shell">
+      ${renderTopbar(board, { stale: consecutiveErrors > 0, lastError })}
+      ${renderHold(board)}
+      <div class="axes-row">
+        ${renderCurve(board)}
+        ${renderWall(board)}
       </div>
-      ${renderTicker(board)}
-      ${renderCell(board)}
+      ${renderLedger(board)}
+      ${renderLive(board)}
+      ${renderProfile(board)}
+      ${renderRecall(board)}
       ${renderRail(board)}
+      ${renderProvenance(board)}
+      ${renderTui(board)}
+      ${renderExtraction(board)}
     </div>
-    ${renderProvenance(board)}
-  `;
+  `);
 
-  // The drawer lives OUTSIDE #root and survives this innerHTML swap, so it is
-  // updated rather than rebuilt — that is what preserves its open state, its
-  // scroll position, and any half-made selection in its controls. It is updated
-  // AFTER the swap because it measures the provenance strip it sits above.
-  mountDrawer();
-  updateDrawer(board);
+  // AFTER the swap: the feed is append-only and stateful, so it paints into the
+  // fresh container rather than being rebuilt by the string above.
+  // OVERLAY (modals) lives outside #root and survives the swap, so an open
+  // dialog is not torn down by the poll.
+  //
+  // EACH IS WRAPPED: the board is the thing that must never go dark. A throw
+  // in any one of these costs that surface, never the board — and the failure
+  // is printed, never swallowed.
+  try { paintFeed(board); } catch (err) { console.error("feed paint failed:", err); }
+  try { renderOverlay(board); } catch (err) { console.error("overlay failed:", err); }
+}
+
+// ── interaction ──────────────────────────────────────────────────────────────
+// ONE DELEGATED LISTENER, bound to `document` and never to a rendered node.
+// All interactive elements carry data-* hooks instead of bound handlers.
+//
+// This is still required after the move to morphing. patch() reuses nodes where
+// it can, but it REPLACES any node whose tag changed and removes any node that
+// left the tree — a handler bound directly to one of those would be silently
+// lost. Delegation is invariant to how the tree is updated.
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-pop-toggle],[data-pop-view]");
+  if (!t) return;
+
+  if (t.dataset.metric) { setCurveMetric(t.dataset.metric); render(); return; }
+  if (t.dataset.kind) { toggleKind(t.dataset.kind); render(); return; }
+  if (t.id === "evjump") { jumpToLive(); return; }
+  if (t.dataset.tuiToggle !== undefined && t.hasAttribute("data-tui-toggle")) { toggleTui(); render(); return; }
+  if (t.hasAttribute("data-tui-detach")) { askDetach(); render(); return; }
+  if (t.hasAttribute("data-tui-detach-yes")) { void detachTui(); return; }
+  if (t.hasAttribute("data-tui-cancel")) { cancelDetach(); render(); return; }
+  if (t.hasAttribute("data-hold-release")) { void releaseHold(); return; }
+  if (t.hasAttribute("data-profile-open")) { openProfileModal(); render(); return; }
+  if (t.hasAttribute("data-profile-cancel")) { closeProfileModal(); render(); return; }
+  if (t.hasAttribute("data-profile-ack")) { toggleAck(); render(); return; }
+  // Subject is checked BEFORE model: a row in the subject picker carries only
+  // `data-subject`, but keeping the order explicit stops a future row that
+  // carries both from silently toggling the wrong axis.
+  if (t.dataset.subject) { setSubject(t.dataset.subject); render(); return; }
+  if (t.dataset.model) { toggleModel(t.dataset.model); render(); return; }
+  if (t.hasAttribute("data-profile-create")) { void freezeProfile(); return; }
+  if (t.hasAttribute("data-profile-inspect")) { openInspector(); render(); return; }
+  // The scrim closes the inspector, but ONLY when the scrim itself was clicked
+  // — a click that bubbled up from inside the dialog must not dismiss it.
+  if (t.hasAttribute("data-inspect-scrim") && e.target === t) { closeInspector(); render(); return; }
+  if (t.hasAttribute("data-inspect-close")) { closeInspector(); render(); return; }
+  if (t.hasAttribute("data-run-arm")) { void doArmRun(); return; }
+  if (t.hasAttribute("data-run-confirm")) { void doStartRun(); return; }
+  // POPOUTS. The view switch is checked BEFORE the toggle: a tab click must
+  // change the view, never collapse the window out from under the operator.
+  if (t.dataset.popView) {
+    const [, v] = t.dataset.popView.split(":");
+    setExtractView(v);
+    render();
+    return;
+  }
+  if (t.dataset.popToggle) { togglePopout(t.dataset.popToggle); render(); return; }
+});
+
+// Run-form inputs. `change` covers the selects; `input` covers typing the org.
+document.addEventListener("change", onRunSel);
+document.addEventListener("input", onRunSel);
+function onRunSel(e) {
+  const s = e.target.closest("[data-run-sel]");
+  if (!s) return;
+  setRunSel(s.dataset.runSel, s.value);
+  render();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (isInspectorOpen()) { closeInspector(); render(); return; }
+  if (isDetachConfirming()) { cancelDetach(); render(); }
+});
+
+/** The board never posts. The browser posts DIRECTLY to the control plane. */
+
+/**
+ * CAN THIS BROWSER REACH THE CONTROL PLANE AT ALL?
+ *
+ * `base_url` is a loopback address, and loopback resolves to whichever machine
+ * dereferences it. Browsing the board from the host, that is the host and every
+ * control POST works. Browsing it from another device on the LAN — the
+ * documented remote-viewing case — `127.0.0.1:7718` is THAT DEVICE, so the
+ * request dies before it leaves the laptop and surfaces as a transport error
+ * with no obvious cause.
+ *
+ * The control plane deliberately cannot be published on the LAN to fix this: it
+ * binds 127.0.0.1 with no --host flag as a stated safety property
+ * (control/server.mjs:23-25), because it spawns processes. The read-only board
+ * may be exposed; the thing that can change the world may not.
+ *
+ * So the honest answer is to say so. This returns the reason a write is
+ * impossible, or null when it is possible — one derivation, consumed by every
+ * control path, so no button can disagree with another about whether it works.
+ */
+export function controlReachability(b) {
+  const base = b?.control?.base_url ?? null;
+  if (!base) {
+    return {
+      ok: false,
+      code: "control_plane_unwired",
+      reason: "the board does not know where the control plane is — it is not running, or the dashboard was started without it.",
+      fix: null,
+    };
+  }
+  // Only the browser knows its own origin, which is why the comparison happens
+  // here and not in the source module that published the URL.
+  const remote =
+    b?.control?.base_url_is_loopback === true &&
+    !["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname);
+  if (remote) {
+    return {
+      ok: false,
+      code: "control_plane_not_reachable_from_here",
+      reason:
+        `this board is open at ${location.hostname}, but the control plane is published as ${base}. ` +
+        "That address means THIS device, not the bench host, so the request would never leave your machine. " +
+        "The control plane binds loopback only, on purpose — it starts runs and spawns processes, so it is never exposed on a network.",
+      fix:
+        `ssh -L 7717:127.0.0.1:7717 -L 7718:127.0.0.1:7718 <user>@${location.hostname}\n` +
+        "then open http://127.0.0.1:7717 in this browser. Both ports tunnel to the bench host's loopback, so the controls work and nothing is exposed on the network.",
+    };
+  }
+  return { ok: true, code: null, reason: null, fix: null };
+}
+
+/** The board never posts. The browser posts DIRECTLY to the control plane. */
+async function releaseHold() {
+  const reach = controlReachability(board);
+  if (!reach.ok) {
+    console.error(`hold release unavailable — ${reach.code}: ${reach.reason}`);
+    return;
+  }
+  const base = board.control.base_url;
+  try {
+    const res = await fetch(`${base}/api/hold/release`, { method: "POST" });
+    if (!res.ok) console.error(`hold release refused: HTTP ${res.status}`);
+    // The next poll observes the file vanish, which IS the success signal.
+  } catch (err) {
+    console.error("hold release failed:", err);
+  }
+}
+
+async function detachTui() {
+  const reach = controlReachability(board);
+  cancelDetach();
+  if (!reach.ok) {
+    console.error(`tui detach unavailable — ${reach.code}: ${reach.reason}`);
+    render();
+    return;
+  }
+  const base = board.control.base_url;
+  try {
+    const res = await fetch(`${base}/api/tui/detach`, { method: "POST" });
+    if (!res.ok) console.error(`tui detach refused: HTTP ${res.status}`);
+  } catch (err) {
+    console.error("tui detach failed:", err);
+  }
+  render();
+}
+
+/**
+ * FREEZE A PROFILE.
+ *
+ * This POSTs to the control plane and the profile lands on disk. It previously
+ * only mutated `board.profile` in page memory, which the next 2s poll
+ * overwrote — the operator created a profile and nothing survived, which is the
+ * defect being fixed.
+ *
+ * IT STARTS NOTHING. Freezing writes an allowlist; it does not arm a cell, open
+ * a session, or attach a TUI. The modal and the inspector both say so in words,
+ * because the previous silence is what made "nothing happened" ambiguous
+ * between "it worked and did nothing visible" and "it failed".
+ *
+ * EVERY FAILURE PATH REACHES THE OPERATOR. Refusals were previously written to
+ * `console.error` and nowhere else, so a working button in front of a refusing
+ * server looked exactly like a dead button. A stale control plane serving an
+ * older wire contract refused every valid payload and the screen never changed.
+ * The reason is now rendered in the modal; the console line is kept for the
+ * devtools trail, but it is no longer the ONLY place the truth appears.
+ */
+async function freezeProfile() {
+  const reach = controlReachability(board);
+  if (!reach.ok) {
+    // The refusal the operator sees carries the FIX when one exists. A reason
+    // without a remedy leaves them exactly as stuck as silence did.
+    setRefusal(reach.code, reach.fix ? `${reach.reason}\n\n${reach.fix}` : reach.reason);
+    console.error(`profile creation unavailable — ${reach.code}: ${reach.reason}`);
+    render();
+    return;
+  }
+  const base = board.control.base_url;
+  setPending(true);
+  render();
+  try {
+    const res = await fetch(`${base}/api/profiles/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        // TWO axes, sent separately. The subject is the measurement; the roster
+        // is the variable. The server refuses either being absent, with a
+        // distinct code for each.
+        subject_model: profileSubject(),
+        memory_models: profileSelection(),
+        stack_id: board?.stack?.id ?? null,
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.ok === false) {
+      // Never swallow: the reason reaches the operator ON SCREEN, not just in
+      // the console. The server's prose is passed through verbatim.
+      setRefusal(
+        data?.code ?? `http_${res.status}`,
+        data?.reason ?? `the control plane answered HTTP ${res.status} without a stated reason`,
+      );
+      console.error(`profile creation refused: ${data?.code ?? res.status} — ${data?.reason ?? ""}`);
+      render();
+      return;
+    }
+    setPending(false);
+    closeProfileModal();
+    // The next poll reads it back from disk. Nothing is written into `board`
+    // here — a local write would be a second source of truth for a value that
+    // is now durable, and the two could disagree.
+    await poll();
+  } catch (err) {
+    // The request never reached the server. That is a DIFFERENT diagnosis from
+    // a refusal and is labelled as such, so "the control plane is down" is
+    // never mistaken for "the control plane said no".
+    setRefusal("transport_failed", String(err?.message ?? err));
+    console.error("profile creation failed:", err);
+    render();
+  }
+}
+
+// Run start is the loudest control on the board, so a silent `return` here was
+// the worst instance of the original defect: the operator arms a run, nothing
+// happens, and no reason is given anywhere. The reason now reaches the console
+// AND the topbar banner explains the LAN case before the click.
+async function doArmRun() {
+  const reach = controlReachability(board);
+  if (!reach.ok) {
+    console.error(`run arm unavailable — ${reach.code}: ${reach.reason}`);
+    render();
+    return;
+  }
+  render();
+  await armRun(board.control.base_url);
+  render();
+}
+
+async function doStartRun() {
+  const reach = controlReachability(board);
+  if (!reach.ok) {
+    console.error(`run start unavailable — ${reach.code}: ${reach.reason}`);
+    render();
+    return;
+  }
+  await startRun(board.control.base_url);
+  // ATTACH THE TUI. The operator asked for the terminal to come up with the
+  // run. The mirror is on-demand and polling IS its keepalive, so expanding it
+  // is what starts the capture. It remains a second, strictly read-only attach
+  // client that never writes to the pty.
+  if (!isTuiExpanded()) toggleTui();
+  render();
+  await poll();
 }
 
 poll();

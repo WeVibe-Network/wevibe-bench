@@ -366,12 +366,46 @@ class M2Proof:
             else "memory"
         )
 
-        return {
+        # ── CARRY THE MEASUREMENT FIELDS, DO NOT WHITELIST THEM AWAY ──────────
+        # This returned a four-key dict (text/keywords/stack_hint/memory_type)
+        # and dropped everything else the MCP had computed. `near_dup` — the
+        # cosine score, the matched target and the source, produced at
+        # wevibe-mcp/src/extraction.ts:927 and returned verbatim by
+        # /v1/extract/status — died HERE, one call after being produced.
+        #
+        # That made the single most useful tuning question about the memory
+        # system ("what is the real distribution of near-dup scores, and is
+        # NEAR_DUP_COSINE_THRESHOLD=0.93 right?") unanswerable from the bench,
+        # not because the number was never computed but because it was thrown
+        # away. These fields are measurement only: nothing below consumes them
+        # for control flow, they are carried so the telemetry sink can store
+        # them.
+        #
+        # FLAGGED-NEVER-DROPPED holds: carrying the flag adds a row to a
+        # measurement table and never removes a memory.
+        memory: dict[str, Any] = {
             "text": capped_text,
             "keywords": self._extract_candidate_keywords(candidate.get("keywords")),
             "stack_hint": stack_hint,
             "memory_type": normalized_memory_type,
         }
+
+        near_dup = candidate.get("near_dup")
+        if isinstance(near_dup, dict):
+            memory["near_dup"] = near_dup
+
+        extraction_hash = candidate.get("extraction_hash")
+        if isinstance(extraction_hash, str) and extraction_hash.strip():
+            memory["extraction_hash"] = extraction_hash.strip()
+
+        # The keyword split (classified vs suggestions) is what shows whether
+        # the org vocabulary join is working — the `classified:[]` symptom in
+        # EXTRACTION-FLOW.md is exactly this field being empty.
+        raw_keywords = candidate.get("keywords")
+        if isinstance(raw_keywords, dict):
+            memory["keywords_raw"] = raw_keywords
+
+        return memory
 
     def produce_memories(
         self,

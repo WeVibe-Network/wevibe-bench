@@ -93,14 +93,20 @@ const DEFAULT_CONFIG = {
   // looks like the control plane is down when it is running fine.
   controlUrl: "http://127.0.0.1:7718",
   controlPublicUrl: null, // defaults to controlUrl when not set
-  sources: {
-    "run-manifest": true,
-    "status-stream": true,
-    "run-log": true,
-    truncation: true,
+    sources: {
+      "run-manifest": true,
+      "status-stream": true,
+      "run-log": true,
+      "stack-ledger": true,
+      truncation: true,
     "funnel-cells": true,
     "plugin-log": true,
     "opencode-serve": true,
+    // Reads the harness's extraction telemetry DB off the read-only bench
+    // mount. On by default: it is a local file read with no network and no
+    // service dependency, and its absence before the first extraction is a
+    // designed state, not a failure.
+    "extraction-inventory": true,
     "control-plane": false, // needs the control service — opt in explicitly
     "hub-db": false, // needs a reachable postgres — opt in explicitly
   },
@@ -172,11 +178,13 @@ const MODULE_FILES = {
   "run-manifest": "./sources/run-manifest.mjs",
   "status-stream": "./sources/status-stream.mjs",
   "run-log": "./sources/run-log.mjs",
+  "stack-ledger": "./sources/stack-ledger.mjs",
   truncation: "./sources/truncation.mjs",
   "funnel-cells": "./sources/funnel-cells.mjs",
   "plugin-log": "./sources/plugin-log.mjs",
   "opencode-serve": "./sources/opencode-serve.mjs",
   "control-plane": "./sources/control-plane.mjs",
+  "extraction-inventory": "./sources/extraction-inventory.mjs",
   "hub-db": "./sources/hub-db.mjs",
 };
 
@@ -220,6 +228,7 @@ const ORDER = [
   "truncation",
   "funnel-cells",
   "plugin-log",
+  "extraction-inventory",
   "hub-db",
   "run-log",
   "opencode-serve",
@@ -293,12 +302,21 @@ const STATIC = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
   "/board.js": { file: "board.js", type: "text/javascript; charset=utf-8" },
+  "/overlay.js": { file: "overlay.js", type: "text/javascript; charset=utf-8" },
+  "/dom.js": { file: "dom.js", type: "text/javascript; charset=utf-8" },
   "/panels/chrome.js": { file: "panels/chrome.js", type: "text/javascript; charset=utf-8" },
+  "/panels/curve.js": { file: "panels/curve.js", type: "text/javascript; charset=utf-8" },
+  "/panels/ledger.js": { file: "panels/ledger.js", type: "text/javascript; charset=utf-8" },
+  "/panels/live.js": { file: "panels/live.js", type: "text/javascript; charset=utf-8" },
+  "/panels/hold.js": { file: "panels/hold.js", type: "text/javascript; charset=utf-8" },
+  "/panels/profile.js": { file: "panels/profile.js", type: "text/javascript; charset=utf-8" },
+  "/panels/tui.js": { file: "panels/tui.js", type: "text/javascript; charset=utf-8" },
   "/panels/wall.js": { file: "panels/wall.js", type: "text/javascript; charset=utf-8" },
-  "/panels/hero.js": { file: "panels/hero.js", type: "text/javascript; charset=utf-8" },
   "/panels/recall.js": { file: "panels/recall.js", type: "text/javascript; charset=utf-8" },
-  "/panels/ticker.js": { file: "panels/ticker.js", type: "text/javascript; charset=utf-8" },
   "/panels/rail.js": { file: "panels/rail.js", type: "text/javascript; charset=utf-8" },
+  "/panels/runstart.js": { file: "panels/runstart.js", type: "text/javascript; charset=utf-8" },
+  "/panels/popout.js": { file: "panels/popout.js", type: "text/javascript; charset=utf-8" },
+  "/panels/extraction.js": { file: "panels/extraction.js", type: "text/javascript; charset=utf-8" },
 };
 
 const main = async () => {

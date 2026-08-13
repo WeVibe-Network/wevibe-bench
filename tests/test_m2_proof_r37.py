@@ -423,7 +423,14 @@ def test_m2_proof_produce_memories_keeps_atomic_candidates_separate() -> None:
     )
 
     assert len(memories) == 2
-    assert memories[0] == {
+    # ATOMICITY is what this test is about: two candidates stay two memories.
+    # The assertion compares the SUBMITTED fields only. It previously compared
+    # the whole dict by equality, which silently made it a whitelist test too —
+    # so carrying measurement fields (near_dup, keywords_raw, extraction_hash)
+    # through `_memory_from_candidate` failed it for the wrong reason. Those
+    # fields are asserted on their own, below.
+    submitted = {"text", "keywords", "stack_hint", "memory_type"}
+    assert {k: v for k, v in memories[0].items() if k in submitted} == {
         "text": (
             "Implement: Add a retry budget guard before replaying moves.\n"
             "Context: Node 22 monorepo runner\n"
@@ -434,12 +441,78 @@ def test_m2_proof_produce_memories_keeps_atomic_candidates_separate() -> None:
         "stack_hint": ["typescript", "node"],
         "memory_type": "memory",
     }
-    assert memories[1] == {
+    assert {k: v for k, v in memories[1].items() if k in submitted} == {
         "text": "already-rendered memory text",
         "keywords": ["rendered_text", "python_stack"],
         "stack_hint": ["python"],
         "memory_type": "memory",
     }
+
+    # The keyword SPLIT is carried for telemetry. `classified` vs `suggestions`
+    # is what shows whether the org-vocabulary join is working at all — the
+    # `classified:[]` symptom in EXTRACTION-FLOW.md is this field being empty,
+    # and it was previously unobservable from the bench because the flattened
+    # `keywords` list discards the distinction.
+    assert memories[0]["keywords_raw"] == {
+        "classified": [{"keyword": "retry_budget"}],
+        "suggestions": [{"keyword": "loop_guard"}],
+    }
+
+
+def test_m2_proof_carries_near_dup_flag_for_telemetry() -> None:
+    """`near_dup` must survive `_memory_from_candidate`.
+
+    The MCP computes the near-duplicate cosine score
+    (wevibe-mcp/src/extraction.ts:927) and returns it verbatim from
+    /v1/extract/status. The bench then dropped it in this function's four-key
+    whitelist, which made the threshold (NEAR_DUP_COSINE_THRESHOLD = 0.93)
+    untunable from measurement: the score existed for one function call and was
+    then gone.
+
+    FLAGGED-NEVER-DROPPED: carrying the flag must not remove a memory. Both
+    candidates below survive — the flagged one is still returned.
+    """
+    payload = {
+        "result": {
+            "memories": [
+                {
+                    "text": "flagged candidate",
+                    "stack": ["go"],
+                    "memory_type": "memory",
+                    "keywords": {"classified": [], "suggestions": []},
+                    "extraction_hash": "eh-1",
+                    "near_dup": {
+                        "source": "intra_session",
+                        "matched": "eh-0",
+                        "score": 0.9412,
+                    },
+                },
+                {
+                    "text": "clean candidate",
+                    "stack": ["go"],
+                    "memory_type": "memory",
+                    "keywords": {"classified": [], "suggestions": []},
+                    "extraction_hash": "eh-2",
+                },
+            ]
+        }
+    }
+
+    memories = [
+        M2Proof._memory_from_candidate(M2Proof, candidate)
+        for candidate in M2Proof._candidate_sources(payload)
+    ]
+    memories = [memory for memory in memories if memory is not None]
+
+    assert len(memories) == 2, "flagging must never drop a memory"
+    assert memories[0]["near_dup"] == {
+        "source": "intra_session",
+        "matched": "eh-0",
+        "score": 0.9412,
+    }
+    assert memories[0]["extraction_hash"] == "eh-1"
+    # A candidate with no near-dup carries no key — absence is not a score of 0.
+    assert "near_dup" not in memories[1]
 
 
 def _build_delivery_proof(

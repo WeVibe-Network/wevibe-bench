@@ -38,6 +38,22 @@ scaffold/**/node_modules
 .wevibe/org.json
 # corpus data — throwaway dev corpora, never committed
 datasets/
+# EXTRACTION TELEMETRY — CONTAINS MEMORY PLAINTEXT. NEVER COMMIT.
+#
+# wevibe_bench/extraction_telemetry.py deliberately stores memory bodies so
+# near-duplicate scores are interpretable and the threshold can be tuned from
+# measurement. That is sound for a local, single-operator bench instrument on
+# the operator's own machine — and it is exactly what RUNBOOK §9 forbids from
+# reaching git, which stays hash-only: fingerprints, sizes, counts and reasons.
+#
+# `data/` also holds per-cell funnel snapshots and plugin logs (data/README.md).
+# The tracked .gitkeep files and README are preserved by the negations below, so
+# the layout survives while its CONTENTS never do.
+data/cells/*
+data/extract/*
+!data/cells/.gitkeep
+!data/extract/.gitkeep
+!data/README.md
 # vendored external benchmark repo (has its own embedded .git)
 polyglot-benchmark/
 
