@@ -50,14 +50,29 @@ import { esc, nul, tok, dur } from "../board.js";
 // single most consequential input the benchmarked model receives, and judging
 // whether it reads like a person wrote it is the whole point of the surface, so
 // it gets its own chip rather than being folded in with harness plumbing.
-export const EVENT_KINDS = ["tool", "file", "thinking", "error", "lifecycle", "user"];
-const KIND_MARK = { tool: "$", file: "~", thinking: "·", error: "!", lifecycle: "◦", user: ">" };
+//
+// `harness` is the GRADING narrative itself — the phase starts, gate outcomes
+// and attempt boundaries the harness publishes on its own PROGRESS channel
+// (control/gate-events.mjs, kind:"harness"). The control plane has emitted
+// these rows since WO-GRADE-VIS-1, but this panel never declared the kind: it
+// was absent from KIND_MARK, from `filters` and from the chip row, so the rows
+// fell through to the `·` fallback mark, could not be filtered, and read as
+// low-value plumbing.
+//
+// That is backwards. Between attempts the AGENT IS IDLE BY DESIGN while the
+// harness grades, so every agent-sourced kind correctly goes silent and this is
+// the ONLY kind still speaking — it is precisely the window in which an
+// operator has no other signal, and the one that distinguishes "grading" from
+// "wedged". It is declared last so it reads as the outermost frame around the
+// agent's activity rather than as one more agent event.
+export const EVENT_KINDS = ["tool", "file", "thinking", "error", "lifecycle", "user", "harness"];
+const KIND_MARK = { tool: "$", file: "~", thinking: "·", error: "!", lifecycle: "◦", user: ">", harness: "▣" };
 
 export const EVENT_RENDER_CAP = 400;
 export const BOTTOM_EPS = 24;
 
 /** Filter state lives here, client-side, and survives the board's re-render. */
-const filters = { tool: true, file: true, thinking: true, error: true, lifecycle: true, user: true };
+const filters = { tool: true, file: true, thinking: true, error: true, lifecycle: true, user: true, harness: true };
 export function toggleKind(k) {
   if (k in filters) filters[k] = !filters[k];
 }

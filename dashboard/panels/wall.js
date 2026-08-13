@@ -289,6 +289,29 @@ function laneLine(board) {
       </div>`;
   }
 
+  // ── PAUSED IS A THIRD STATE, NOT A VARIANT OF "RUNNING" ────────────────────
+  //
+  // `parsed:null` + a stated reason is what the lane publishes when its pause
+  // gate blocked the cycle (`control/live-lane.mjs:446`): the grader has an open
+  // phase, or :8002 is bound. The lane HOLDS the prior grid in that document
+  // rather than blanking it, so `counts` is the LAST measurement, not a current
+  // one.
+  //
+  // Without this branch that document falls through to the PROVISIONAL line
+  // below and reports those held counts as if they had just been measured —
+  // during grading, which is exactly when the pause gate is active and when an
+  // operator is most likely to be watching. That is the "dead instrument's last
+  // reading presented as current" failure the STOPPED branch above exists to
+  // prevent, arriving through a different door.
+  if (parsed === null && snap?.stale_reason) {
+    return `
+      <div class="wall-live stalled">
+        <span class="gcell gf-slate gm-still sm"></span>
+        <span class="bright">LIVE LANE — PAUSED</span>
+        <span class="note">${esc(`${snap.stale_reason}. The lane makes no claim while paused; its last grid is held and is not shown.`)}</span>
+      </div>`;
+  }
+
   const bits = c
     ? `${c.pass} passing · ${c.fail} failing · ${c.deferred} never measured live`
     : "no live counts published";

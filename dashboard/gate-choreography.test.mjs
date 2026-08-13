@@ -628,6 +628,39 @@ test("LIVE: a snapshot that does not compile is stated, not shown as failures", 
   assert.match(html, /failed to import/);
 });
 
+test("LIVE: a PAUSED lane never reports its held counts as a current measurement", () => {
+  // `parsed:null` + a reason is what the lane publishes when its pause gate
+  // blocked the cycle (control/live-lane.mjs:446) — the grader has an open phase
+  // or :8002 is bound. It HOLDS the prior grid, so `counts` is the LAST
+  // measurement. Reporting those as PROVISIONAL would present a paused
+  // instrument's stale reading as current, during grading, which is precisely
+  // when the pause gate is active and an operator is watching.
+  const paused = {
+    ...LANE_OK,
+    lane: {
+      ...LANE_OK.lane,
+      ran_at: null,
+      duration_ms: null,
+      snapshot: {
+        parsed: null,
+        stale_reason: ":8002 is bound — the lane's own freePort() would SIGKILL whatever holds it",
+        content_hash: "x",
+      },
+    },
+  };
+  const html = renderWall(withLive(GATES, paused));
+  assert.match(html, /LIVE LANE — PAUSED/);
+  assert.match(html, /:8002 is bound/, "the operator must be told WHY it paused");
+  assert.ok(
+    !/LIVE LANE — PROVISIONAL/.test(html),
+    "a paused lane must not claim a provisional measurement it did not take",
+  );
+  assert.ok(
+    !/3 passing · 1 failing/.test(html),
+    "the held counts are a past measurement and must not be presented as current",
+  );
+});
+
 test("LIVE: absent lane renders NOTHING — an optional instrument is silent", () => {
   // `live: null` is the normal state for every run that does not start the lane.
   // A permanent "live lane: off" row would imply the board is missing something.
