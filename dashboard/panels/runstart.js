@@ -56,7 +56,7 @@ const ui = {
   // `arm` has NO default on purpose. It decides whether an org is required (ON)
   // or forbidden (OFF), so guessing it would either mint a run against the
   // wrong arm or produce a restatement reading "UNKNOWN ARM".
-  sel: { model: "", context: "", arm: "", org: "" },
+  sel: { model: "", arm: "", org: "" },
   armed: false,
   token: null,
   restatement: null,
@@ -98,10 +98,9 @@ export function setRunSel(key, value) {
  * cell with no org, and inventing one would either target the wrong corpus or
  * produce a restatement the operator cannot check.
  */
-export function presetRun({ model, arm, context = null }) {
+export function presetRun({ model, arm }) {
   ui.sel.model = model ?? "";
   ui.sel.arm = arm ?? "";
-  if (context !== null) ui.sel.context = String(context);
   // A preset is a NEW set of parameters, so any token minted for the previous
   // ones must die with it.
   disarm();
@@ -244,7 +243,10 @@ function payload() {
     model: ui.sel.model,
     arm: ui.sel.arm || undefined,
     org: ui.sel.arm === "on" ? ui.sel.org.trim() || undefined : undefined,
-    context: Number(ui.sel.context) || undefined,
+    // NO `context` KEY. The server treats an absent context as "use the
+    // registry default" (server.mjs:314 gates on `context !== null`, and
+    // :650 only sets WEVIBE_BENCH_WORKER_NUM_CTX when one was supplied), which
+    // is exactly the pinned ceiling every bench alias already carries.
   };
 }
 
@@ -388,9 +390,15 @@ function form(eligible, roster, live, subject) {
          </select>
        </div>`;
 
-  const ctxOpts = (roster.context_choices ?? [65536, 131072, 262144])
-    .map((n) => opt(String(n), `${Math.round(n / 1024)}K`, ui.sel.context))
-    .join("");
+  // NO CONTEXT PICKER. Every bench alias is pinned at its own 256k-class
+  // ceiling in the proxy's models.yaml and the worker registry, so the picker
+  // offered three choices of which one was correct and two silently shortened
+  // the window the cell was supposed to measure at. Omitting `context` from the
+  // payload is a first-class case in the server: it skips the
+  // WEVIBE_BENCH_WORKER_NUM_CTX override entirely and the registry default —
+  // the pinned ceiling — applies (server.mjs:650). The field is gone rather
+  // than defaulted-and-hidden: a control that can only be set to one correct
+  // value is not a choice, it is a trap.
 
   // The inputs stay ENABLED while a cell is live. The operator must be able to
   // review and prepare the next run's parameters mid-flight; it is the ACTION
@@ -406,13 +414,6 @@ function form(eligible, roster, live, subject) {
         </select>
       </div>
       ${modelRow}
-      <div class="rrow">
-        <label>CONTEXT</label>
-        <select class="rsel" data-run-sel="context">
-          <option value="">registry default</option>
-          ${ctxOpts}
-        </select>
-      </div>
       ${ui.sel.arm === "on"
         ? `<div class="rrow">
              <label>ORG</label>

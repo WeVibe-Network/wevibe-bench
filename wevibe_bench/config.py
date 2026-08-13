@@ -432,7 +432,12 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "attachment": False,
         "modalities": {"input": ["text"], "output": ["text"]},
         "limit": {
-            "context": 262_144,
+            # 256512, NOT 262144 — DSV4F's real oMLX ceiling
+            # (max_context_window on /v1/models/status). Must match the proxy's
+            # deepseek-v4-flash-bench profile exactly; overstating the window
+            # spends tokens the model will refuse at the far end of a
+            # multi-hour cell.
+            "context": 256_512,
             "output": 32_768,
         },
     },
