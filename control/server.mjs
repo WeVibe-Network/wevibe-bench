@@ -960,6 +960,7 @@ const server = createServer(async (req, res) => {
         runDir: url.searchParams.get("run_dir"),
         launcher,
         runState,
+        benchRoot: BENCH_ROOT,
       });
       sendJson(res, wall.ok ? 200 : 400, wall);
       return;

@@ -162,6 +162,49 @@ function slots(html) {
 
 // ── the frames ──────────────────────────────────────────────────────────────
 
+// NOTE ON NAMING: the `ARMED` fixture above predates the server's `armed` flag
+// and means IDLE — a graded run with outcomes and no live grader. A genuinely
+// armed wall is the one below: every gate untested, nothing evaluated, and the
+// server saying so. The two must not be confused; they are opposite states that
+// look alike in a grid, which is exactly why the server decides it.
+
+const FRESH_GATES = GATES.map((g) => ({
+  ...g,
+  state: "untested",
+  resolved_at_attempt: null,
+  under_test: false,
+}));
+
+const ARMED_FRESH = boardWith({
+  ...suiteWith(FRESH_GATES, null),
+  armed: true,
+  suite_source: "enumerated",
+});
+
+test("ARMED: a wiped bench shows the suite defined and nothing evaluated", () => {
+  const html = renderWall(ARMED_FRESH);
+  assert.deepEqual(
+    slots(html),
+    ["unobserved", "unobserved", "unobserved", "unobserved", "unobserved"],
+    "every square is a dotted outline: defined, not yet tested",
+  );
+  assert.match(html, /ARMED/, "the state must be named, not inferred from colour");
+  assert.match(html, /0<\/span>\/5 tested/, "0 of N TESTED — never 'passed', nothing was tested");
+  assert.doesNotMatch(html, /GRADING STALLED/, "an armed wall must not report a stall");
+  // Scoped to the HEADLINE: the "FAILING CLUSTERS" section is a permanent
+  // heading that correctly reads "no gate is currently failing" here, so a
+  // document-wide match would fail on honest output.
+  assert.doesNotMatch(html, /\d+ FAILING</, "armed must never post a failing count");
+});
+
+test("ARMED: the board states where the suite shape came from", () => {
+  // A suite enumerated before any cell is NOT a suite a run was graded against,
+  // and the operator must be able to tell those apart.
+  assert.match(renderWall(ARMED_FRESH), /enumerated from the harness suite/);
+  const pinned = boardWith({ ...suiteWith(FRESH_GATES, null), armed: true, suite_source: "run" });
+  assert.match(renderWall(pinned), /pinned to at cell start/);
+});
+
 test("resolution rides ATTEMPTS: blue is attempt 1, green is later", () => {
   const s = slots(renderWall(ARMED));
   assert.equal(s[0], "blue", "resolved_at_attempt 1 must be blue");

@@ -52,21 +52,60 @@ export function pidAlive(pid) {
 }
 
 /**
- * The newest cell launch log under the runs root. Mirrors the dashboard's
- * `run-log.mjs` selection so both surfaces describe the same run.
+ * The run directory a cell log writes into, read from the log's own text.
+ *
+ * The harness prints absolute artifact paths on its PROGRESS lines
+ * (`step=worktree-git-init path=<runsRoot>/<run_dir>/sessions/...`), so the log
+ * states which run it belongs to. Returns null when the log has not yet named
+ * one — a just-created log is not an orphan, it is early.
+ */
+export function runDirOf(text) {
+  const m = /\/runs\/([A-Za-z0-9._-]+)\//.exec(String(text ?? ""));
+  return m ? m[1] : null;
+}
+
+/**
+ * The newest LIVE cell launch log under the runs root.
+ *
+ * ORPHAN LOGS ARE SKIPPED. Cell logs are written to the runs ROOT while the run
+ * state they describe lives in `runs/<run_dir>/`. Archiving or wiping a run
+ * (`mv runs/cumulative runs/cumulative.<why>-<date>`, RUNBOOK §2) moves the run
+ * directory and leaves the log behind, so the log outlives its own data.
+ *
+ * Measured 2026-08-13: after a wipe, `runs/off-cell-20260813T051334.log`
+ * remained at the root. Every reader here resolved it as the live run, so
+ * `/api/wall` served `suite.total:null` (the run dir was gone) alongside
+ * `grading.active:true phase:frontend stalled:true` parsed out of that dead log
+ * — a wiped bench reporting a run in progress. The gate wall could not return
+ * to its ARMED state because the phantom never cleared.
+ *
+ * A log whose run directory no longer exists therefore describes a run that no
+ * longer exists, and is not a candidate. This is the wipe boundary enforced at
+ * the reader: no cleanup step has to be remembered for the board to read clean.
  */
 export async function newestLog(runsRoot) {
-  let best = null;
+  const candidates = [];
   for (const ent of await listDir(runsRoot)) {
     if (!ent.isFile() || !ent.name.endsWith(".log")) continue;
     if (!/^(off|on)-cell-|^cell-/.test(ent.name)) continue;
     const p = join(runsRoot, ent.name);
     const st = await statOrNull(p);
-    if (st?.isFile() && (!best || st.mtimeMs > best.mtime)) {
-      best = { path: p, mtime: st.mtimeMs, size: st.size, name: ent.name };
+    if (st?.isFile()) {
+      candidates.push({ path: p, mtime: st.mtimeMs, size: st.size, name: ent.name });
     }
   }
-  return best;
+
+  // Newest first, then take the first whose run directory still exists.
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  for (const cand of candidates) {
+    const runDir = runDirOf(await readTail(cand.path));
+    // Not yet named: a fresh log that has not printed an artifact path. Live by
+    // default — refusing it would blind the board to a run that just started.
+    if (runDir === null) return cand;
+    const st = await statOrNull(join(runsRoot, runDir));
+    if (st?.isDirectory()) return { ...cand, run_dir: runDir };
+  }
+  return null;
 }
 
 /**

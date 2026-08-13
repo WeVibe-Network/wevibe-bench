@@ -13,7 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +32,7 @@ import {
   refuse,
 } from "./contract.mjs";
 import { matchRuntime, DECLARED_CONTEXT, CONTEXT_CHOICES } from "./roster.mjs";
-import { sessionIdFrom, terminalFrom, pidAlive } from "./runstate.mjs";
+import { sessionIdFrom, terminalFrom, pidAlive, newestLog } from "./runstate.mjs";
 import { mapEvent, EventRing } from "./events.mjs";
 import { parseGateEvents, gradingStatus } from "./gate-events.mjs";
 import { parseStageLines, foldStages, DECLARED_STAGE_IDS } from "./extraction.mjs";
@@ -44,6 +44,7 @@ import {
   inFlightAtStop,
   maxAttemptsFrom,
   readStatusRecords,
+  readWall,
   resolveRunDir,
 } from "./wall.mjs";
 import {
@@ -1091,6 +1092,179 @@ test("WALL: the attempt ceiling is read from the harness, never assumed", () => 
   // Unobservable is null, not a plausible-looking default.
   assert.equal(maxAttemptsFrom("nothing here"), null);
   assert.equal(maxAttemptsFrom(""), null);
+});
+
+// ── THE WIPE BOUNDARY ───────────────────────────────────────────────────────
+//
+// Cell logs are written to the runs ROOT; the run state they describe lives in
+// `runs/<run_dir>/`. Archiving or wiping a run moves the directory and leaves
+// the log, so the log outlives its own data.
+//
+// MEASURED 2026-08-13: after a wipe, `runs/off-cell-20260813T051334.log`
+// remained at the root and every reader resolved it as the live run. /api/wall
+// served `suite.total:null` (the run dir was gone) beside `grading.active:true
+// phase:frontend stalled:true silent_s:4848` parsed out of that dead log — a
+// wiped bench reporting a run in progress, which the operator could not clear
+// without hand-deleting files after every wipe.
+
+test("WIPE: a cell log whose run directory is gone is not resolved as the live run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wipe-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(runs, { recursive: true });
+    // The exact post-wipe shape: the run dir archived away, the log left behind.
+    mkdirSync(join(runs, "cumulative.wiped-sim", "sessions"), { recursive: true });
+    writeFileSync(
+      join(runs, "off-cell-orphan.log"),
+      "PROGRESS step=worktree-git-init path=" +
+        join(runs, "cumulative", "sessions", "cell", "worktree") +
+        "\nPROGRESS step=gate-phase-start phase=frontend\n",
+    );
+
+    assert.equal(
+      await newestLog(runs),
+      null,
+      "an orphan log describes a run that no longer exists and is not live",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WIPE: a cell log whose run directory still exists IS resolved as live", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wipe-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(join(runs, "cumulative", "sessions"), { recursive: true });
+    writeFileSync(
+      join(runs, "off-cell-live.log"),
+      "PROGRESS step=worktree-git-init path=" +
+        join(runs, "cumulative", "sessions", "cell", "worktree") +
+        "\n",
+    );
+
+    const log = await newestLog(runs);
+    assert.ok(log, "a log whose run dir exists is still the live run");
+    assert.equal(log.run_dir, "cumulative");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WIPE: a fresh log that has not yet named a run dir is live, not orphaned", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wipe-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(runs, { recursive: true });
+    // A just-launched cell prints banner lines before any artifact path.
+    writeFileSync(join(runs, "off-cell-new.log"), "This is mini-swe-agent version 2.4.5.\n");
+
+    const log = await newestLog(runs);
+    assert.ok(log, "a log that has not named a run dir yet must not be discarded");
+    assert.equal(log.run_dir, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WIPE: an orphan is skipped in favour of an older log that is still live", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wipe-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(join(runs, "cumulative", "sessions"), { recursive: true });
+
+    const livePath = join(runs, "off-cell-live.log");
+    writeFileSync(
+      livePath,
+      "PROGRESS step=worktree-git-init path=" + join(runs, "cumulative", "s", "w") + "\n",
+    );
+    // Newer by mtime, but its run dir is gone: recency must not beat existence.
+    const orphanPath = join(runs, "off-cell-orphan.log");
+    writeFileSync(
+      orphanPath,
+      "PROGRESS step=worktree-git-init path=" + join(runs, "cumulative.gone", "s", "w") + "\n",
+    );
+    utimesSync(livePath, new Date(1000), new Date(1000));
+    utimesSync(orphanPath, new Date(9000), new Date(9000));
+
+    const log = await newestLog(runs);
+    assert.equal(log?.name, "off-cell-live.log", "the newest LIVE log wins, not the newest log");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WALL: a wiped bench is ARMED — suite known, nothing evaluated, no phantom grading", async () => {
+  const root = mkdtempSync(join(tmpdir(), "armed-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(runs, { recursive: true });
+
+    const wall = await readWall({ runsRoot: runs, runDir: null, benchRoot: BENCH });
+
+    assert.equal(wall.ok, true);
+    assert.equal(wall.armed, true, "roster present + zero outcomes + no grading = ARMED");
+    assert.equal(wall.suite_source, "enumerated", "the suite came from the harness, not a run");
+    // The count is whatever the harness enumerates — asserted as a real number
+    // rather than a literal, so adding a gate does not fail this test.
+    assert.ok(wall.suite.total > 0, "the suite size is known");
+    assert.equal(
+      wall.totals.untested,
+      wall.suite.total,
+      "every gate is untested: defined, not yet evaluated",
+    );
+    assert.equal(wall.totals.resolved, 0);
+    assert.equal(wall.totals.failing, 0, "ARMED must never read as everything-failed");
+    assert.equal(wall.grading, null, "a wiped bench reports no grading in flight");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WALL: the suite denominator is never fabricated when the harness cannot be reached", async () => {
+  const root = mkdtempSync(join(tmpdir(), "noharness-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(runs, { recursive: true });
+    // benchRoot with no gates dir: the enumerator cannot run.
+    const wall = await readWall({ runsRoot: runs, runDir: null, benchRoot: root });
+
+    assert.equal(wall.ok, true, "a missing enumerator is a state, not a 500");
+    assert.equal(wall.armed, false, "armed requires a KNOWN suite");
+    assert.equal(wall.suite.total, null, "unknowable stays null, never 0 (invariant I-2)");
+    assert.ok(wall.unwired.includes("gate-roster"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WALL: a run's own pinned roster wins over live enumeration", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pinned-"));
+  try {
+    const runs = join(root, "runs");
+    mkdirSync(join(runs, "cumulative"), { recursive: true });
+    // A roster pinned to this run describes the suite it was GRADED against and
+    // must not be replaced by today's suite, or every comparison re-baselines.
+    writeFileSync(
+      join(runs, "cumulative", "gate-roster.json"),
+      JSON.stringify({
+        schema_version: 1,
+        total: 2,
+        suite_fingerprint: "sha256:pinned",
+        gates: [
+          { id: "G01", phase: "backend", tier: "core" },
+          { id: "G02", phase: "backend", tier: "core" },
+        ],
+      }),
+    );
+
+    const wall = await readWall({ runsRoot: runs, runDir: "cumulative", benchRoot: BENCH });
+    assert.equal(wall.suite_source, "run", "the pinned roster is authoritative");
+    assert.equal(wall.suite.total, 2);
+    assert.equal(wall.suite.fingerprint, "sha256:pinned");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("WALL: a truncated status stream yields every intact record before the tear", async () => {

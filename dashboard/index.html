@@ -799,6 +799,11 @@ a:hover{color:var(--type)}
 .evrow.error .evmark,.evrow.error .evname,.evrow.error .evdetail{color:var(--danger)}
 .evrow.thinking .evname,.evrow.thinking .evdetail{color:var(--dim);font-style:italic}
 .evrow.lifecycle .evname{color:var(--dim)}
+/* USER TURNS — the verbatim text handed to the model. Marked with the type
+   colour and a left rule so a turn the model was GIVEN is never mistaken for
+   something the model DID: everything else in this feed is the agent acting. */
+.evrow.user{box-shadow:inset 2px 0 0 var(--type)}
+.evrow.user .evmark,.evrow.user .evname{color:var(--type)}
 .evpath{font-size:12px}
 /* THE ONLY MOTION ON THE BOARD. Background + inset rule, one shot. Never
    height/margin/transform — those would reflow the feed mid-scroll. */

@@ -26,10 +26,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { promises as fs } from "node:fs";
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 
 import { readGateActivity } from "./gate-events.mjs";
 import { newestLog, readTail } from "./runstate.mjs";
+
+const execFileAsync = promisify(execFile);
+
+/** How long the enumerator may take before the suite is reported unknown. */
+const ROSTER_ENUMERATE_TIMEOUT_MS = 60_000;
 
 /** The contract version the board can assert against. */
 export const WALL_CONTRACT_VERSION = 1;
@@ -68,6 +77,61 @@ async function readJsonOrNull(path) {
     return JSON.parse(await fs.readFile(path, "utf8"));
   } catch {
     return null;
+  }
+}
+
+/**
+ * The suite shape, enumerated from the harness on demand.
+ *
+ * WHY (the ARMED state). The per-run roster is written once at CELL START
+ * (`run_cumulative.py:_write_gate_roster`), so between a wipe and the first cell
+ * there is no roster anywhere and the wall had no denominator — it fell through
+ * to "SUITE SIZE UNKNOWN" and could not draw the board's ARMED state (suite
+ * known, nothing evaluated). A wiped bench is exactly when the operator most
+ * wants to see what is about to be graded.
+ *
+ * THE HARNESS REMAINS THE ONLY AUTHOR OF THE SUITE. This shells out to the same
+ * `roster.mjs` the harness itself runs, so the count is always whatever the
+ * harness enumerates — add or remove a test and this follows automatically,
+ * with no number to maintain in the front end. Nothing here defines a suite.
+ *
+ * EXECUTION-FREE (invariant I-5). `roster.mjs` shells only to `vitest list` and
+ * `playwright test --list`; neither executes a test nor binds :8002, so this is
+ * safe beside a live cell. Measured on this host: 1.9s.
+ *
+ * Written to NO file. The per-run roster is a write-once artifact pinned to the
+ * run it grades; caching this one to disk would create a second, unpinned copy
+ * that could go stale against the suite and silently re-baseline a comparison.
+ * Recomputing is cheap and cannot drift.
+ */
+async function enumerateSuite(benchRoot) {
+  const script = join(benchRoot, "tasks", "backgammon", "gates", "roster.mjs");
+  // Written to a temp file rather than read from stdout: roster.mjs calls
+  // process.exit() immediately after its final write (roster.mjs:375-377), which
+  // truncates an asynchronously-flushed stdout pipe. Measured 2026-08-13 —
+  // spawnSync saw all 39161 bytes while execFile saw 0, and the enumerator
+  // still exited 0, so the failure looked exactly like "no suite" rather than
+  // like a bug. The --out path writes atomically (tmp + rename) and is the same
+  // path the harness itself uses.
+  const out = join(
+    tmpdir(),
+    `wevibe-wall-roster-${process.pid}-${randomUUID()}.json`,
+  );
+  try {
+    if (!(await fs.stat(script)).isFile()) return null;
+    await execFileAsync("node", [script, "--out", out], {
+      cwd: join(benchRoot, "tasks", "backgammon", "gates"),
+      timeout: ROSTER_ENUMERATE_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const parsed = await readJsonOrNull(out);
+    return Array.isArray(parsed?.gates) && parsed.gates.length > 0 ? parsed : null;
+  } catch {
+    // Never fabricate. An enumerator that cannot run leaves the suite unknown,
+    // which the caller reports as unwired rather than as a suite of zero.
+    return null;
+  } finally {
+    await fs.rm(out, { force: true }).catch(() => {});
   }
 }
 
@@ -268,7 +332,7 @@ export function foldGateStates({ roster, attempts, grading, stopped }) {
  * `suite.complete:false` and `unwired:["gate-roster"]` plus a reason — because
  * absent-because-unwired must stay distinguishable from zero (invariant I-2).
  */
-export async function readWall({ runsRoot, runDir, launcher = null, runState = null }) {
+export async function readWall({ runsRoot, runDir, launcher = null, runState = null, benchRoot = null }) {
   const target = resolveRunDir(runsRoot, runDir);
   if (!target) {
     return {
@@ -278,7 +342,15 @@ export async function readWall({ runsRoot, runDir, launcher = null, runState = n
     };
   }
 
-  const roster = await readJsonOrNull(join(target.path, "gate-roster.json"));
+  // The run's own pinned roster is authoritative: it describes the suite this
+  // run was actually graded against. Only when there is no run (a wiped bench,
+  // before the first cell) is the suite enumerated live for the ARMED state.
+  let roster = await readJsonOrNull(join(target.path, "gate-roster.json"));
+  let rosterSource = roster ? "run" : null;
+  if (!roster && benchRoot) {
+    roster = await enumerateSuite(benchRoot);
+    if (roster) rosterSource = "enumerated";
+  }
   const records = await readStatusRecords(join(target.path, "manifest.status.jsonl"));
   const attempts = attemptRecords(records);
 
@@ -298,8 +370,8 @@ export async function readWall({ runsRoot, runDir, launcher = null, runState = n
   if (!roster || !Array.isArray(roster.gates) || roster.gates.length === 0) {
     unwired.push("gate-roster");
     reasons["gate-roster"] =
-      `no readable gate-roster.json in runs/${target.name} — the roster is written once at cell start, ` +
-      "so a run begun before that artifact existed has none and its suite size is unknowable, not zero";
+      `no readable gate-roster.json in runs/${target.name} and the suite could not be enumerated ` +
+      "from the harness — the suite size is unknowable, not zero";
   }
 
   const stopped = inFlightAtStop(gate.status, runState);
@@ -323,10 +395,24 @@ export async function readWall({ runsRoot, runDir, launcher = null, runState = n
       ? attempts[attempts.length - 1].attempt
       : Number(gate.status?.attempt) || null;
 
+  // ARMED — the suite is known and NOTHING has been evaluated.
+  //
+  // Stated by the server rather than inferred by the board, because the board
+  // cannot otherwise tell it apart from "everything failed": both render as a
+  // grid with zero resolved gates. Armed means the run has not reached the
+  // grader, which is the opposite of a result.
+  const armed = Boolean(roster) && !folded.outcomes_published && !gate.status;
+
   return {
     ok: true,
     contract_version: WALL_CONTRACT_VERSION,
     run_dir: target.name,
+    armed,
+    // Where the suite shape came from. "run" is the roster pinned to this run;
+    // "enumerated" is the live harness suite, served when no run exists yet.
+    // The board states which, so a suite shown before a cell starts is never
+    // mistaken for one a run was actually graded against.
+    suite_source: rosterSource,
     suite: {
       // The TRUE enumerated count, or null. Never padded toward a design comp.
       total: roster ? Number(roster.total ?? roster.gates.length) : null,

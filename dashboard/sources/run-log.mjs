@@ -56,18 +56,44 @@ function parseKV(line) {
   return out;
 }
 
+/**
+ * The newest LIVE cell launch log under the runs root.
+ *
+ * ORPHAN LOGS ARE SKIPPED — see control/runstate.mjs newestLog for the measured
+ * defect. Cell logs live at the runs ROOT while the run state they describe
+ * lives in `runs/<run_dir>/`, so archiving or wiping a run leaves the log
+ * behind describing data that is gone. This source is the board's LIVE PULSE;
+ * reading a dead log here paints a wiped bench as a running one.
+ *
+ * Kept deliberately identical in behaviour to the control plane's copy: the two
+ * surfaces must never disagree about which run is live.
+ */
+function runDirOf(text) {
+  const m = /\/runs\/([A-Za-z0-9._-]+)\//.exec(String(text ?? ""));
+  return m ? m[1] : null;
+}
+
 async function newestLog(runsRoot) {
-  let best = null;
+  const candidates = [];
   for (const ent of await listDir(runsRoot)) {
     if (!ent.isFile() || !ent.name.endsWith(".log")) continue;
     if (!/^(off|on)-cell-|^cell-/.test(ent.name)) continue;
     const p = join(runsRoot, ent.name);
     const st = await statOrNull(p);
-    if (st?.isFile() && (!best || st.mtimeMs > best.mtime)) {
-      best = { path: p, mtime: st.mtimeMs, size: st.size, name: ent.name };
+    if (st?.isFile()) {
+      candidates.push({ path: p, mtime: st.mtimeMs, size: st.size, name: ent.name });
     }
   }
-  return best;
+
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  for (const cand of candidates) {
+    const runDir = runDirOf(await readTail(cand.path));
+    // Not yet named: a fresh log that has not printed an artifact path.
+    if (runDir === null) return cand;
+    const st = await statOrNull(join(runsRoot, runDir));
+    if (st?.isDirectory()) return { ...cand, run_dir: runDir };
+  }
+  return null;
 }
 
 /** "initial-chunk-5" -> 5 ; "feedback-2" -> null (no longer a build chunk) */

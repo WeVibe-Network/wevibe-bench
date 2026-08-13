@@ -45,14 +45,19 @@
 
 import { esc, nul, tok, dur } from "../board.js";
 
-export const EVENT_KINDS = ["tool", "file", "thinking", "error", "lifecycle"];
-const KIND_MARK = { tool: "$", file: "~", thinking: "·", error: "!", lifecycle: "◦" };
+// `user` is the verbatim text the harness hands the model AS A USER TURN — the
+// task chunk, the pass verdict, the failure feedback (WO-FEEDBACK-1). It is the
+// single most consequential input the benchmarked model receives, and judging
+// whether it reads like a person wrote it is the whole point of the surface, so
+// it gets its own chip rather than being folded in with harness plumbing.
+export const EVENT_KINDS = ["tool", "file", "thinking", "error", "lifecycle", "user"];
+const KIND_MARK = { tool: "$", file: "~", thinking: "·", error: "!", lifecycle: "◦", user: ">" };
 
 export const EVENT_RENDER_CAP = 400;
 export const BOTTOM_EPS = 24;
 
 /** Filter state lives here, client-side, and survives the board's re-render. */
-const filters = { tool: true, file: true, thinking: true, error: true, lifecycle: true };
+const filters = { tool: true, file: true, thinking: true, error: true, lifecycle: true, user: true };
 export function toggleKind(k) {
   if (k in filters) filters[k] = !filters[k];
 }

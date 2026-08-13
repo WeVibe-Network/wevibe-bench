@@ -147,7 +147,7 @@ export function renderWall(board) {
         <span class="sub">movement is the only thing on this board that means &ldquo;still working&rdquo; — it never means &ldquo;passing&rdquo;</span>
         ${headline(suite)}
       </div>
-      ${gradingLine(live)}
+      ${gradingLine(live, suite)}
       ${gates.length ? grid(board, gates) : empty(live, suite)}
       ${gates.length ? legend(suite, gates) : ""}
       ${gates.length ? clusters(gates) : ""}
@@ -169,6 +169,17 @@ function headline(suite) {
   const resolved = suite.totals?.resolved ?? null;
 
   if (total === null) return `<span class="tag">SUITE SIZE UNKNOWN — NOT ZERO</span>`;
+
+  // ARMED — the suite is enumerated and nothing has been evaluated. Stated as
+  // "0 / N tested", never "0 / N passed": nothing has been tested, so there is
+  // no pass rate to report. The server decides this (`armed`); the board does
+  // not infer it, because armed and everything-failed look identical in a grid.
+  if (suite.armed) {
+    return `
+      <span class="tag">ARMED</span>
+      <span class="sub"><span class="bright">0</span>/${total} tested</span>`;
+  }
+
   if (resolved === null) return `<span class="tag">NO GATE OUTCOMES YET</span>`;
 
   // A partial enumeration is still a true count of what was enumerated — it is
@@ -187,7 +198,24 @@ function headline(suite) {
  * forces the operator to guess whether amber means "working" or "failing" — the
  * exact ambiguity ask 3 exists to remove. Stated in words, above the grid.
  */
-function gradingLine(live) {
+function gradingLine(live, suite) {
+  // ARMED — say so in words. A grid of dotted outlines with no caption is the
+  // same shape as a grid that failed everything, and the operator should not
+  // have to read the colours to tell a run that has not started from a run that
+  // lost. No motion: nothing is happening, so nothing moves.
+  if (suite?.armed) {
+    const total = suite.suite?.total ?? null;
+    const src = suite.suite_source === "enumerated"
+      ? "enumerated from the harness suite — this is what the next cell will be graded against"
+      : "the roster this run was pinned to at cell start";
+    return `
+      <div class="wall-live">
+        <span class="gcell sm"></span>
+        <span class="bright">ARMED${total === null ? "" : ` — ${total} gates defined, none evaluated`}</span>
+        <span class="note">${esc(`every square is a dotted outline: defined, not yet tested. ${src}.`)}</span>
+      </div>`;
+  }
+
   if (live.stalled) {
     const silent = live.silent_s === null ? "" : ` — silent ${live.silent_s}s`;
     return `
