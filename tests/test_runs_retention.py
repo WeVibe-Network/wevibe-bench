@@ -48,12 +48,28 @@ def test_prune_keeps_latest_plus_one_and_live_state(tmp_path: Path) -> None:
     # newest 2 logs kept (mtimes 13, 12), older two deleted
     assert logs[3].exists() and logs[2].exists()
     assert not logs[1].exists() and not logs[0].exists()
-    # newest 2 archives kept (mtimes 22, 21), oldest deleted
-    assert archives[2].exists() and archives[1].exists()
-    assert not archives[0].exists()
+    # Archived run directories carry session DB extraction substrate. Retention
+    # may prune top-level logs, but must never remove these directories.
+    assert archives[2].exists() and archives[1].exists() and archives[0].exists()
     assert sorted(summary["deleted"]) == sorted(
-        ["off-cell-20260810T000000.log", "off-cell-20260811T000000.log", "cumulative.pre-x-20260810"]
+        ["off-cell-20260810T000000.log", "off-cell-20260811T000000.log"]
     )
+
+
+def test_prune_never_deletes_session_db_archives(tmp_path: Path) -> None:
+    module = _load_run_cumulative_module()
+    old = _make_entry(tmp_path, "cumulative.failed-20260810", is_dir=True, mtime=1)
+    db = old / "sessions" / "cell-0" / "session-db"
+    db.mkdir(parents=True)
+    (db / "opencode.db").write_text("sqlite bytes")
+    for i in range(4):
+        _make_entry(tmp_path, f"on-cell-2026081{i}T000000.log", is_dir=False, mtime=10 + i)
+
+    summary = module._prune_runs_retention(tmp_path, keep=1)
+
+    assert old.exists()
+    assert (db / "opencode.db").read_text() == "sqlite bytes"
+    assert "cumulative.failed-20260810" not in summary["deleted"]
 
 
 def test_prune_missing_root_is_nonfatal(tmp_path: Path) -> None:

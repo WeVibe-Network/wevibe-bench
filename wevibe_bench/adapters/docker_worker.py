@@ -1074,7 +1074,17 @@ def _build_run_argv(
     # Live-view topology: publish the fixed serve port unconditionally (both arms).
     # One persistent `opencode serve` per cell binds container:serve_container_port,
     # reached by the founder at host:serve_host_port. MUST land before the container command.
-    run_cmd.extend(["-p", f"{config.serve_host_port}:{config.serve_container_port}"])
+    #
+    # The 127.0.0.1 host prefix is a SECURITY BOUNDARY, not decoration. `-p 4096:4096`
+    # binds 0.0.0.0 (verified: "0.0.0.0:4096->4096/tcp, [::]:4096->4096/tcp"), which
+    # publishes the worker's opencode serve — full session transcript, and an API that
+    # can drive the agent — to every device on the operator's network. Binding the host
+    # side to loopback keeps the live view reachable only from this machine. The
+    # container side still listens on 0.0.0.0 INSIDE its own namespace, which is correct
+    # and required: docker's proxy is the only thing that can reach it.
+    run_cmd.extend(
+        ["-p", f"127.0.0.1:{config.serve_host_port}:{config.serve_container_port}"]
+    )
     run_cmd.extend([config.image, "sleep", "infinity"])
     return run_cmd
 

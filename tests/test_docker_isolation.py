@@ -924,6 +924,13 @@ def test_gate_oracle_scoring_is_host_only_structurally() -> None:
     assert isinstance(gate_cmd_expr.elts[0], ast.Constant) and gate_cmd_expr.elts[0].value == "node"
     assert isinstance(gate_cmd_expr.elts[1], ast.Constant) and gate_cmd_expr.elts[1].value == "report.mjs"
 
+    # The invariant is HOST-ONLY EXECUTION, not one particular subprocess API.
+    # `subprocess.run` was the original spelling; the gate now uses `Popen` so
+    # its output can be STREAMED to the gate log while it runs (WO-GRADE-VIS-1 —
+    # a buffered gate wrote zero bytes for 32 minutes, making a slow grade
+    # indistinguishable from a hang). Either spelling satisfies host-only, so
+    # accept both and keep asserting what actually matters: it is a host
+    # subprocess, it runs in the gates dir, and it never routes through docker.
     subprocess_calls = [
         node
         for node in ast.walk(gate_tree)
@@ -931,14 +938,30 @@ def test_gate_oracle_scoring_is_host_only_structurally() -> None:
         and isinstance(node.func, ast.Attribute)
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "subprocess"
-        and node.func.attr == "run"
+        and node.func.attr in {"run", "Popen"}
     ]
-    assert subprocess_calls, "_run_gate_report must execute host subprocess.run"
+    assert subprocess_calls, "_run_gate_report must execute a host subprocess (run/Popen)"
 
     cwd_values = [kw.value for kw in subprocess_calls[0].keywords if kw.arg == "cwd"]
-    assert cwd_values, "_run_gate_report subprocess.run must set cwd"
+    assert cwd_values, "_run_gate_report host subprocess must set cwd"
     cwd_repr = ast.unparse(cwd_values[0])
-    assert "self.task_dir / 'gates'" in cwd_repr or 'self.task_dir / "gates"' in cwd_repr
+    gates_dir_literals = ("self.task_dir / 'gates'", 'self.task_dir / "gates"')
+    if any(lit in cwd_repr for lit in gates_dir_literals):
+        pass  # inlined directly in the call
+    else:
+        # Bound to a local first. Follow it to its assignment so this still
+        # proves the gate runs in the task's gates dir and nowhere else,
+        # rather than merely proving that SOME cwd was passed.
+        assert cwd_repr == "gates_cwd", f"unexpected cwd expression: {cwd_repr}"
+        gates_cwd_assigns = [
+            node
+            for node in ast.walk(gate_tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "gates_cwd" for t in node.targets)
+        ]
+        assert gates_cwd_assigns, "_run_gate_report must define gates_cwd"
+        gates_cwd_repr = ast.unparse(gates_cwd_assigns[0].value)
+        assert any(lit in gates_cwd_repr for lit in gates_dir_literals), gates_cwd_repr
 
     run_cell_source = inspect.getsource(BackgammonRunner._run_cell_impl)
     run_cell_tree = ast.parse(textwrap.dedent(run_cell_source))

@@ -64,8 +64,8 @@ Requirements for this chunk:
 
 - Language/runtime: **Node + TypeScript**, zero external runtime deps. Node ≥ 22 runs the `.ts` files directly (type-stripping); engine imports use explicit `./x.ts` specifiers.
 - Start command (from the implementation dir): `node src/server.ts` (also `npm start`).
-- The HTTP server MUST bind **port 8002** (`http://localhost:8002/`). If port 8002 is already in use, the process MUST exit non-zero after printing a clear, single-line message that names the port `8002` and states it is already in use (not a raw unhandled-exception stack). On successful boot it MUST print a startup line containing the URL. (A minimal server boot is fine in this chunk; routes arrive in chunk 4.)
+- The HTTP server MUST bind **port 8002** on the **loopback interface only** — `server.listen(8002, '127.0.0.1')`. The host argument is REQUIRED: `listen(8002)` with no host binds `::` (every interface), which exposes the game to every device on the operator's network. Loopback keeps it reachable only from the machine running it. If port 8002 is already in use, the process MUST exit non-zero after printing a clear, single-line message that names the port `8002` and states it is already in use (not a raw unhandled-exception stack). On successful boot it MUST print a startup line containing the URL `http://localhost:8002/`. (A minimal server boot is fine in this chunk; routes arrive in chunk 4.)
 
 **Write in chunks:** never emit more than ~150 lines in a single write/edit tool call — build large files up in ~150-line chunks across several calls, never one giant call.
 
-When you are finished with this task print CHUNK FINISHED at the end, then call the self_compact tool as the last action of your turn.
+When you are finished with this task print CHUNK FINISHED at the end of your turn.

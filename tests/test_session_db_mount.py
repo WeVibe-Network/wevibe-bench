@@ -169,3 +169,29 @@ def test_run_opencode_emits_session_db_progress_line(tmp_path: Path) -> None:
         and "live worker session observable here" in line
         for line in progress_lines
     )
+
+
+def test_serve_port_publishes_to_loopback_only() -> None:
+    """`-p 4096:4096` binds 0.0.0.0 — verified on a live cell as
+    "0.0.0.0:4096->4096/tcp, [::]:4096->4096/tcp" — which publishes the
+    worker's opencode serve (full session transcript, plus an API that can
+    drive the agent) to every device on the operator's network. The 127.0.0.1
+    host prefix is the boundary that prevents it."""
+    config = DockerCellConfig(
+        worktree=TASK_DIR,
+        memory_mode="off",
+        container_name="wevibe-bench-cell-loopback-publish",
+        proxy_base_url=TEST_PROXY_BASE_URL,
+        proxy_token=TEST_PROXY_TOKEN,
+    )
+    argv = _build_run_argv(
+        config=config, worktree=TASK_DIR, uid=501, gid=20, memory_mode="off"
+    )
+
+    publishes = [argv[i + 1] for i, tok in enumerate(argv) if tok == "-p"]
+    assert publishes, "the serve port must still be published"
+    for spec in publishes:
+        assert spec.startswith("127.0.0.1:"), (
+            f"publish {spec!r} binds every interface; it must be loopback-scoped"
+        )
+    assert f"127.0.0.1:{config.serve_host_port}:{config.serve_container_port}" in publishes

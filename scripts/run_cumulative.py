@@ -262,39 +262,30 @@ def _runs_root_from_args(args: argparse.Namespace) -> Path:
 
 
 def _prune_runs_retention(runs_root: Path, *, keep: int = 2) -> dict[str, Any]:
-    """Prune accumulated run artifacts under ``runs/`` (Walter 2026-08-10).
+    """Prune accumulated launch logs under ``runs/``.
 
-    Retention: the newest ``keep`` launch logs (``off-cell-*.log``) and the
-    newest ``keep`` archived run states (``cumulative.*`` dirs) survive;
-    anything older is deleted. The live ``cumulative/`` state dir is never
-    touched, and no entry outside those two classes is either — so a failed
-    run's evidence (the latest, plus one prior) is always available for
-    post-mortem while long-term accumulation stays bounded. Hooked into
-    every mutating command's exit path (the early-cancellation flow:
-    normal return, exception, and KeyboardInterrupt all land in main()'s
-    finally). Supersedes the blanket "archive, never delete" recovery note
-    for archives older than latest+1. Never raises: a prune failure must
-    not alter the command's exit path or code.
+    Retention controls LOG FILES ONLY. Session DBs and archived run directories
+    are extraction substrate and are never deleted by this policy, including for
+    failed runs. A failed run may have its old top-level launch log pruned, but
+    its ``session-db/opencode.db`` must persist so the operator can extract from
+    any cell that later receives a complete gate.
     """
     summary: dict[str, Any] = {"kept": [], "deleted": [], "skipped_root": None}
     try:
         if not runs_root.is_dir():
             summary["skipped_root"] = str(runs_root)
             return summary
-        classes = (
-            sorted(runs_root.glob("off-cell-*.log"), key=lambda p: p.stat().st_mtime, reverse=True),
-            [p for p in sorted(runs_root.glob("cumulative.*"), key=lambda p: p.stat().st_mtime, reverse=True) if p.is_dir()],
+        entries = sorted(
+            [p for p in runs_root.glob("*-cell-*.log") if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
         )
-        for entries in classes:
-            for idx, path in enumerate(entries):
-                if idx < keep:
-                    summary["kept"].append(path.name)
-                    continue
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-                summary["deleted"].append(path.name)
+        for idx, path in enumerate(entries):
+            if idx < keep:
+                summary["kept"].append(path.name)
+                continue
+            path.unlink()
+            summary["deleted"].append(path.name)
     except Exception as exc:
         summary["error"] = f"{type(exc).__name__}: {exc}"
     return summary

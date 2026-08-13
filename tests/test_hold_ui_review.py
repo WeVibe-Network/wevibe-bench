@@ -169,3 +169,108 @@ def test_resolve_entrypoint_throws_loudly(tmp_path: Path) -> None:
     worktree.mkdir()
     with pytest.raises(RuntimeError, match="no entrypoint resolved"):
         _resolve_hold_ui_entrypoint(worktree)
+
+
+# ── Operator close-out + the consumable release contract ────────────────────
+#
+# The hold is what the operator SEES at the end of a run and what the dashboard
+# LATER consumes to release it. Both are contracts, so both are asserted here.
+
+_RELEASE_CONTRACT_PORT = 18313
+
+
+def test_state_file_carries_the_consumable_release_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A consumer (the dashboard, a separate agent's work) must be able to
+    release the hold from hold-ui.json ALONE, without reading this source."""
+    monkeypatch.setattr(backgammon_mod, "_HOLD_UI_PORT", _RELEASE_CONTRACT_PORT)
+    monkeypatch.setenv(_HOLD_UI_ENV, "1")
+    worktree = _mk_worktree(tmp_path, _RELEASE_CONTRACT_PORT)
+    lines: list[str] = []
+    # The state file is deliberately UNLINKED on release (a stale "held" file
+    # would tell the dashboard a finished cell is still waiting), so it must be
+    # captured DURING the hold, not after.
+    captured: dict = {}
+
+    def _capture_then_release() -> None:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            state_file = tmp_path / _HOLD_UI_STATE_FILE
+            if state_file.exists():
+                time.sleep(0.5)
+                captured.update(json.loads(state_file.read_text(encoding="utf-8")))
+                (tmp_path / _HOLD_UI_RELEASE_FILE).write_text("release\n", encoding="utf-8")
+                return
+            time.sleep(0.2)
+
+    grabber = threading.Thread(target=_capture_then_release, daemon=True)
+    grabber.start()
+
+    _hold_for_ui_review(**_hold_kwargs(tmp_path, worktree, lines))
+    grabber.join(timeout=25)
+
+    state = captured
+    assert state, "hold never published its state file"
+    assert state["status"] == "held"
+    assert state["schema_version"] == 1
+
+    release = state["release"]
+    assert release["method"] == "touch_file"
+    # The advertised path must be the one the loop actually waits on.
+    assert Path(release["path"]) == tmp_path / _HOLD_UI_RELEASE_FILE
+    assert release["poll_interval_s"] > 0
+    assert str(tmp_path / _HOLD_UI_RELEASE_FILE) in release["example_shell"]
+
+    # The URL the operator is handed must be the one that was served.
+    assert state["url"].endswith(f":{_RELEASE_CONTRACT_PORT}")
+    assert state["ui_healthy"] is True
+
+    # Loopback claim is MEASURED, and the stub binds 0.0.0.0 — so if this host
+    # has a LAN address the exposure must be REPORTED, never assumed away.
+    assert state["bind"]["expected_host"] == "127.0.0.1"
+    assert isinstance(state["bind"]["lan_reachable"], bool)
+
+    out = capsys.readouterr().out
+    assert "game is finished" in out
+    assert state["url"] in out
+    assert f"touch {tmp_path / _HOLD_UI_RELEASE_FILE}" in out
+    assert _port_free(_RELEASE_CONTRACT_PORT), "hold left a listener behind"
+
+
+def test_no_url_is_offered_when_the_ui_never_booted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Handing the operator a link to a dead server is worse than saying
+    nothing — the close-out must say the UI failed and name the log."""
+    monkeypatch.setattr(backgammon_mod, "_HOLD_UI_PORT", 18314)
+    monkeypatch.setenv(_HOLD_UI_ENV, "1")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()  # no entrypoint -> boot fails
+    lines: list[str] = []
+    captured: dict = {}
+
+    def _capture_then_release() -> None:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            state_file = tmp_path / _HOLD_UI_STATE_FILE
+            if state_file.exists():
+                time.sleep(0.5)
+                captured.update(json.loads(state_file.read_text(encoding="utf-8")))
+                (tmp_path / _HOLD_UI_RELEASE_FILE).write_text("release\n", encoding="utf-8")
+                return
+            time.sleep(0.2)
+
+    grabber = threading.Thread(target=_capture_then_release, daemon=True)
+    grabber.start()
+
+    _hold_for_ui_review(**_hold_kwargs(tmp_path, worktree, lines))
+    grabber.join(timeout=25)
+
+    out = capsys.readouterr().out
+    assert "did NOT boot" in out
+    assert "you can view it here" not in out
+    assert captured, "hold never published its state file"
+    assert captured["ui_healthy"] is False
+    # No UI booted, so nothing can be LAN-reachable.
+    assert captured["bind"]["lan_reachable"] is False

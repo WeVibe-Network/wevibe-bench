@@ -51,4 +51,4 @@ Turn flow the server must drive: doubles yield 4 moves; dice are consumed as use
 
 **Write in chunks:** never emit more than ~150 lines in a single write/edit tool call — build large files up in ~150-line chunks across several calls, never one giant call.
 
-When you are finished with this task print CHUNK FINISHED at the end, then call the self_compact tool as the last action of your turn.
+When you are finished with this task print CHUNK FINISHED at the end of your turn.

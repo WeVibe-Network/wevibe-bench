@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -348,6 +349,31 @@ DEFAULT_MAX_STEPS_PER_ATTEMPT = 100
 # int4/fp8 pins run slower than Opus, so the canonical default carries ~1.75x
 # headroom over the slowest healthy observed wall (3060 * 1.75 ~= 5355 -> 5400).
 DEFAULT_RUN_TIMEOUT_S = 5400
+
+# Canonical gate-oracle wall-clock timeout (harness guard, NOT a scoring signal).
+# The gate is graded work, not model work: a healthy grade is fast. Measured
+# 2026-08-12 on the backgammon task: 45s and 113s for two clean attempts, and
+# 1918s for one starved by an orphaned gate tree competing for CPU. 3600s is
+# ~1.9x the worst OBSERVED (already-pathological) wall and ~32x the healthy
+# baseline, so it can only fire on a genuine hang, never on a slow-but-working
+# grade. A gate that exceeds it fails its attempt WITH evidence (the streamed
+# log is already on disk) instead of hanging the campaign indefinitely, which is
+# what happened before this existed.
+#
+# NOT the same threshold as the board's stall ALARM: the alarm is a visual
+# signal that must fire early (minutes) so an operator can look; this is a
+# destructive kill that must fire late. Alarm << timeout, by construction.
+DEFAULT_GATE_TIMEOUT_S = 3600
+
+
+class GateTimeoutError(RuntimeError):
+    """The gate oracle exceeded its wall-clock limit and was killed.
+
+    Distinct from a gate FAIL: the model's work was never graded, so this is a
+    harness/instrument failure and must never be scored as a capability FAIL
+    (RUNBOOK rule 5.10 reasoning). It carries the partial log path so the stall
+    is diagnosable from the artifact rather than from a live process.
+    """
 
 
 def _worktree_has_injection_record(worktree: Path) -> bool:
@@ -678,6 +704,43 @@ def _hold_ui_healthy(port: int) -> bool:
         return False
 
 
+def _hold_ui_lan_exposed(port: int) -> str | None:
+    """Is the held UI reachable from OFF this machine? Returns the reachable
+    address, or None when it is loopback-only.
+
+    The prompt REQUIRES the artifact to bind 127.0.0.1, but the agent wrote
+    that server and an agent can ignore an instruction — `listen(8002)` with no
+    host binds `::` (verified), publishing the game to every device on the
+    operator's network. So this is checked, never assumed: bind the machine's
+    own LAN address and see whether the port is already taken there by the
+    artifact.
+
+    A failure to determine it returns None (treated as not-exposed) — this is a
+    warning surface on an operator-local review feature, and it must never fail
+    a finished cell.
+    """
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # No packet is sent; this just selects the default-route interface.
+            probe.connect(("192.0.2.1", 9))  # TEST-NET-1, RFC 5737
+            lan_ip = probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        return None
+    if not lan_ip or lan_ip.startswith("127."):
+        return None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            if sock.connect_ex((lan_ip, port)) == 0:
+                return f"{lan_ip}:{port}"
+    except OSError:
+        return None
+    return None
+
+
 def _hold_for_ui_review(
     *,
     run_label: str,
@@ -764,6 +827,14 @@ def _hold_for_ui_review(
     except OSError:
         pass
 
+    # Did the artifact actually bind loopback-only, as the prompt requires?
+    lan_exposure = _hold_ui_lan_exposed(_HOLD_UI_PORT) if ui_healthy else None
+    if lan_exposure is not None:
+        progress(
+            f"PROGRESS run_label={run_label} step=hold-ui bind=LAN_EXPOSED "
+            f"address={lan_exposure} detail=artifact_ignored_loopback_requirement"
+        )
+
     state = {
         "url": url,
         "ui_healthy": ui_healthy,
@@ -775,6 +846,34 @@ def _hold_for_ui_review(
         "release_cmd": f"touch {release_path}",
         "server_log": str(server_log_path),
         "started_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
+        # ── CONSUMABLE RELEASE CONTRACT (for the dashboard/control plane) ────
+        # Deliberately NOT wired into the dashboard here — a separate agent owns
+        # that. This is the stable surface it consumes.
+        #
+        # Release is a FILE TOUCH, not an HTTP endpoint, on purpose: the holding
+        # process is a plain blocking loop with no server of its own, and giving
+        # it a listening socket would add a second network surface (and a second
+        # thing to secure) to a feature whose whole point is a human looking at
+        # one page. A file works from the dashboard, a script, or a shell, needs
+        # no auth story, and cannot be reached from off-box at all.
+        "status": "held",
+        "schema_version": 1,
+        "release": {
+            "method": "touch_file",
+            "path": str(release_path),
+            "poll_interval_s": _HOLD_UI_POLL_S,
+            # A consumer releases the hold by creating this file. The loop polls
+            # for it and tears the stack down on the next tick.
+            "example_python": f"open({str(release_path)!r}, 'w').close()",
+            "example_shell": f"touch {release_path}",
+        },
+        "bind": {
+            # MEASURED, not asserted: the agent wrote the server, so whether it
+            # honoured the loopback-only requirement is a fact to check.
+            "expected_host": "127.0.0.1",
+            "lan_reachable": lan_exposure is not None,
+            "lan_address": lan_exposure,
+        },
     }
     try:
         state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
@@ -788,7 +887,47 @@ def _hold_for_ui_review(
         f"release='touch {release_path}'"
     )
     progress(f"PROGRESS run_label={run_label} step=hold-ui waiting {hold_banner}")
-    print(f"\n{hold_banner}\n", flush=True)
+
+    # The operator-facing close-out. The machine-readable banner above is for
+    # the log; this is the line a human reads at the end of a run, so it leads
+    # with a clickable URL and states plainly that the session is waiting on
+    # them. Printed only when the UI actually booted — offering a link to a
+    # server that is not listening is worse than saying nothing.
+    if ui_healthy:
+        if lan_exposure is None:
+            reach_lines = (
+                "  The page is served on loopback only — reachable from this\n"
+                "  machine, not from anything else on your network.\n"
+            )
+        else:
+            reach_lines = (
+                f"  WARNING: this server is ALSO reachable at {lan_exposure}\n"
+                "  — every device on your network can open it. The artifact did\n"
+                "  not honour the loopback-only requirement in its prompt.\n"
+            )
+        operator_message = (
+            f"\n{'=' * 72}\n"
+            f"  game is finished — you can view it here: {url}\n"
+            f"{'=' * 72}\n"
+            f"  This session is now HELD and will wait until you release it.\n"
+            f"{reach_lines}\n"
+            f"  When you are done looking, release it with:\n"
+            f"      touch {release_path}\n"
+            f"{'=' * 72}\n"
+        )
+    else:
+        operator_message = (
+            f"\n{'=' * 72}\n"
+            f"  game is finished, but the UI did NOT boot: {boot_detail}\n"
+            f"{'=' * 72}\n"
+            f"  No URL is offered because nothing is listening on {url}.\n"
+            f"  Server log: {server_log_path}\n"
+            f"  The container and worktree are still up for inspection.\n\n"
+            f"  Release the hold with:\n"
+            f"      touch {release_path}\n"
+            f"{'=' * 72}\n"
+        )
+    print(operator_message, flush=True)
 
     held_at = time.monotonic()
     last_heartbeat = 0.0
@@ -962,6 +1101,7 @@ class BackgammonRunner(AgentRunner):
         resume_budget: int = 2,
         token_cap: int = 200000,
         run_timeout_s: int = DEFAULT_RUN_TIMEOUT_S,
+        gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S,
         completion_grace_s: int = 30,
         cost_limit_usd: float | None = None,
         cost_target_usd: float | None = None,
@@ -992,6 +1132,9 @@ class BackgammonRunner(AgentRunner):
             raise ValueError("resume_budget must be >= 0")
         self.token_cap = int(token_cap)
         self.run_timeout_s = int(run_timeout_s)
+        self.gate_timeout_s = int(gate_timeout_s)
+        if self.gate_timeout_s <= 0:
+            raise ValueError("gate_timeout_s must be > 0")
         self.completion_grace_s = int(completion_grace_s)
         self.cost_limit_usd = None if cost_limit_usd is None else float(cost_limit_usd)
         self.cost_target_usd = None if cost_target_usd is None else float(cost_target_usd)
@@ -2491,6 +2634,32 @@ class BackgammonRunner(AgentRunner):
         return "\n".join(lines)
 
     def _run_gate_report(self, *, worktree: Path, report_path: Path, log_path: Path) -> dict[str, Any]:
+        """Run the gate oracle, STREAMING its output to ``log_path`` as it runs.
+
+        WHY STREAMED AND NOT BUFFERED (WO-GRADE-VIS-1). This previously used
+        ``subprocess.run(capture_output=True)`` and wrote the log only AFTER the
+        process returned. A slow or hung grade therefore produced ZERO bytes for
+        its entire duration: measured 2026-08-12, an attempt-3 gate ran 1918s
+        (~32 min) against a 45s/113s baseline while `attempt-3-gate.log` did not
+        exist, so "grading" and "wedged" were indistinguishable without
+        inspecting process stacks by hand. The gate runner already announces
+        every phase on stderr BEFORE spawning it (`report.mjs`:
+        ``[report] phase=<name> target=...``); those markers were real and
+        simply trapped in a pipe buffer until exit.
+
+        Streaming makes the log an append-only progress record whose MTIME is a
+        true liveness signal — which is what the board's stall detection reads.
+        Both streams are merged (``stderr=STDOUT``) so phase markers and the
+        output they describe stay in causal order in one file, and a single
+        reader cannot deadlock on two pipes.
+
+        TIMEOUT (belt-and-suspenders). A gate that never returns must fail its
+        attempt with evidence rather than hang the campaign forever. On timeout
+        the whole process GROUP is killed: the gate spawns npm -> vitest ->
+        workers, and signalling only the direct child leaves those children
+        alive (exactly the orphan class that burned 341 CPU-minutes on
+        2026-08-12). Partial output is already on disk by construction.
+        """
         gate_cmd = [
             "node",
             "report.mjs",
@@ -2499,43 +2668,150 @@ class BackgammonRunner(AgentRunner):
             "--out",
             str(report_path.resolve()),
         ]
-        gate_started = time.monotonic()
-        completed = subprocess.run(
-            gate_cmd,
-            cwd=str((self.task_dir / "gates").resolve()),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        gate_wall = time.monotonic() - gate_started
-
+        gates_cwd = str((self.task_dir / "gates").resolve())
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            "\n".join(
-                [
-                    f"cmd: {gate_cmd}",
-                    f"cwd: {(self.task_dir / 'gates').resolve()}",
-                    f"exit: {completed.returncode}",
-                    f"wall_seconds: {gate_wall:.3f}",
-                    "--- stdout ---",
-                    completed.stdout,
-                    "--- stderr ---",
-                    completed.stderr,
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
+
+        gate_started = time.monotonic()
+        timed_out = False  # set by the watchdog below, never inferred
+        # Header is written and flushed BEFORE the child starts, so the file
+        # exists from t=0 and its absence can never be mistaken for a slow gate.
+        with log_path.open("w", encoding="utf-8") as log_file:
+            log_file.write(f"cmd: {gate_cmd}\n")
+            log_file.write(f"cwd: {gates_cwd}\n")
+            log_file.write(f"timeout_seconds: {self.gate_timeout_s}\n")
+            log_file.write("--- output (streamed, stdout+stderr merged) ---\n")
+            log_file.flush()
+
+            proc = subprocess.Popen(  # noqa: S603 - fixed argv, host-only gate oracle
+                gate_cmd,
+                cwd=gates_cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,  # line-buffered: a phase marker lands as it is emitted
+                start_new_session=True,  # own process group, so timeout kills the tree
+            )
+            assert proc.stdout is not None
+            # WATCHDOG, NOT `wait(timeout=...)`. The reader loop below blocks in
+            # `for line in proc.stdout` until the child closes the pipe, so a
+            # hung gate never reaches a post-loop wait() — the timeout would be
+            # structurally unreachable. (That is precisely the defect class this
+            # work exists to fix: vitest's own 60s testTimeout could not fire
+            # because a microtask loop starved its timer.) An independent timer
+            # thread owns the deadline, kills the process group, and the pipe
+            # closes as a consequence, which unblocks the reader.
+            timeout_fired = threading.Event()
+
+            def _on_deadline() -> None:
+                timeout_fired.set()
+                self._kill_process_group(proc)
+
+            watchdog = threading.Timer(self.gate_timeout_s, _on_deadline)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                for line in proc.stdout:
+                    log_file.write(line)
+                    # Flushed per line: an unflushed buffer would reintroduce
+                    # exactly the invisibility this change exists to remove.
+                    log_file.flush()
+                    self._emit_gate_phase_progress(line, log_path=log_path)
+                proc.wait()
+            finally:
+                watchdog.cancel()
+                if proc.poll() is None:
+                    # Pipe closed while the child still lives. Never leave the
+                    # tree running.
+                    self._kill_process_group(proc)
+                    proc.wait()
+            timed_out = timeout_fired.is_set()
+
+            gate_wall = time.monotonic() - gate_started
+            returncode = proc.returncode
+            if timed_out:
+                log_file.write(
+                    f"\n[harness] gate TIMED OUT after {gate_wall:.3f}s "
+                    f"(limit {self.gate_timeout_s}s); process group killed\n"
+                )
+            log_file.write(f"\nexit: {returncode}\n")
+            log_file.write(f"wall_seconds: {gate_wall:.3f}\n")
+            log_file.flush()
+
+        if timed_out:
+            self._progress(
+                f"PROGRESS step=gate-timeout wall_s={gate_wall:.1f} "
+                f"limit_s={self.gate_timeout_s} log={log_path}"
+            )
+            raise GateTimeoutError(
+                f"gate oracle exceeded {self.gate_timeout_s}s "
+                f"(ran {gate_wall:.1f}s); partial output at {log_path}"
+            )
 
         if not report_path.is_file():
             raise RuntimeError(
-                f"gate report missing at {report_path} (exit={completed.returncode})"
+                f"gate report missing at {report_path} (exit={returncode})"
             )
 
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise RuntimeError(f"gate report must be an object: {report_path}")
         return payload
+
+    @staticmethod
+    def _kill_process_group(proc: subprocess.Popen[Any]) -> None:
+        """SIGKILL the child's whole process group; fall back to the child.
+
+        The gate spawns ``npm exec`` -> ``vitest`` -> worker processes. Killing
+        only ``proc`` leaves those children reparented to init and still
+        burning CPU — the exact orphan class measured at 341 CPU-minutes on
+        2026-08-12. ``start_new_session=True`` at spawn is what makes the
+        group addressable here.
+        """
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            # Group already gone, or not ours to signal. Never mask the
+            # timeout itself behind a teardown error.
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _emit_gate_phase_progress(self, line: str, *, log_path: Path) -> None:
+        """Republish a gate phase marker as a harness PROGRESS line.
+
+        The gate runner's own markers live in the gate log, which the control
+        plane does not read. Mirroring them into the run log puts grading into
+        the same ``PROGRESS step=`` vocabulary every downstream consumer already
+        parses, so grading progress appears in the live event feed instead of
+        reading as dead air between attempts.
+
+        Instrumentation only: this must never alter gate behaviour, and a
+        malformed line is ignored rather than raised.
+        """
+        text = line.strip()
+        if not text.startswith("[report] phase="):
+            return
+        fields = dict(
+            part.split("=", 1)
+            for part in text[len("[report] ") :].split()
+            if "=" in part
+        )
+        phase = fields.get("phase")
+        if not phase:
+            return
+        status = fields.get("status")
+        if status is None:
+            # Phase ANNOUNCED. Emitted before the phase runs, so a stall inside
+            # it is attributable to a named phase rather than to "the gate".
+            self._progress(
+                f"PROGRESS step=gate-phase-start phase={phase} log={log_path}"
+            )
+        else:
+            self._progress(
+                f"PROGRESS step=gate-phase-end phase={phase} status={status} "
+                f"problems={fields.get('problems', 'unknown')} log={log_path}"
+            )
 
     def _run_opencode_serve(
         self,

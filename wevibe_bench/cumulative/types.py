@@ -642,6 +642,8 @@ class SessionRecord:
     decision_applied: bool = False
     committed_ids: list[str] = field(default_factory=list)
     corpus_delta: int | None = None
+    complete_gate: bool = False
+    extracted_from: bool = False
     retry_count: int = 0
     resume_marker: str | None = None
     error: str | None = None
@@ -669,6 +671,8 @@ class SessionRecord:
             "decision_applied": self.decision_applied,
             "committed_ids": list(self.committed_ids),
             "corpus_delta": self.corpus_delta,
+            "complete_gate": self.complete_gate,
+            "extracted_from": self.extracted_from,
             "retry_count": self.retry_count,
             "resume_marker": self.resume_marker,
             "error": self.error,
@@ -705,6 +709,8 @@ class SessionRecord:
             decision_applied=bool(d.get("decision_applied", False)),
             committed_ids=_string_list(d.get("committed_ids")),
             corpus_delta=_optional_int(d.get("corpus_delta")),
+            complete_gate=bool(d.get("complete_gate", False)),
+            extracted_from=bool(d.get("extracted_from", False)),
             retry_count=int(d.get("retry_count", 0)),
             resume_marker=d.get("resume_marker"),
             error=d.get("error"),

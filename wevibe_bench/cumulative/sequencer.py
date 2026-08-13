@@ -292,6 +292,7 @@ class CumulativeSequencer:
                         ",".join(halted["observed_producer_model_ids"]),
                     )
                     return halted
+                session.complete_gate = True
                 return self._extract_pending_descriptor(session)
 
             if phase == SessionPhase.EXTRACT_NORMAL_PIPELINE:
@@ -376,6 +377,7 @@ class CumulativeSequencer:
                 cut_off=False,
                 candidate_count=session.extraction_candidate_count,
             )
+            session.extracted_from = True
             session.set_phase(SessionPhase.AWAIT_COORDINATOR_REVIEW)
             self._checkpoint()
 
@@ -511,6 +513,7 @@ class CumulativeSequencer:
                         len(session.committed_ids),
                     )
                     delivery_verified = True
+                    session.extracted_from = True
                     break
 
                 if poll_count == 1 or poll_count % 10 == 0:
