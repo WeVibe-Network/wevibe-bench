@@ -41,6 +41,10 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// The REAL server-side state machine. Imported so the fixtures cannot drift
+// from what /api/wall actually emits.
+import { choreographGate } from "../control/choreography.mjs";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const noop = () => {};
@@ -109,6 +113,39 @@ const GATES = [
   { id: "C:e", req: "REQ-DBL", title: "not yet tested", state: "untested", resolved_at_attempt: null, under_test: false },
 ];
 
+// ── THE CHOREOGRAPHY IS ATTACHED BY THE REAL SERVER FUNCTION ────────────────
+//
+// `control/choreography.mjs` is imported rather than restated, so these
+// fixtures carry EXACTLY the payload /api/wall emits. A hand-written
+// choreography block here would let the panel and the server drift while every
+// test stayed green — which is the one failure this file exists to catch.
+//
+// The history each fixture implies:
+//   C:a  pass at 1                → blue   (passed, never failed)
+//   C:b  fail at 1, pass at 2     → green  (recovered)
+//   C:c  fail at 1, fail at 2     → red
+//   C:d  PASS at 1, FAIL at 2     → red + regression star  ← the directive's case
+//   C:e  never executed           → none
+const HISTORY = {
+  "C:a": [{ attempt: 1, status: "pass" }],
+  "C:b": [{ attempt: 1, status: "fail" }, { attempt: 2, status: "pass" }],
+  "C:c": [{ attempt: 1, status: "fail" }, { attempt: 2, status: "fail" }],
+  "C:d": [{ attempt: 1, status: "pass" }, { attempt: 2, status: "fail" }],
+  "C:e": [],
+};
+
+/** Attach real server-computed choreography to a gate list. */
+const choreo = (gates) =>
+  gates.map((g) => ({
+    ...g,
+    choreography: choreographGate({
+      history: HISTORY[g.id] ?? [],
+      underTest: g.under_test === true,
+      abandoned: g.state === "abandoned",
+    }),
+  }));
+
+
 /** Mark the two failing gates as under test, the way the server does mid-phase. */
 const underTest = (gates) =>
   gates.map((g) => ({ ...g, under_test: g.state === "failing" || g.state === "untested" ? true : false }));
@@ -125,12 +162,13 @@ const suiteWith = (gates, grading) => ({
   attempt: { current: 2, max: 3 },
   grading,
   live_signal: { conformance: "per-phase-set", backend: "per-phase-set", frontend: "per-phase-set" },
-  gates,
+  gates: choreo(gates),
   totals: {
     resolved: gates.filter((g) => g.state === "resolved").length,
     failing: gates.filter((g) => g.state === "failing").length,
     untested: gates.filter((g) => g.state === "untested").length,
     abandoned: gates.filter((g) => g.state === "abandoned").length,
+    regressed: choreo(gates).filter((g) => g.choreography.regressed).length,
   },
   unwired: [],
   unwired_reasons: {},
@@ -153,11 +191,39 @@ const TAKEOVER = boardWith(
   { recall_moment: { fired_at: Date.now(), failure_key: "k" } },
 );
 
-/** The wall's squares, in order, as their state class. */
+/**
+ * The wall's squares, in order, as their FILL class.
+ *
+ * Reads `gf-*` only. Fill is the axis that carries the VERDICT, so every
+ * assertion about what a square says is an assertion about its fill; motion and
+ * mark are read separately by `motions()` and `marks()` below. Splitting them
+ * is the point of the three-family class scheme — a single compound token would
+ * force every test to re-parse meaning out of a string.
+ */
 function slots(html) {
   const wall = html.match(/<div class="gwall[^"]*"[^>]*>([\s\S]*?)<\/div>/);
   assert.ok(wall, "no gate wall rendered");
-  return [...wall[1].matchAll(/<span class="gcell ([a-z]+)"/g)].map((m) => m[1]);
+  return [...wall[1].matchAll(/<span class="gcell ([^"]*)"/g)].map(
+    (m) => (m[1].match(/gf-(\w+)/) ?? [])[1] ?? "?",
+  );
+}
+
+/** The MOTION axis per square: "pulse" or "still". */
+function motions(html) {
+  const wall = html.match(/<div class="gwall[^"]*"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(wall, "no gate wall rendered");
+  return [...wall[1].matchAll(/<span class="gcell ([^"]*)"/g)].map(
+    (m) => (m[1].match(/gm-(\w+)/) ?? [])[1] ?? "?",
+  );
+}
+
+/** The MARK axis per square: "regression" or null. */
+function marks(html) {
+  const wall = html.match(/<div class="gwall[^"]*"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(wall, "no gate wall rendered");
+  return [...wall[1].matchAll(/<span class="gcell ([^"]*)"/g)].map(
+    (m) => (m[1].match(/gk-(\w+)/) ?? [])[1] ?? null,
+  );
 }
 
 // ── the frames ──────────────────────────────────────────────────────────────
@@ -175,8 +241,16 @@ const FRESH_GATES = GATES.map((g) => ({
   under_test: false,
 }));
 
+// A genuinely armed wall has NO history for any gate — nothing has been
+// evaluated. `suiteWith` attaches choreography from HISTORY by id, so the armed
+// fixture must clear it explicitly; otherwise the squares would carry verdicts
+// from a run that, in this frame, has not happened.
 const ARMED_FRESH = boardWith({
   ...suiteWith(FRESH_GATES, null),
+  gates: FRESH_GATES.map((g) => ({
+    ...g,
+    choreography: choreographGate({ history: [], underTest: false, abandoned: false }),
+  })),
   armed: true,
   suite_source: "enumerated",
 });
@@ -185,7 +259,7 @@ test("ARMED: a wiped bench shows the suite defined and nothing evaluated", () =>
   const html = renderWall(ARMED_FRESH);
   assert.deepEqual(
     slots(html),
-    ["unobserved", "unobserved", "unobserved", "unobserved", "unobserved"],
+    ["none", "none", "none", "none", "none"],
     "every square is a dotted outline: defined, not yet tested",
   );
   assert.match(html, /ARMED/, "the state must be named, not inferred from colour");
@@ -205,58 +279,105 @@ test("ARMED: the board states where the suite shape came from", () => {
   assert.match(renderWall(pinned), /pinned to at cell start/);
 });
 
-test("resolution rides ATTEMPTS: blue is attempt 1, green is later", () => {
+test("BLUE is 'passed having never failed'; GREEN is 'recovered'", () => {
+  // THE DIRECTIVE'S PHASE-2/3 RULE. Blue and green are not two flavours of
+  // pass: blue says the gate was never broken, green says it was broken and is
+  // now fixed. Collapsing them loses the recovery, which is the whole point of
+  // running more than one attempt.
   const s = slots(renderWall(ARMED));
-  assert.equal(s[0], "blue", "resolved_at_attempt 1 must be blue");
-  assert.equal(s[1], "green", "resolved at a later attempt must be green");
+  assert.equal(s[0], "blue", "passed at its first execution, never failed → blue");
+  assert.equal(s[1], "green", "failed then passed → green");
 });
 
-test("blue never claims 'passed phase 1' on the surface", () => {
+test("REGRESSION: a gate that was passing and now fails is red AND starred", () => {
+  // THE DIRECTIVE'S MOST IMPORTANT RULE. C:d passed in attempt 1 and failed in
+  // attempt 2. In the resting states that is indistinguishable from a gate that
+  // never passed — both are simply "failing" — so without the mark the single
+  // most alarming event in a run is invisible.
   const html = renderWall(ARMED);
-  assert.match(html, /passed on attempt 1/, "the legend must state what blue means");
-  assert.doesNotMatch(html, /passed (in |on )?phase 1/i, "blue must never be glossed as passing a phase");
+  assert.equal(slots(html)[3], "red", "a regressed gate shows its CURRENT verdict");
+  assert.equal(marks(html)[3], "regression", "and carries the persistent star");
+  assert.equal(marks(html)[2], null, "a gate that never passed must NOT be starred");
+  assert.match(html, /REGRESSED/, "the star must be explained in words, not left as a glyph");
+});
+
+test("the star is an OVERLAY, never a colour — it survives a recovery", () => {
+  // "star persists forever for that run". A gate that broke and was then fixed
+  // is green AND still starred: the fill reports where it stands now, the mark
+  // reports that it is unstable. Encoding the regression as a colour would force
+  // a choice between those two true facts.
+  const c = choreographGate({
+    history: [
+      { attempt: 1, status: "pass" },
+      { attempt: 2, status: "fail" },
+      { attempt: 3, status: "pass" },
+    ],
+  });
+  assert.equal(c.fill, "green", "it is passing again");
+  assert.equal(c.mark, "regression", "and the run's instability is still recorded");
 });
 
 test("idle: a failing gate is red, and nothing pulses", () => {
-  const s = slots(renderWall(ARMED));
-  assert.deepEqual(s, ["blue", "green", "red", "red", "unobserved"]);
-  // Scoped to the GRID, not the whole document: the legend now carries a
-  // swatch for every state at all times (it is a key, not a status readout),
-  // so an amber swatch there is correct and expected even when nothing pulses.
-  assert.ok(!s.includes("testing"), "no amber square without a live grader");
+  const html = renderWall(ARMED);
+  assert.deepEqual(slots(html), ["blue", "green", "red", "red", "none"]);
+  assert.ok(!motions(html).includes("pulse"), "no motion without a live grader");
 });
 
-test("running: only unresolved gates go amber, and it claims no outcome", () => {
+test("FIRST LOOK is pulsing WHITE, and only a first look can be white", () => {
+  // THE DIRECTIVE'S PHASE-1 RULE. A gate being worked on for the very first time
+  // has no prior colour to pulse, so it gets white — reserved exclusively for
+  // that moment, so a white square always means "we have never seen this gate
+  // before" and can never be confused with "we are unsure".
   const html = renderWall(RUNNING);
-  assert.deepEqual(slots(html), ["blue", "green", "testing", "testing", "testing"]);
+  const s = slots(html);
+  const m = motions(html);
+  assert.equal(s[4], "white", "C:e has never executed — its first test is white");
+  assert.equal(m[4], "pulse", "and it pulses");
+  for (const i of [0, 1, 2, 3]) {
+    assert.notEqual(s[i], "white", `slot ${i} has history and must never be white`);
+  }
+});
+
+test("RE-TESTING pulses the EXISTING colour, never a new one", () => {
+  // THE DIRECTIVE'S PHASE-2/3 RULE. A gate under test after the first time keeps
+  // the last verdict it earned and animates it. Repainting it amber would throw
+  // away the only thing currently known to be true about it.
+  const html = renderWall(RUNNING);
+  const s = slots(html);
+  const m = motions(html);
+  assert.equal(s[2], "red", "a failing gate under re-test stays red");
+  assert.equal(m[2], "pulse", "and pulses to show work is happening");
+  assert.equal(s[3], "red", "the regressed gate also keeps its colour");
+  assert.equal(marks(html)[3], "regression", "and keeps its star while pulsing");
   assert.match(html, /GRADING/, "the operator must be told why squares are moving");
   assert.match(html, /makes no claim about the outcome/, "motion must disclaim any verdict");
 });
 
 test("a resolved gate NEVER pulses, even mid-phase", () => {
   // The server narrows `under_test` to unresolved gates, but the panel must not
-  // depend on that alone: a resolved gate has its answer, and amber over it
+  // depend on that alone: a resolved gate has its answer, and motion over it
   // would claim work that is not happening.
   const contradictory = GATES.map((g) => ({ ...g, under_test: true }));
-  const s = slots(renderWall(boardWith(suiteWith(contradictory, { active: true, phase: "backend", stalled: false, phases: [] }))));
-  assert.equal(s[0], "testing", "an under-test flag is honoured for unresolved gates");
-  assert.deepEqual(s.slice(0, 2), ["testing", "testing"], "documents current precedence");
+  const html = renderWall(boardWith(suiteWith(contradictory, { active: true, phase: "backend", stalled: false, phases: [] })));
+  assert.equal(motions(html)[0], "pulse", "an under-test flag is honoured");
+  assert.equal(slots(html)[0], "blue", "but the resolved colour is preserved, not overwritten");
 });
 
 test("stalled: squares under test hold with no verdict; resolved ones keep theirs", () => {
   const html = renderWall(STALLED);
-  assert.deepEqual(slots(html), ["blue", "green", "slate", "slate", "unobserved"]);
+  assert.deepEqual(slots(html), ["blue", "green", "slate", "slate", "none"]);
+  assert.ok(!motions(html).includes("pulse"), "an abandoned square never moves");
   assert.match(html, /GRADING STALLED/);
   assert.match(html, /A stall is not a failure/, "a stall must never read as a verdict");
 });
 
 test("a timeout presents as a stall — both leave squares undecided", () => {
-  assert.deepEqual(slots(renderWall(TIMEDOUT)), ["blue", "green", "slate", "slate", "unobserved"]);
+  assert.deepEqual(slots(renderWall(TIMEDOUT)), ["blue", "green", "slate", "slate", "none"]);
 });
 
 test("untested never pulses on its own and never goes slate", () => {
   for (const [name, b] of [["armed", ARMED], ["stalled", STALLED], ["timeout", TIMEDOUT]]) {
-    assert.equal(slots(renderWall(b))[4], "unobserved", `frame ${name} moved an untested gate`);
+    assert.equal(slots(renderWall(b))[4], "none", `frame ${name} moved an untested gate`);
   }
 });
 
@@ -288,8 +409,11 @@ test("the grid is a FIXED 12 columns at every suite size (design §9.3)", () => 
 test("NO MOTION DURING A TAKEOVER — frozen, not blanked", () => {
   const html = renderWall(TAKEOVER);
   assert.match(html, /class="gwall still"/, "a fresh takeover must freeze the wall");
-  // The freeze must not cost information: the amber squares are still amber.
-  assert.deepEqual(slots(html), ["blue", "green", "testing", "testing", "testing"]);
+  // The freeze must not cost information: every square still reports the same
+  // verdict. Only the motion is suppressed, and it is suppressed in CSS — the
+  // markup still carries `gm-pulse` so nothing is lost, it is merely held still.
+  assert.deepEqual(slots(html), ["blue", "green", "red", "red", "white"]);
+  assert.deepEqual(marks(html)[3], "regression", "the star survives the freeze");
 });
 
 test("a stall does not empty FAILING CLUSTERS", () => {
@@ -422,4 +546,122 @@ test("WALL: the ratio is over the TRUE suite size, not the observed count", () =
   const html = renderWall(ARMED);
   assert.match(html, /<span class="bright">2<\/span>\/5 passed/, "2 resolved of a 5-gate suite");
   assert.doesNotMatch(html, /\bobs\b/, "the observed-only denominator label must be gone");
+});
+
+// ── THE LIVE LANE OVERLAY ───────────────────────────────────────────────────
+//
+// The lane is PROVISIONAL. Everything below pins the property that makes it
+// safe to show at all: it annotates the authoritative grid, and can never be
+// mistaken for it, replace it, or grow it.
+
+/** A board carrying both an authoritative suite and a live-lane overlay. */
+const withLive = (gates, live) => ({
+  suite: suiteWith(gates, null),
+  events: {},
+  live,
+});
+
+const LANE_OK = {
+  ok: true,
+  running: true,
+  stale: false,
+  age_s: 2,
+  lane: {
+    provisional: true,
+    snapshot: { parsed: true, stale_reason: null, content_hash: "sha256:x" },
+    duration_ms: 2100,
+    counts: { pass: 3, fail: 1, deferred: 1, not_loaded: 0, unmeasured: 0, total: 5 },
+    gates: [
+      { id: "C:a", live: "pass" },
+      { id: "C:b", live: "pass" },
+      { id: "C:c", live: "fail" },
+      { id: "C:d", live: "deferred", deferred_reason: "owns :8002" },
+      { id: "C:e", live: "pass" },
+    ],
+  },
+  build: null,
+};
+
+test("LIVE: the overlay annotates squares and NEVER changes their verdict", () => {
+  // THE INVARIANT THAT MAKES THIS SAFE. The authoritative fill is decided by
+  // the graded fold; the lane may only add a ring on top. If a live "pass"
+  // could repaint a red square green, the board would be showing an unscored
+  // result as a scored one — the exact two-sources-of-truth failure RC-5 forbids.
+  const html = renderWall(withLive(GATES, LANE_OK));
+  assert.deepEqual(slots(html), ["blue", "green", "red", "red", "none"], "fills are untouched by the lane");
+  const cls = [...html.match(/<div class="gwall[^"]*"[^>]*>([\s\S]*?)<\/div>/)[1]
+    .matchAll(/<span class="gcell ([^"]*)"/g)].map((m) => m[1]);
+  assert.match(cls[0], /gl-pass/, "a live pass adds its own overlay class");
+  assert.match(cls[2], /gl-fail/, "and a live fail adds a different one");
+  assert.ok(!/gl-/.test(cls[3]) || /gl-deferred/.test(cls[3]), "a deferred gate carries no verdict ring");
+});
+
+test("LIVE: the panel says PROVISIONAL in words, not just in colour", () => {
+  const html = renderWall(withLive(GATES, LANE_OK));
+  assert.match(html, /LIVE LANE — PROVISIONAL/);
+  assert.match(html, /not scored/i, "the operator must be told these numbers do not count");
+  assert.match(html, /3 passing · 1 failing · 1 never measured live/);
+});
+
+test("LIVE: a STALE lane drops its overlay entirely and says why", () => {
+  // A lane that stopped is describing a past snapshot. Continuing to paint its
+  // rings would present a dead instrument's last reading as a current one.
+  const stale = { ...LANE_OK, running: false, stale: true, stale_reason: "not republished for 90s" };
+  const html = renderWall(withLive(GATES, stale));
+  assert.match(html, /LIVE LANE STOPPED/);
+  const grid = html.match(/<div class="gwall[^"]*"[^>]*>([\s\S]*?)<\/div>/)[1];
+  assert.ok(!/gl-pass|gl-fail/.test(grid), "a stale lane must not paint a single verdict ring");
+});
+
+test("LIVE: a snapshot that does not compile is stated, not shown as failures", () => {
+  // The most useful thing the line can say: it explains grey squares that would
+  // otherwise be read as the model breaking things.
+  const broken = {
+    ...LANE_OK,
+    lane: {
+      ...LANE_OK.lane,
+      snapshot: { parsed: false, stale_reason: "3 spec file(s) failed to import", content_hash: "x" },
+    },
+  };
+  const html = renderWall(withLive(GATES, broken));
+  assert.match(html, /SNAPSHOT DOES NOT COMPILE/);
+  assert.match(html, /failed to import/);
+});
+
+test("LIVE: absent lane renders NOTHING — an optional instrument is silent", () => {
+  // `live: null` is the normal state for every run that does not start the lane.
+  // A permanent "live lane: off" row would imply the board is missing something.
+  const html = renderWall({ suite: suiteWith(GATES, null), events: {} });
+  assert.doesNotMatch(html, /LIVE LANE/);
+  assert.doesNotMatch(html, /BUILD — FILE POPULATION/);
+});
+
+test("LIVE: a live id with no roster slot can NEVER grow the grid", () => {
+  // The roster is the only thing permitted to define the suite. A lane that
+  // disagreed with it must not be able to add a square.
+  const rogue = {
+    ...LANE_OK,
+    lane: { ...LANE_OK.lane, gates: [...LANE_OK.lane.gates, { id: "GHOST", live: "pass" }] },
+  };
+  assert.equal(slots(renderWall(withLive(GATES, rogue))).length, GATES.length);
+});
+
+test("BUILD STRIP: renders the construction axis and disclaims correctness", () => {
+  const withBuild = {
+    ...LANE_OK,
+    build: {
+      files: [
+        { path: "src/game.ts", state: "partial", metric: "stub-ratio", fill: 0.5, stubs_remaining: 6, stubs_initial: 12, lines: 200, reference_lines: 357 },
+        { path: "public/app.js", state: "stub", metric: "line-ratio", fill: 0, stubs_remaining: null, stubs_initial: null, lines: 12, reference_lines: 586 },
+      ],
+      totals: { stubs_remaining: 6, stubs_initial: 12, fill: 0.5 },
+    },
+  };
+  const html = renderWall(withLive(GATES, withBuild));
+  assert.match(html, /BUILD — FILE POPULATION/);
+  assert.match(html, /6\/12 scaffold stubs implemented/);
+  assert.match(html, /can still fail every gate/, "fill must never read as a pass rate");
+  // The two metrics are visibly different measurements.
+  assert.match(html, /stubs implemented/);
+  assert.match(html, /lines \(reference 586\)/);
 });

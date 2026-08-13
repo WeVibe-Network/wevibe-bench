@@ -327,6 +327,34 @@ export function emptyBoard() {
     // reason lives in `unwired_reasons` and is meant to be shown, not swallowed.
     suite: null,
 
+    // ── THE LIVE LANE — PROVISIONAL, AND NEVER THE SCORE ──────────────────────
+    //
+    // Served whole by GET /api/live (control/live-surface.mjs). Two axes from
+    // one worktree snapshot, taken WHILE THE AGENT IS STILL WORKING:
+    //
+    //   `lane`   per-gate live pass/fail for the 55 gates the lane can measure
+    //   `build`  per-file population — how much of the scaffold's stub surface
+    //            has actually been replaced with code
+    //
+    // ── THIS IS NOT A SECOND SOURCE OF TRUTH, AND THE SHAPE ENFORCES IT ──────
+    //
+    // RC-5 names ONE scored source. That is `suite` above, folded from
+    // manifest.status.jsonl. The lane's numbers are measured off a SNAPSHOT,
+    // exclude 16 gates by construction, and may be taken mid-edit — so they live
+    // in their own group, carry `provisional: true` on every payload, and are
+    // NEVER merged into `suite.gates[].state`. A renderer that copies a live
+    // result into a suite square has broken the invariant, not fixed a gap.
+    //
+    // NULL IS THE NORMAL STATE. The lane is an optional instrument that the
+    // operator starts by hand; most runs will not have one. Null means "no live
+    // lane", which is not "everything failed" and not "nothing was tested" —
+    // the authoritative wall is completely unaffected by its absence.
+    //
+    // STALENESS IS PUBLISHED, NOT INFERRED. `running:false` + `age_s` say the
+    // lane stopped and this grid is a PAST measurement. The board must show that
+    // rather than presenting a frozen grid as live.
+    live: null,
+
     // ── THE MODEL LEDGER — one row per bench-eligible model ───────────────────
     //
     // Served whole by GET /api/models-ledger (control/models-ledger.mjs), which

@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { choreographGate, historiesFrom } from "./choreography.mjs";
 import { readGateActivity } from "./gate-events.mjs";
 import { newestLog, readTail } from "./runstate.mjs";
 
@@ -265,6 +266,15 @@ export function foldGateStates({ roster, attempts, grading, stopped }) {
     }
   }
 
+  // ── CHOREOGRAPHY (WO-LIVE-GATES) ────────────────────────────────────────
+  //
+  // The three MOTION axes, folded over the same ordered history the resting
+  // state uses, in one place so the two can never disagree. `state` answers
+  // "where does this gate stand"; `choreography` answers "how did it get here
+  // and is it moving". Both are decided HERE — the board renders, it does not
+  // re-derive (the rule this panel was rebuilt around).
+  const histories = historiesFrom(attempts);
+
   const out = gates.map((gate) => {
     const history = observed.get(gate.id) ?? [];
     const firstPass = history.find((h) => h.status === "pass");
@@ -285,6 +295,11 @@ export function foldGateStates({ roster, attempts, grading, stopped }) {
       state = "untested";
     }
 
+    const underTest =
+      activePhase !== null
+      && gate.phase === activePhase
+      && (state === "untested" || state === "failing");
+
     return {
       id: gate.id,
       phase: gate.phase,
@@ -304,10 +319,14 @@ export function foldGateStates({ roster, attempts, grading, stopped }) {
       // Only a gate still awaiting a verdict can be under test. A resolved gate
       // has its answer, and an abandoned one will never get one — showing
       // either as an amber pulse would claim work that is not happening.
-      under_test:
-        activePhase !== null
-        && gate.phase === activePhase
-        && (state === "untested" || state === "failing"),
+      under_test: underTest,
+      // THE THREE MOTION AXES. Rendered as fill × motion × mark; never parsed
+      // back out of a compound token, and never re-derived by the board.
+      choreography: choreographGate({
+        history: histories.get(gate.id) ?? [],
+        underTest,
+        abandoned: state === "abandoned",
+      }),
     };
   });
 
@@ -319,6 +338,29 @@ export function foldGateStates({ roster, attempts, grading, stopped }) {
       failing: tally("failing"),
       untested: tally("untested"),
       abandoned: tally("abandoned"),
+      // REGRESSIONS ARE COUNTED SEPARATELY AND DO NOT PARTITION THE SUITE.
+      // A regressed gate is already counted in one of the four states above —
+      // this is an OVERLAY count, so the four still sum to the suite size. It is
+      // published because a regression is invisible in the resting states: a
+      // gate that passed then broke looks identical to one that never passed.
+      regressed: out.filter((g) => g.choreography?.regressed === true).length,
+      // ── CURRENT STANDING, which is NOT `resolved` ─────────────────────────
+      //
+      // `resolved` means "this run demonstrated the capability at least once"
+      // and is pinned to the FIRST pass (control.test.mjs "a gate that passed
+      // then regressed stays resolved at its first pass"). That is a deliberate
+      // and correct claim about the run's history — and it is NOT the same
+      // question as "is this gate passing right now".
+      //
+      // They diverge exactly on a regression: a gate that passed in attempt 1
+      // and broke in attempt 2 is `resolved` AND currently red. A headline built
+      // on `resolved` alone would report it as a pass while its square is red,
+      // which is the two-surfaces-disagree failure this panel exists to prevent.
+      //
+      // So both are published, separately named, and neither is derived from
+      // the other. `passing_now` is the honest denominator for "how does the
+      // artifact stand at this instant".
+      passing_now: out.filter((g) => g.choreography?.fill === "blue" || g.choreography?.fill === "green").length,
     },
     outcomes_published: anyOutcomesPublished,
   };

@@ -69,6 +69,7 @@ import { readRunState } from "./runstate.mjs";
 import { EventRing, subscribe } from "./events.mjs";
 import { readGateActivity } from "./gate-events.mjs";
 import { readWall, WALL_CONTRACT_VERSION } from "./wall.mjs";
+import { readLive } from "./live-surface.mjs";
 import { readFeedback, feedbackRows, FEEDBACK_CONTRACT_VERSION } from "./feedback.mjs";
 import { readModelsLedger, baselineFor, collectOffCells } from "./models-ledger.mjs";
 import { ExtractionTracker } from "./extraction.mjs";
@@ -963,6 +964,24 @@ const server = createServer(async (req, res) => {
         benchRoot: BENCH_ROOT,
       });
       sendJson(res, wall.ok ? 200 : 400, wall);
+      return;
+    }
+
+    // ── GET /api/live ────────────────────────────────────────────────────
+    // The LIVE LANE's provisional surface: per-gate live outcomes measured
+    // against a worktree snapshot while the agent is still working, plus the
+    // build-population axis from that same snapshot.
+    //
+    // DELIBERATELY SEPARATE FROM /api/wall. RC-5 names one scored source of
+    // truth, and these numbers are not it: they are measured off a snapshot,
+    // exclude 16 gates by design, and may be taken mid-edit. Merging them into
+    // the wall's `state` would make the scored grid disagree with
+    // manifest.status.jsonl. The board renders them as a labelled overlay.
+    //
+    // Absent artifact = the lane is not running = ok:true + unwired + reason.
+    // The lane is optional; the authoritative wall never depends on it.
+    if (path === "/api/live" && req.method === "GET") {
+      sendJson(res, 200, await readLive({ runsRoot: RUNS_ROOT }));
       return;
     }
 

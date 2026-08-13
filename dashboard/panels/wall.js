@@ -76,6 +76,15 @@ const WALL_COLUMNS = 12;
  * Server state → visual class. Total, pure, and the ONLY place the mapping
  * exists.
  *
+ * ── SUPERSEDED FOR THE CHOREOGRAPHY, KEPT FOR THE LEGEND AND CLUSTERS ───────
+ *
+ * This function answers "what is this gate's RESTING state" and is still the
+ * right answer for the legend tally and the failing-cluster list. The SQUARE is
+ * now drawn from `g.choreography` instead (see `cellClasses`), because the
+ * directive needs three independent facts — fill, motion, mark — and a single
+ * class name cannot carry three axes without the board parsing meaning back out
+ * of a compound token.
+ *
  * `under_test` outranks the resting state because it is the live fact: a gate
  * being re-run right now has no current verdict, whatever it reported last
  * attempt. The server has already narrowed `under_test` to gates that are
@@ -95,6 +104,89 @@ export function gateVisual(g) {
       return "unobserved";
   }
 }
+
+// ── THE CHOREOGRAPHY: fill × motion × mark ──────────────────────────────────
+//
+// THREE AXES, PUBLISHED SEPARATELY BY THE SERVER, COMPOSED HERE.
+// `control/choreography.mjs` decides all three; this maps them to classes and
+// decides nothing. The directive in full:
+//
+//   worked on for the FIRST time ever  →  pulsing WHITE
+//   worked on any later time           →  pulse its EXISTING colour
+//   passed, never having failed        →  solid BLUE
+//   failing                            →  solid RED
+//   was passing, now failing           →  RED + a star that persists all run
+//   was failing, now passing           →  solid GREEN
+//
+// WHITE IS RESERVED FOR THE FIRST LOOK. It is the only moment in a gate's life
+// when the board has no information at all, and it must not be reachable any
+// other way — a white square always means "we are seeing this gate for the very
+// first time", never "we are unsure".
+//
+// THE STAR IS AN OVERLAY, NEVER A COLOUR. A regression keeps whatever fill the
+// gate currently earns (red now, green if it recovers) and carries the mark on
+// top. Encoding the regression as its own colour would lose the current verdict.
+
+/** Fallback choreography for a control plane that predates the field. */
+function choreographyOf(g) {
+  if (g.choreography && typeof g.choreography === "object") return g.choreography;
+  // DERIVED FROM THE RESTING STATE, never invented: an older server carries no
+  // history, so no gate can claim `first_worked` or a regression mark. The wall
+  // degrades to its previous behaviour rather than fabricating a star.
+  const v = gateVisual(g);
+  return {
+    fill: v === "testing" ? "white" : v === "unobserved" ? "none" : v,
+    motion: v === "testing" ? "pulse" : "still",
+    mark: null,
+    first_worked: v === "testing",
+    ever_ran: v !== "unobserved",
+    regressed: false,
+  };
+}
+
+/**
+ * The class list for one square.
+ *
+ * Emitted as SEPARATE classes (`gf-red gm-pulse gk-regression`) rather than one
+ * compound name so the stylesheet can compose them independently — motion is
+ * suppressible by the takeover freeze and the reduced-motion query WITHOUT
+ * touching the fill, which is the property that carries the verdict.
+ */
+export function cellClasses(g, live) {
+  const c = choreographyOf(g);
+  const out = [`gf-${c.fill}`, `gm-${c.motion}`];
+  if (c.mark) out.push(`gk-${c.mark}`);
+  // The live lane's provisional overlay. An ANNOTATION on the authoritative
+  // square, never a replacement for it — the graded colour always wins, and the
+  // operator can always tell a provisional reading from a scored one.
+  if (live) out.push(`gl-${live}`);
+  return out.join(" ");
+}
+
+/** Human gloss for a square, assembled from the same three axes. */
+function cellTitle(g, live) {
+  const c = choreographyOf(g);
+  const bits = [`${g.id} ${g.req ?? ""} ${g.title ?? ""}`.trim()];
+  bits.push(FILL_WORD[c.fill] ?? c.fill);
+  if (c.motion === "pulse") {
+    bits.push(c.first_worked ? "under test for the FIRST time" : "under test right now — no outcome claimed");
+  }
+  if (c.mark === "regression") bits.push("REGRESSED — passed earlier in this run, then broke");
+  if (live === "pass" || live === "fail") bits.push(`live lane: ${live} (provisional, not scored)`);
+  if (live === "deferred") bits.push("never measured live — see the legend");
+  if (live === "not_loaded") bits.push("live lane could not import its spec — the snapshot does not compile");
+  return bits.filter(Boolean).join(" — ");
+}
+
+const FILL_WORD = {
+  none: "not yet tested",
+  white: "first look — never tested before",
+  blue: "passed, having never failed",
+  green: "passed after previously failing",
+  red: "tested and failing",
+  slate: "abandoned mid-test — no verdict, ever",
+};
+
 
 /**
  * The run-level grading verdict, reduced to the two facts the wall needs.
@@ -148,11 +240,119 @@ export function renderWall(board) {
         ${headline(suite)}
       </div>
       ${gradingLine(live, suite)}
+      ${laneLine(board)}
+      ${buildStrip(board)}
       ${gates.length ? grid(board, gates) : empty(live, suite)}
-      ${gates.length ? legend(suite, gates) : ""}
+      ${gates.length ? legend(suite, gates, board) : ""}
       ${gates.length ? clusters(gates) : ""}
     </section>`;
 }
+
+/**
+ * THE LIVE LANE LINE — states what the provisional overlay is, in words.
+ *
+ * Renders NOTHING when there is no lane. The lane is optional and its absence
+ * is the normal case; a permanent "live lane: off" row would imply the board is
+ * missing something it is not.
+ *
+ * When the lane is STALE the line says so and the overlay is dropped from the
+ * grid — a stopped lane's last reading must never be presented as current.
+ */
+function laneLine(board) {
+  const live = board.live ?? null;
+  if (!live) return "";
+
+  if (live.running !== true) {
+    const why = live.stale_reason ?? live.unwired_reasons?.["live-lane"] ?? null;
+    // No artifact at all is silence, not a warning: nothing was ever claimed.
+    if (!live.stale) return "";
+    return `
+      <div class="wall-live stalled">
+        <span class="gcell gf-slate gm-still sm"></span>
+        <span class="bright">LIVE LANE STOPPED</span>
+        <span class="note">${esc(why ?? "the live lane is no longer publishing — its last grid is a past measurement and is not shown")}</span>
+      </div>`;
+  }
+
+  const c = live.lane?.counts ?? null;
+  const snap = live.lane?.snapshot ?? null;
+  const parsed = snap?.parsed;
+
+  // A snapshot that does not compile is the single most useful thing this line
+  // can say: it explains grey squares that would otherwise look like failures.
+  if (parsed === false) {
+    return `
+      <div class="wall-live stalled">
+        <span class="gcell gf-none gm-still sm"></span>
+        <span class="bright">LIVE LANE — SNAPSHOT DOES NOT COMPILE</span>
+        <span class="note">${esc(snap?.stale_reason ?? "the worktree snapshot failed to import; live squares are held and no live verdict is claimed")}</span>
+      </div>`;
+  }
+
+  const bits = c
+    ? `${c.pass} passing · ${c.fail} failing · ${c.deferred} never measured live`
+    : "no live counts published";
+  const dur = live.lane?.duration_ms ? ` · measured in ${(live.lane.duration_ms / 1000).toFixed(1)}s` : "";
+
+  return `
+    <div class="wall-live">
+      <span class="gcell gf-blue gm-still sm gl-pass"></span>
+      <span class="bright">LIVE LANE — PROVISIONAL</span>
+      <span class="note">${esc(`${bits}${dur}. Measured against a SNAPSHOT while the agent is still working — these are not scored, and the graded result at attempt end is the only source of truth.`)}</span>
+    </div>`;
+}
+
+/**
+ * THE BUILD STRIP — the construction axis.
+ *
+ * Answers the question the wall could never answer during the long pre-grading
+ * window: is the artifact being FILLED IN, or merely edited? Measured as the
+ * scaffold's stub surface disappearing, so the denominator is a property of the
+ * task and needs no maintenance.
+ *
+ * FILL IS NOT A PROGRESS BAR TOWARD A PASS. A file can reach 100% fill and fail
+ * every gate — construction and correctness are separate axes, adjacent and
+ * never multiplied. The caption says so.
+ */
+function buildStrip(board) {
+  const build = board.live?.build ?? null;
+  if (!build) return "";
+
+  const files = build.files ?? [];
+  if (!files.length) return "";
+
+  const rows = files
+    .map((f) => {
+      const pct = f.fill === null || f.fill === undefined ? null : Math.round(f.fill * 100);
+      const detail =
+        f.metric === "stub-ratio"
+          ? `${f.stubs_initial - f.stubs_remaining}/${f.stubs_initial} stubs implemented`
+          : f.metric === "line-ratio"
+            ? `${f.lines} lines (reference ${f.reference_lines})`
+            : (f.reason ?? "not measurable");
+      return `
+        <div class="bfile ${esc(f.state)}">
+          <span class="bf-name">${esc(f.path)}</span>
+          <span class="bf-bar"><i style="width:${pct === null ? 0 : pct}%"></i></span>
+          <span class="bf-detail">${esc(pct === null ? "—" : `${pct}%`)} · ${esc(detail)}</span>
+        </div>`;
+    })
+    .join("");
+
+  const t = build.totals ?? {};
+  const head =
+    t.fill === null || t.fill === undefined
+      ? "no stub denominator for this task — fill is unknowable, not zero"
+      : `${t.stubs_initial - t.stubs_remaining}/${t.stubs_initial} scaffold stubs implemented`;
+
+  return `
+    <div class="wall-build">
+      <span class="kick">BUILD — FILE POPULATION</span>
+      <div class="note">${esc(`${head}. This is CONSTRUCTION, not correctness: a file at 100% can still fail every gate.`)}</div>
+      ${rows}
+    </div>`;
+}
+
 
 /**
  * THE HEADLINE — a ratio only when both halves are real.
@@ -310,21 +510,46 @@ function empty(live, suite) {
  * The dense grid. FIXED 12 columns at every suite size (design §9.3) — the
  * count is a constant, not a function of the gate count, so the wall reads as
  * the same object from cell to cell and slot N is slot N forever.
+ *
+ * THE LIVE LANE IS AN OVERLAY, KEYED BY ROSTER ID. It annotates squares; it
+ * never reorders, adds or removes one. A live id with no roster slot is
+ * IGNORED rather than appended — the roster is the only thing that may define
+ * the suite, and a lane that disagreed with it must not be able to grow the grid.
  */
 function grid(board, gates) {
   // `still` suppresses the pulse without changing any colour, so a takeover
   // freezes the wall rather than blanking it. SLOTS NEVER REFLOW: the class
   // rides the container, never the order or the count.
   const still = motionAllowed(board) ? "" : " still";
+  const live = liveById(board);
   const cells = gates
     .map((g) => {
-      const st = gateVisual(g);
-      const label = `${g.id} ${g.req ?? ""} ${g.title ?? ""}`.trim();
-      return `<span class="gcell ${esc(st)}" title="${esc(`${label} — ${VISUAL_WORD[st]}`)}"></span>`;
+      const lv = live.get(g.id) ?? null;
+      return `<span class="gcell ${esc(cellClasses(g, lv))}" title="${esc(cellTitle(g, lv))}"></span>`;
     })
     .join("");
   return `<div class="gwall${still}" style="grid-template-columns:repeat(${WALL_COLUMNS},1fr)">${cells}</div>`;
 }
+
+/**
+ * gate id → live-lane verdict, or an empty map.
+ *
+ * EMPTY WHENEVER THE LANE IS STALE. A lane that stopped republishing is
+ * describing a past snapshot, and painting its verdicts as current provisional
+ * readings would be the same class of lie as showing a graded result for a gate
+ * that was never run. The board states the lane is stale instead (see
+ * `laneLine`) and drops the overlay entirely.
+ */
+function liveById(board) {
+  const out = new Map();
+  const live = board.live ?? null;
+  if (!live || live.running !== true) return out;
+  for (const g of live.lane?.gates ?? []) {
+    if (g?.id) out.set(g.id, g.live);
+  }
+  return out;
+}
+
 
 /** The tooltip gloss, kept beside the colours so the two cannot drift apart. */
 const VISUAL_WORD = {
@@ -349,7 +574,7 @@ const VISUAL_WORD = {
  * a fact any gate can hold; `resolved_at_attempt` is what the data carries and
  * what the blue/check split actually distinguishes.
  */
-function legend(suite, gates) {
+function legend(suite, gates, board = {}) {
   const t = tally(gates);
   const row = (cls, label) =>
     `<span><span class="gcell ${cls} sm"></span> ${esc(label)}${t[cls] ? ` <span class="bright">${t[cls]}</span>` : ""}</span>`;
@@ -365,15 +590,24 @@ function legend(suite, gates) {
   const sig = Object.values(suite?.live_signal ?? {});
   const setwise = sig.length > 0 && sig.every((v) => v === "per-phase-set");
 
+  // REGRESSIONS ARE CALLED OUT IN WORDS, not left to a glyph nobody was taught.
+  const regressed = suite?.totals?.regressed ?? 0;
+  const live = board.live ?? null;
+  const laneOn = live?.running === true;
+
   return `
     <div class="wall-legend">
-      ${row("unobserved", "not yet tested")}
-      ${row("testing", "under test — pulses amber, 1.4s")}
-      ${row("blue", "passed on attempt 1")}
-      ${row("green", "passed on a later attempt")}
-      ${row("slate", "abandoned mid-test — no verdict, ever")}
-      ${row("red", "tested and failed")}
-      <span class="note">${esc("blue and slate are borrowed from the sanctioned midnight palette — the only two off-hue signals besides error red.")}</span>
+      <span><span class="gcell gf-none gm-still sm"></span> ${esc("not yet tested")}${t.unobserved ? ` <span class="bright">${t.unobserved}</span>` : ""}</span>
+      <span><span class="gcell gf-white gm-pulse sm"></span> ${esc("first look — being tested for the very first time")}</span>
+      <span><span class="gcell gf-blue gm-pulse sm"></span> ${esc("re-testing — pulses its existing colour")}</span>
+      <span><span class="gcell gf-blue gm-still sm"></span> ${esc("passed, having never failed")}${t.blue ? ` <span class="bright">${t.blue}</span>` : ""}</span>
+      <span><span class="gcell gf-green gm-still sm"></span> ${esc("recovered — was failing, now passes")}${t.green ? ` <span class="bright">${t.green}</span>` : ""}</span>
+      <span><span class="gcell gf-red gm-still sm"></span> ${esc("tested and failing")}${t.red ? ` <span class="bright">${t.red}</span>` : ""}</span>
+      <span><span class="gcell gf-red gm-still gk-regression sm"></span> ${esc("REGRESSED — passed earlier this run, then broke")}${regressed ? ` <span class="bright">${regressed}</span>` : ""}</span>
+      <span><span class="gcell gf-slate gm-still sm"></span> ${esc("abandoned mid-test — no verdict, ever")}${t.slate ? ` <span class="bright">${t.slate}</span>` : ""}</span>
+      ${laneOn ? `<span><span class="gcell gf-none gm-still gl-pass sm"></span> ${esc("live-lane provisional reading — not scored")}</span>` : ""}
+      ${laneOn ? `<span><span class="gcell gf-none gm-still gl-deferred sm"></span> ${esc("never measured live (owns :8002, or needs a browser)")}</span>` : ""}
+      <span class="note">${esc("the star persists for the whole run: a gate that broke once is worth watching even after it recovers.")}</span>
       <span class="note">${esc(denom)}</span>
       ${setwise ? `<span class="note">${esc("amber marks every unresolved gate in the OPEN PHASE, not one test — the grader buffers per-test output until its phase ends, so a finer live signal does not exist.")}</span>` : ""}
     </div>`;
