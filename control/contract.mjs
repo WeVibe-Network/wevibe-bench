@@ -245,7 +245,30 @@ export const EVENT_KINDS = /** @type {const} */ ([
   "error",    // a genuine error, never a normal retry
   "lifecycle",// step/session boundaries — quiet, structural
   "harness",  // the HARNESS itself — grading phases. see below.
+  "user",     // the graded text handed to the model AS A USER TURN. see below.
 ]);
+
+/**
+ * WHY `user` EXISTS AS A KIND (WO-FEEDBACK-1).
+ *
+ * The harness renders gate results into prose and delivers it to the model as
+ * if a person had typed it. That message is the single most consequential input
+ * the model receives, and it appeared NOWHERE on this board: the worker's SSE
+ * stream shows what the model DID with the message, never what it was given,
+ * and the PROGRESS log carries only a length and a fingerprint
+ * (`step=user-event-sidecar chars=1287 text_fp=c02b9470`).
+ *
+ * The rows are sourced from the harness's append-only user-events sidecar and
+ * carry the text VERBATIM — never summarised, re-wrapped or prettified, because
+ * the whole reason to look at them is to judge whether they read like something
+ * a person would actually send. A surface that cleaned them up would answer a
+ * different question.
+ *
+ * They are `user` and not `harness` deliberately. On this board they ARE user
+ * turns; that is precisely the fiction under test, and filing them under
+ * `harness` would quietly answer the question the operator opened the feed to
+ * judge.
+ */
 
 /**
  * WHY `harness` EXISTS AS A KIND (WO-GRADE-VIS-1).

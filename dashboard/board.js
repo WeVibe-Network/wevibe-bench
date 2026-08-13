@@ -20,7 +20,7 @@
 //  - No hover-dependent information.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const POLL_MS = 2000;
+// The board is PUSHED over SSE (see connect()). There is no poll interval.
 
 // ── formatting ───────────────────────────────────────────────────────────────
 
@@ -90,20 +90,182 @@ let board = null;
 let lastError = null;
 let consecutiveErrors = 0;
 
-async function poll() {
-  try {
-    const res = await fetch("/api/board", { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    board = await res.json();
-    lastError = null;
-    consecutiveErrors = 0;
-  } catch (err) {
-    consecutiveErrors += 1;
-    lastError = String(err?.message ?? err);
-    // A failed poll must never blank the board. The last good state stays up
-    // and the top bar says the feed is stale — that is information, not noise.
+// ── THE LIVE STREAM ──────────────────────────────────────────────────────────
+//
+// The board was refetching /api/board every 2 seconds — 240KB per poll, of
+// which 82% was 400 event rows that had not changed. It is now PUSHED: the
+// server assembles once for all clients and sends a board frame only when the
+// board actually changed, plus event rows newer than this client's cursor.
+//
+// SSE rather than a raw WebSocket, deliberately — see the rationale block in
+// server.mjs. The property that matters here: EventSource reconnects by itself
+// with backoff, so a control-plane restart mid-run does not leave a dark board
+// and there is no hand-rolled retry loop to get wrong.
+//
+// THE LAST GOOD BOARD ALWAYS STAYS UP. A dropped stream marks the feed stale in
+// the top bar; it never blanks the screen. Staleness is information.
+
+/** High-water mark of events this client has rendered. Resumes a reconnect. */
+let eventCursor = 0;
+/** The accumulated event window, mirrored from the pushed deltas. */
+let eventRows = [];
+const EVENT_WINDOW_CAP = 400;
+
+let stream = null;
+
+/**
+ * Reconnect the stream.
+ *
+ * Used when the client's SUBSCRIPTION changes — today that is only the TUI
+ * popout opening or closing, which changes whether the server should spend
+ * 12.4KB per tick sending terminal frames. The cursor is preserved, so no
+ * event is replayed or skipped across the reconnect.
+ */
+export function resubscribe() {
+  if (stream) {
+    stream.close();
+    stream = null;
   }
-  render();
+  connect();
+}
+
+function connect() {
+  // A reconnect resumes FROM THE CURSOR, so the server replays only what was
+  // missed rather than the whole ring. `tui=1` opts into full terminal frames;
+  // without it the server sends the mirror's STATUS only, which is all the
+  // minimized dock bar renders.
+  const wantsTui = isTuiExpanded() ? "&tui=1" : "";
+  stream = new EventSource(`/api/stream?since=${eventCursor}${wantsTui}`);
+
+  stream.addEventListener("board", (msg) => {
+    try {
+      const next = JSON.parse(msg.data);
+      // Event rows live on the client and are merged in below — the server
+      // deliberately strips them from the board frame so an unchanged ring is
+      // never re-sent. Re-attach the local window before rendering.
+      board = next;
+      board.events = board.events ? { ...board.events, events: eventRows } : null;
+      lastError = null;
+      consecutiveErrors = 0;
+      render();
+    } catch (err) {
+      console.error("board frame failed to parse:", err);
+    }
+  });
+
+  // ── PATCH: ONLY THE SECTIONS THAT CHANGED ──────────────────────────────
+  // The server digests each top-level key independently and sends only the
+  // ones that moved. A ticking `run.elapsed_s` therefore costs ~486 bytes
+  // instead of re-sending the 12.4KB TUI screen sitting beside it.
+  //
+  // MERGE IS BY KEY AND WHOLESALE WITHIN A KEY. Each section is published by
+  // exactly one source and is internally consistent, so a deep merge would
+  // risk splicing two assemblies together — a half-old `stack` is a lie in a
+  // way a whole-old one is not. `null` means the section is GONE and is
+  // assigned as null, never skipped: a panel must not keep rendering state the
+  // server no longer has.
+  stream.addEventListener("patch", (msg) => {
+    if (!board) return; // no baseline to patch onto; the board frame comes first
+    try {
+      const patch = JSON.parse(msg.data);
+      for (const [k, v] of Object.entries(patch)) {
+        // DOTTED KEYS ARE SPLIT SECTIONS. `control` is 6.5KB of mostly-static
+        // capabilities and roster wrapped around a clock that ticks every 2s,
+        // so the server digests its children separately and sends only the one
+        // that moved (server.mjs granularSignatures). `parent.__rest` carries
+        // whatever was not split out, so no field can vanish from the wire.
+        if (k.includes(".")) {
+          const [parent, child] = k.split(".");
+          if (!board[parent] || typeof board[parent] !== "object") board[parent] = {};
+          if (child === "__rest") {
+            board[parent] = { ...board[parent], ...(v ?? {}) };
+          } else {
+            board[parent][child] = v;
+          }
+          continue;
+        }
+        if (k === "events") {
+          // The ring's METADATA may change (counts, connected, grading) while
+          // the ROWS are owned by the client's own accumulated window.
+          board.events = v ? { ...v, events: eventRows } : null;
+          continue;
+        }
+        if (k === "tui_rows") {
+          // ROW SPLICE. The server sends only the terminal rows that changed,
+          // addressed by index, because re-sending the whole 36KB screen at
+          // 250ms cost 2.8MB per 20s — an unacceptable price for low latency.
+          //
+          // A splice with no frame to splice into is DISCARDED, not applied to
+          // an empty grid: a partial screen rendered as if it were whole is a
+          // lie about what the terminal shows. The server sends a full frame
+          // whenever it has no diff base, so the next tick recovers.
+          if (!board.tui?.frame) continue;
+          const frame = board.tui.frame.slice();
+          for (const [i, row] of v.rows ?? []) frame[i] = row;
+          board.tui = { ...board.tui, ...(v.meta ?? {}), frame };
+          continue;
+        }
+        if (k === "tui") {
+          // A WITHHELD FRAME MUST NOT ERASE THE ONE ON SCREEN. The server drops
+          // the 12.4KB terminal frame for a client that has not subscribed, and
+          // assigning that null over a good frame would blank a live mirror.
+          board.tui = v?.frame_withheld && board.tui?.frame ? { ...v, frame: board.tui.frame } : v;
+          continue;
+        }
+        board[k] = v;
+      }
+      lastError = null;
+      consecutiveErrors = 0;
+      render();
+    } catch (err) {
+      console.error("patch frame failed to parse:", err);
+    }
+  });
+
+  stream.addEventListener("events", (msg) => {
+    try {
+      const { events: fresh = [], cursor } = JSON.parse(msg.data);
+      if (!fresh.length) return;
+      eventRows = [...eventRows, ...fresh];
+      if (eventRows.length > EVENT_WINDOW_CAP) {
+        eventRows = eventRows.slice(eventRows.length - EVENT_WINDOW_CAP);
+      }
+      eventCursor = fresh[fresh.length - 1].seq ?? eventCursor;
+      if (typeof cursor === "number" && cursor > eventCursor) eventCursor = cursor;
+      if (board) {
+        board.events = board.events ? { ...board.events, events: eventRows } : null;
+        // The feed paints itself out of band (append-only, scroll-compensated),
+        // so a pure event frame does not need a whole-board render.
+        try { paintFeed(board); } catch (err) { console.error("feed paint failed:", err); }
+      }
+    } catch (err) {
+      console.error("events frame failed to parse:", err);
+    }
+  });
+
+  stream.addEventListener("error", (msg) => {
+    // Two different things arrive here: a server-sent `error` frame carrying a
+    // reason, and EventSource's own transport error which carries none. They
+    // are diagnosed differently and must not be conflated.
+    if (msg?.data) {
+      try {
+        lastError = JSON.parse(msg.data).reason ?? "server reported an error";
+      } catch {
+        lastError = "server reported an error";
+      }
+    } else {
+      lastError = "stream disconnected — reconnecting";
+    }
+    consecutiveErrors += 1;
+    // EventSource reconnects on its own. The board keeps its last good state
+    // and the top bar says the feed is stale.
+    render();
+  });
+
+  stream.addEventListener("open", () => {
+    consecutiveErrors = 0;
+    lastError = null;
+  });
 }
 
 // ── render ───────────────────────────────────────────────────────────────────
@@ -111,7 +273,7 @@ async function poll() {
 import { renderTopbar, renderProvenance } from "./panels/chrome.js";
 import { renderCurve, setCurveMetric } from "./panels/curve.js";
 import { renderWall } from "./panels/wall.js";
-import { renderLedger } from "./panels/ledger.js";
+import { renderLedger, toggleModelRow } from "./panels/ledger.js";
 import { renderLive, paintFeed, toggleKind, jumpToLive } from "./panels/live.js";
 import { renderHold } from "./panels/hold.js";
 import { renderRail } from "./panels/rail.js";
@@ -133,6 +295,7 @@ import {
 } from "./panels/profile.js";
 import {
   setRunSel,
+  presetRun,
   armRun,
   startRun,
   disarm as disarmRun,
@@ -219,13 +382,17 @@ function render() {
 // lost. Delegation is invariant to how the tree is updated.
 
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-pop-toggle],[data-pop-view]");
+  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-model-expand],[data-run-baseline],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
   if (!t) return;
 
   if (t.dataset.metric) { setCurveMetric(t.dataset.metric); render(); return; }
   if (t.dataset.kind) { toggleKind(t.dataset.kind); render(); return; }
   if (t.id === "evjump") { jumpToLive(); return; }
-  if (t.dataset.tuiToggle !== undefined && t.hasAttribute("data-tui-toggle")) { toggleTui(); render(); return; }
+  // TOGGLING THE TUI CHANGES THE SUBSCRIPTION, not just the view. The terminal
+  // frame is 12.4KB per tick and is withheld by the server unless this client
+  // asked for it, so opening the popout must re-open the stream with `tui=1`.
+  // The cursor survives the reconnect, so no event is replayed or skipped.
+  if (t.dataset.tuiToggle !== undefined && t.hasAttribute("data-tui-toggle")) { toggleTui(); resubscribe(); render(); return; }
   if (t.hasAttribute("data-tui-detach")) { askDetach(); render(); return; }
   if (t.hasAttribute("data-tui-detach-yes")) { void detachTui(); return; }
   if (t.hasAttribute("data-tui-cancel")) { cancelDetach(); render(); return; }
@@ -246,6 +413,26 @@ document.addEventListener("click", (e) => {
   if (t.hasAttribute("data-inspect-close")) { closeInspector(); render(); return; }
   if (t.hasAttribute("data-run-arm")) { void doArmRun(); return; }
   if (t.hasAttribute("data-run-confirm")) { void doStartRun(); return; }
+  // ── THE MODEL LEDGER ──────────────────────────────────────────────────────
+  // Expansion is checked FIRST, but the three buttons live inside the row and
+  // would otherwise match the row's own closest() hit. They each stopPropagation
+  // by returning here — the button attributes are tested before the row's.
+  if (t.dataset.runBaseline) {
+    // A baseline is BY DEFINITION the OFF arm. Prefills and arms; the operator
+    // still confirms, because this starts a multi-hour cell.
+    presetRun({ model: t.dataset.runBaseline, arm: "off" });
+    render();
+    return;
+  }
+  if (t.dataset.newProfile) { openProfileModal([], t.dataset.newProfile); render(); return; }
+  if (t.dataset.runProfile) {
+    // A run under a profile is the ON arm. The org is NOT guessed — the server
+    // requires one and the operator picks it in the run panel.
+    presetRun({ model: t.dataset.runProfile, arm: "on" });
+    render();
+    return;
+  }
+  if (t.dataset.modelExpand) { toggleModelRow(t.dataset.modelExpand); render(); return; }
   // POPOUTS. The view switch is checked BEFORE the toggle: a tab click must
   // change the view, never collapse the window out from under the operator.
   if (t.dataset.popView) {
@@ -420,10 +607,10 @@ async function freezeProfile() {
     }
     setPending(false);
     closeProfileModal();
-    // The next poll reads it back from disk. Nothing is written into `board`
-    // here — a local write would be a second source of truth for a value that
-    // is now durable, and the two could disagree.
-    await poll();
+    // The board is PUSHED, so the freeze lands on screen when the server's next
+    // assembly observes the new file on disk — within one tick. Nothing is
+    // written into `board` here: a local write would be a second source of
+    // truth for a value that is now durable, and the two could disagree.
   } catch (err) {
     // The request never reached the server. That is a DIFFERENT diagnosis from
     // a refusal and is labelled as such, so "the control plane is down" is
@@ -459,13 +646,27 @@ async function doStartRun() {
   }
   await startRun(board.control.base_url);
   // ATTACH THE TUI. The operator asked for the terminal to come up with the
-  // run. The mirror is on-demand and polling IS its keepalive, so expanding it
-  // is what starts the capture. It remains a second, strictly read-only attach
-  // client that never writes to the pty.
-  if (!isTuiExpanded()) toggleTui();
+  // run. The mirror is on-demand and the control plane's poll IS its keepalive,
+  // so expanding it is what starts the capture. It remains a second, strictly
+  // read-only attach client that never writes to the pty.
+  if (!isTuiExpanded()) { toggleTui(); resubscribe(); }
   render();
-  await poll();
 }
 
-poll();
-setInterval(poll, POLL_MS);
+// FIRST PAINT, THEN THE STREAM. render() draws the "connecting to feed…" state
+// immediately so the board is never a blank page while the socket opens.
+//
+// GUARDED BECAUSE THIS MODULE IS BOTH THE ENTRY POINT AND A LIBRARY. board.js
+// exports esc/nul/clip/tok/dur, so every panel imports it — and every panel
+// TEST therefore executes this file's module scope under Node, where there is
+// no DOM and no EventSource. Booting unconditionally made importing a pure
+// string builder throw `ReferenceError: EventSource is not defined`.
+//
+// The guard is a capability check, not an environment sniff: it asks whether
+// the two things the boot actually needs are present. In a browser both are;
+// under `node --test` neither is, and the module is then exactly what the tests
+// treat it as — a library.
+if (typeof document !== "undefined" && typeof EventSource !== "undefined") {
+  render();
+  connect();
+}

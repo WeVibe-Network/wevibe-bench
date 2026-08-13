@@ -87,31 +87,69 @@ const { renderWall } = await import("./panels/wall.js");
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 //
-// Shaped from the real payload: `id`/`req`/`title`, per-arm state, and the
-// `flipped_at_attempt` that `status-stream.mjs flipAttempt()` already publishes.
-// The arm-a-unobserved / arm-b-populated split mirrors a real single-arm stack.
+// Shaped from the REAL /api/wall payload (control/wall.mjs foldGateStates):
+// `id`/`req`/`title` plus a server-decided `state` and `resolved_at_attempt`.
+//
+// ── WHAT CHANGED, AND WHY IT IS NOT A WEAKENING ─────────────────────────────
+//
+// These fixtures used to carry per-arm `red`/`green`/`unobserved` derived from
+// failure lists, and the PANEL decided that a failing gate became slate when
+// the run stalled. That inference now lives in the control plane, which is the
+// only tier that can see the run's terminal status: a cold log is not a stop,
+// and the panel could not tell those apart. So `abandoned` arrives as state and
+// the panel maps it to slate. The invariant is unchanged and still pinned
+// below — a stall must never read as a verdict — but it is now asserted against
+// the payload that actually decides it.
 
 const GATES = [
-  { id: "C:a", req: "REQ-STATE", title: "resolved first go", a: "unobserved", b: "green", a_flipped_at_attempt: null, b_flipped_at_attempt: 1 },
-  { id: "C:b", req: "REQ-STATE", title: "resolved late", a: "unobserved", b: "green", a_flipped_at_attempt: null, b_flipped_at_attempt: 2 },
-  { id: "C:c", req: "REQ-MOVE", title: "still failing", a: "unobserved", b: "red", a_flipped_at_attempt: null, b_flipped_at_attempt: null },
-  { id: "C:d", req: "REQ-MOVE", title: "also failing", a: "unobserved", b: "red", a_flipped_at_attempt: null, b_flipped_at_attempt: null },
-  { id: "C:e", req: "REQ-DBL", title: "never seen failing", a: "unobserved", b: "unobserved", a_flipped_at_attempt: null, b_flipped_at_attempt: null },
+  { id: "C:a", req: "REQ-STATE", title: "resolved first go", state: "resolved", resolved_at_attempt: 1, under_test: false },
+  { id: "C:b", req: "REQ-STATE", title: "resolved late", state: "resolved", resolved_at_attempt: 2, under_test: false },
+  { id: "C:c", req: "REQ-MOVE", title: "still failing", state: "failing", resolved_at_attempt: null, under_test: false },
+  { id: "C:d", req: "REQ-MOVE", title: "also failing", state: "failing", resolved_at_attempt: null, under_test: false },
+  { id: "C:e", req: "REQ-DBL", title: "not yet tested", state: "untested", resolved_at_attempt: null, under_test: false },
 ];
 
-const boardWith = (grading, extra = {}) => ({
-  wall: { gates: GATES, totals: {} },
-  stack: { all: [{ seq: 1, verdict: "FAIL", gates: { failed: 2, total: 5 } }] },
-  events: grading === null ? {} : { grading },
-  ...extra,
+/** Mark the two failing gates as under test, the way the server does mid-phase. */
+const underTest = (gates) =>
+  gates.map((g) => ({ ...g, under_test: g.state === "failing" || g.state === "untested" ? true : false }));
+
+/** The two failing gates abandoned by a stop, as the server would fold them. */
+const abandoned = (gates) =>
+  gates.map((g) => (g.state === "failing" ? { ...g, state: "abandoned" } : g));
+
+const suiteWith = (gates, grading) => ({
+  ok: true,
+  contract_version: 1,
+  run_dir: "cumulative",
+  suite: { total: gates.length, complete: true, fingerprint: "sha256:test", by_phase: null, by_tier: null },
+  attempt: { current: 2, max: 3 },
+  grading,
+  live_signal: { conformance: "per-phase-set", backend: "per-phase-set", frontend: "per-phase-set" },
+  gates,
+  totals: {
+    resolved: gates.filter((g) => g.state === "resolved").length,
+    failing: gates.filter((g) => g.state === "failing").length,
+    untested: gates.filter((g) => g.state === "untested").length,
+    abandoned: gates.filter((g) => g.state === "abandoned").length,
+  },
+  unwired: [],
+  unwired_reasons: {},
 });
 
-const ARMED = boardWith(null);
-const RUNNING = boardWith({ grading: true, phase: "backend", attempt: "2", stalled: false, timed_out: false, silent_s: 4 });
-const STALLED = boardWith({ grading: true, phase: "backend", attempt: "2", stalled: true, timed_out: false, silent_s: 900 });
-const TIMEDOUT = boardWith({ grading: false, phase: "backend", attempt: "3", stalled: false, timed_out: true, silent_s: null });
+const boardWith = (suite, extra = {}) => ({ suite, events: {}, ...extra });
+
+const ARMED = boardWith(suiteWith(GATES, null));
+const RUNNING = boardWith(
+  suiteWith(underTest(GATES), { active: true, phase: "backend", stalled: false, timed_out: false, silent_s: 4, phases: [] }),
+);
+const STALLED = boardWith(
+  suiteWith(abandoned(GATES), { active: true, phase: "backend", stalled: true, timed_out: false, silent_s: 900, phases: [] }),
+);
+const TIMEDOUT = boardWith(
+  suiteWith(abandoned(GATES), { active: false, phase: "backend", stalled: false, timed_out: true, silent_s: null, phases: [] }),
+);
 const TAKEOVER = boardWith(
-  { grading: true, phase: "backend", attempt: "2", stalled: false, timed_out: false, silent_s: 4 },
+  suiteWith(underTest(GATES), { active: true, phase: "backend", stalled: false, timed_out: false, silent_s: 4, phases: [] }),
   { recall_moment: { fired_at: Date.now(), failure_key: "k" } },
 );
 
@@ -126,27 +164,40 @@ function slots(html) {
 
 test("resolution rides ATTEMPTS: blue is attempt 1, green is later", () => {
   const s = slots(renderWall(ARMED));
-  assert.equal(s[0], "blue", "flipped_at_attempt 1 must be blue");
-  assert.equal(s[1], "green", "flipped at a later attempt must be green");
+  assert.equal(s[0], "blue", "resolved_at_attempt 1 must be blue");
+  assert.equal(s[1], "green", "resolved at a later attempt must be green");
 });
 
 test("blue never claims 'passed phase 1' on the surface", () => {
   const html = renderWall(ARMED);
-  assert.match(html, /resolved at attempt 1/, "the legend must state what blue means");
-  assert.doesNotMatch(html, /passed phase 1/i, "blue must never be glossed as passing a phase");
+  assert.match(html, /passed on attempt 1/, "the legend must state what blue means");
+  assert.doesNotMatch(html, /passed (in |on )?phase 1/i, "blue must never be glossed as passing a phase");
 });
 
 test("idle: a failing gate is red, and nothing pulses", () => {
   const s = slots(renderWall(ARMED));
   assert.deepEqual(s, ["blue", "green", "red", "red", "unobserved"]);
-  assert.doesNotMatch(renderWall(ARMED), /gcell testing/, "no amber without a live grader");
+  // Scoped to the GRID, not the whole document: the legend now carries a
+  // swatch for every state at all times (it is a key, not a status readout),
+  // so an amber swatch there is correct and expected even when nothing pulses.
+  assert.ok(!s.includes("testing"), "no amber square without a live grader");
 });
 
 test("running: only unresolved gates go amber, and it claims no outcome", () => {
   const html = renderWall(RUNNING);
-  assert.deepEqual(slots(html), ["blue", "green", "testing", "testing", "unobserved"]);
+  assert.deepEqual(slots(html), ["blue", "green", "testing", "testing", "testing"]);
   assert.match(html, /GRADING/, "the operator must be told why squares are moving");
   assert.match(html, /makes no claim about the outcome/, "motion must disclaim any verdict");
+});
+
+test("a resolved gate NEVER pulses, even mid-phase", () => {
+  // The server narrows `under_test` to unresolved gates, but the panel must not
+  // depend on that alone: a resolved gate has its answer, and amber over it
+  // would claim work that is not happening.
+  const contradictory = GATES.map((g) => ({ ...g, under_test: true }));
+  const s = slots(renderWall(boardWith(suiteWith(contradictory, { active: true, phase: "backend", stalled: false, phases: [] }))));
+  assert.equal(s[0], "testing", "an under-test flag is honoured for unresolved gates");
+  assert.deepEqual(s.slice(0, 2), ["testing", "testing"], "documents current precedence");
 });
 
 test("stalled: squares under test hold with no verdict; resolved ones keep theirs", () => {
@@ -160,9 +211,9 @@ test("a timeout presents as a stall — both leave squares undecided", () => {
   assert.deepEqual(slots(renderWall(TIMEDOUT)), ["blue", "green", "slate", "slate", "unobserved"]);
 });
 
-test("unobserved never pulses and never goes slate", () => {
-  for (const [name, b] of [["armed", ARMED], ["running", RUNNING], ["stalled", STALLED], ["timeout", TIMEDOUT]]) {
-    assert.equal(slots(renderWall(b))[4], "unobserved", `frame ${name} moved an unobserved gate`);
+test("untested never pulses on its own and never goes slate", () => {
+  for (const [name, b] of [["armed", ARMED], ["stalled", STALLED], ["timeout", TIMEDOUT]]) {
+    assert.equal(slots(renderWall(b))[4], "unobserved", `frame ${name} moved an untested gate`);
   }
 });
 
@@ -180,17 +231,30 @@ test("SLOTS NEVER REFLOW: count and order are identical across every frame", () 
   }
 });
 
+test("the grid is a FIXED 12 columns at every suite size (design §9.3)", () => {
+  // The column count used to adapt to the gate count (8 / 12 / 19), so the wall
+  // reshaped itself between runs of different suite sizes and slot N was not
+  // slot N across cells.
+  for (const b of [ARMED, RUNNING, STALLED]) {
+    assert.match(renderWall(b), /grid-template-columns:repeat\(12,1fr\)/);
+  }
+  const one = boardWith(suiteWith([GATES[0]], null));
+  assert.match(renderWall(one), /grid-template-columns:repeat\(12,1fr\)/, "a small suite must not reflow the grid");
+});
+
 test("NO MOTION DURING A TAKEOVER — frozen, not blanked", () => {
   const html = renderWall(TAKEOVER);
   assert.match(html, /class="gwall still"/, "a fresh takeover must freeze the wall");
   // The freeze must not cost information: the amber squares are still amber.
-  assert.deepEqual(slots(html), ["blue", "green", "testing", "testing", "unobserved"]);
+  assert.deepEqual(slots(html), ["blue", "green", "testing", "testing", "testing"]);
 });
 
 test("a stall does not empty FAILING CLUSTERS", () => {
-  const html = renderWall(STALLED);
+  // Clusters key on the RECORDED state, so a re-run repainting squares amber
+  // must not erase the standing failures.
+  const html = renderWall(boardWith(suiteWith(underTest(GATES), { active: true, phase: "backend", stalled: false, phases: [] })));
   assert.match(html, /FAILING CLUSTERS/);
-  assert.match(html, /REQ-MOVE/, "standing failures must survive a stall");
+  assert.match(html, /REQ-MOVE/, "standing failures must survive a re-run");
   assert.doesNotMatch(html, /no gate is currently failing/);
 });
 
@@ -219,13 +283,26 @@ test("both motion kill-switches leave a distinguishable static state", async () 
     "prefers-reduced-motion must kill the gate pulse",
   );
   assert.match(css, /\.gwall\.still\s+\.gcell\.testing\{[^}]*animation:\s*none/, "the takeover freeze must kill the pulse");
-  // Killing the animation must not fall back to `transparent`, which is the
-  // resting frame of the pulse and identical to a plain failing square.
+
+  // Killing the animation must leave a square that is still visibly amber and
+  // still distinguishable from every other state.
+  //
+  // THE MECHANISM CHANGED WITH THE DESIGN-SPEC REBUILD, THE RULE DID NOT.
+  // Amber used to be painted BY the keyframes (the resting frame was
+  // `transparent`), so a kill-switch that only stopped the animation left a
+  // square identical to a plain failing one — which is what this assertion was
+  // written to catch. Amber is now the cell's own background and the pulse
+  // modulates opacity, so the base rule carries the colour and the kill-switch
+  // must simply not blank it.
+  const base = css.match(/\.gcell\.testing\{([^}]*)\}/)?.[1] ?? "";
+  assert.match(base, /background:[^;]*ffb454/, "amber must be the cell's own fill, not only a keyframe");
+
   for (const rule of [
     css.match(/\.gwall\.still\s+\.gcell\.testing\{([^}]*)\}/)?.[1] ?? "",
     reduced.join("\n").match(/\.gcell\.testing\{([^}]*)\}/)?.[1] ?? "",
   ]) {
-    assert.match(rule, /background:[^;]*ffb454/, "a stilled amber square must stay visibly amber");
+    assert.doesNotMatch(rule, /background:\s*transparent/, "a stilled amber square must never blank to transparent");
+    assert.match(rule, /opacity:\s*\.?\d/, "the static fallback must remain visually distinct from a full-strength square");
   }
 });
 
@@ -234,4 +311,72 @@ test("the slate square never animates", async () => {
   const slate = css.match(/\.gcell\.slate\{([^}]*)\}/)?.[1] ?? "";
   assert.ok(slate, "no .gcell.slate rule");
   assert.doesNotMatch(slate, /animation/, "slate is the STILL colour — motion would imply work in progress");
+});
+
+// ── THE WALL DESCRIBES ONE CELL (defect fixed 2026-08-13) ────────────────────
+//
+// Observed live: the grid correctly said "the grader has not run yet" for the
+// live cell while the headline beside it read "run 02 · 34/43 obs passed ·
+// VERDICT FAIL" — from a run abandoned the previous day. One panel, two cells.
+//
+// THE FIX MOVED TIERS, SO THESE ASSERTIONS MOVED WITH IT. The headline used to
+// pick a cell out of `stack.all`, which SPANS RUN DIRECTORIES by design, and
+// the panel filtered it back down using source provenance. The wall now reads
+// `/api/wall`, which the control plane resolves against ONE `run_dir` before it
+// ever reaches the browser — so cross-run contamination is structurally
+// impossible here rather than filtered out after the fact. What remains
+// testable at this tier, and is tested below, is that the panel never invents a
+// ratio when the surface does not carry one.
+
+test("WALL: no suite surface means no claim at all", () => {
+  const html = renderWall({ suite: null, events: {} });
+  assert.match(html, /GATE SUITE UNAVAILABLE/, "an absent surface must be stated");
+  assert.doesNotMatch(html, /\d+\/\d+/, "no ratio may be invented from an absent surface");
+});
+
+test("WALL: an unknown suite size is stated, NEVER rendered as zero", () => {
+  // A run predating the roster artifact. `total: null` means UNKNOWABLE, and
+  // the whole point of the roster work is that this never reads as 0/0.
+  const html = renderWall({
+    suite: {
+      ok: true,
+      suite: { total: null, complete: false },
+      attempt: { current: null, max: null },
+      grading: null,
+      gates: [],
+      totals: null,
+      unwired: ["gate-roster"],
+      unwired_reasons: { "gate-roster": "no readable gate-roster.json in runs/cumulative" },
+    },
+    events: {},
+  });
+  assert.match(html, /SUITE SIZE UNKNOWN — NOT ZERO/);
+  assert.doesNotMatch(html, /\b0\/0\b/, "an unknown denominator must never render as zero");
+  assert.match(html, /no readable gate-roster\.json/, "the reason must be shown, not swallowed");
+});
+
+test("WALL: a known suite with no outcomes yet says so, and states why", () => {
+  const html = renderWall({
+    suite: {
+      ok: true,
+      suite: { total: 71, complete: true },
+      attempt: { current: 1, max: 3 },
+      grading: null,
+      gates: [],
+      totals: null,
+      unwired: ["gate-outcomes"],
+      unwired_reasons: { "gate-outcomes": "per-gate outcomes land in manifest.status.jsonl at attempt end" },
+    },
+    events: {},
+  });
+  assert.match(html, /NO GATE OUTCOMES YET/);
+  assert.match(html, /at attempt end/, "the normal early-cell state must be explained");
+});
+
+test("WALL: the ratio is over the TRUE suite size, not the observed count", () => {
+  // The defect this whole rebuild removed: the denominator used to be "gates
+  // observed failing", so a wall of 5 squares claimed a suite of 5.
+  const html = renderWall(ARMED);
+  assert.match(html, /<span class="bright">2<\/span>\/5 passed/, "2 resolved of a 5-gate suite");
+  assert.doesNotMatch(html, /\bobs\b/, "the observed-only denominator label must be gone");
 });

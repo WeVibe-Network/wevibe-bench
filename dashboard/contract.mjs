@@ -63,17 +63,24 @@ export const CHUNKS_IN_BUILD = 6;
  * The five states of the transfer curve. The curve renderer consumes this
  * decision; it does not re-derive it. See sources/stack-ledger.mjs.
  *
- *   no_baseline    no OFF cell exists — nothing may be drawn
- *   baseline_void  an OFF cell exists but is void-instrument: no valid floor
- *   baseline_only  the floor, labelled n=1, and no ON runs
- *   n1_on          one ON run — a single delta, and NO LINE (two points would
- *                  imply a trend one run cannot support)
- *   curve          n≥2 — the only state where a line is legitimate
- *   regression     the newest ON cell is at or above the floor. Drawn at FULL
- *                  weight — this is the finding the benchmark exists to catch
+ *   no_baseline      no OFF cell exists — nothing may be drawn
+ *   baseline_pending an OFF cell exists and has not produced a measurement yet
+ *                    (not started, or running). NOT a failure — the floor is
+ *                    on its way. Kept distinct from baseline_void because
+ *                    collapsing them reported a HEALTHY RUNNING CELL as an
+ *                    instrument failure (measured 2026-08-13).
+ *   baseline_void    an OFF cell exists, TERMINATED, and is void-instrument:
+ *                    no valid floor. A claim about a finished cell only.
+ *   baseline_only    the floor, labelled n=1, and no ON runs
+ *   n1_on            one ON run — a single delta, and NO LINE (two points would
+ *                    imply a trend one run cannot support)
+ *   curve            n≥2 — the only state where a line is legitimate
+ *   regression       the newest ON cell is at or above the floor. Drawn at FULL
+ *                    weight — this is the finding the benchmark exists to catch
  */
 export const STACK_STATES = /** @type {const} */ ([
   "no_baseline",
+  "baseline_pending",
   "baseline_void",
   "baseline_only",
   "n1_on",
@@ -301,6 +308,39 @@ export function emptyBoard() {
     },
 
     wall: { gates: [], totals: { a: gateTotals(), b: gateTotals() } },
+
+    // ── THE GATE SUITE, AS THE HARNESS ITSELF PUBLISHES IT ────────────────────
+    //
+    // Served whole by the control plane's GET /api/wall (control/wall.mjs), which
+    // folds three artifacts the board must NOT stitch itself: the write-once
+    // gate-roster.json, the per-attempt gate_results, and the live phase signal.
+    //
+    // WHY THIS IS SEPARATE FROM `wall` ABOVE. `wall` is derived locally from the
+    // status stream and can only ever describe gates OBSERVED FAILING — the old
+    // harness published no suite total, so a gate that passed was never drawn at
+    // all. `suite` is the true enumerated universe, so it can finally answer
+    // "what has NOT been tested", which no amount of client-side derivation
+    // could produce from failure lists.
+    //
+    // NULL IS A DESIGNED STATE. `total: null` means the suite size is UNKNOWABLE
+    // (a run predating the roster artifact) and must never render as 0. The
+    // reason lives in `unwired_reasons` and is meant to be shown, not swallowed.
+    suite: null,
+
+    // ── THE MODEL LEDGER — one row per bench-eligible model ───────────────────
+    //
+    // Served whole by GET /api/models-ledger (control/models-ledger.mjs), which
+    // resolves EVERY launch gate server-side: whether a baseline may be run,
+    // whether a profile may be frozen, whether a cell may start under it.
+    //
+    // The board renders these verdicts and derives none of them. A button whose
+    // enabled state disagreed with the refusal /api/run/start would actually
+    // apply is worse than no button at all.
+    //
+    // NULL MEANS THE GATES COULD NOT BE EVALUATED, which is not the same as
+    // "nothing is allowed" — the panel says so and draws no buttons rather than
+    // drawing ungated ones.
+    models_ledger: null,
 
     episodes: [], // newest first
 

@@ -24,9 +24,16 @@ WORKDIR /app
 
 # No package.json, no install: the whole point is zero dependencies. If a
 # package.json ever appears here, something has been added that should not be.
-COPY contract.mjs server.mjs board.js overlay.js dom.js index.html ./
+#
+# `vendor/` carries Preact + hooks + htm as PUBLISHED ESM BUILDS, copied
+# verbatim (36KB, MIT). That is not a dependency in the build sense — there is
+# still nothing to install and nothing to compile. It is here so the board
+# renders with NO NETWORK: a CDN import would blank the board the moment the
+# network hiccups, which is unacceptable for a surface watched during a live run.
+COPY contract.mjs server.mjs board.js overlay.js dom.js ui.js index.html ./
 COPY panels/ ./panels/
 COPY sources/ ./sources/
+COPY vendor/ ./vendor/
 
 # Bind all interfaces INSIDE the container. A process bound to the container's
 # loopback is unreachable from a published port, so the host default of

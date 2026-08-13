@@ -123,17 +123,56 @@ export async function listDir(path) {
 // list of the run being watched, and the arm delta counted abandoned runs'
 // cells toward exclusions on an arm the operator is currently measuring.
 //
-// SELECTION RULE: the run directory whose status stream was written most
-// recently, falling back to the most recent manifest for a run that has not
-// yet appended an attempt record. Recency is the only signal on disk that
-// tracks the operator's actual intent — the harness writes to the live run and
-// nothing else, and an abandoned run's files stop changing the moment it is
-// abandoned. Directory NAME is deliberately not used: `cumulative.aborted-*`
-// is a convention, not a guarantee, and a rule that depends on someone
-// remembering to rename a directory fails silently the one time they don't.
+// SELECTION RULE: the run whose MANIFEST DECLARES THE NEWEST created_at.
 //
-// A source that legitimately spans runs must say so explicitly; nothing does
-// today. Cross-run aggregation is what this function exists to prevent.
+// ── THE DEFECT THIS REPLACES (measured, 2026-08-13) ─────────────────────────
+//
+// The rule used to be "the run with a status stream wins; break ties on
+// mtime". It is exactly backwards for the real topology, and it made the board
+// show TWO DIFFERENT CELLS AT ONCE for the first half-hour of every run:
+//
+//   · `manifest.status.jsonl` is appended AT ATTEMPT END — ~30 minutes in
+//     (status-stream.mjs:18-20 states this cadence).
+//   · So a freshly launched run has a manifest and NO status file → rank 0.
+//   · Any abandoned run on disk has a status file → rank 1, and rank was
+//     checked BEFORE mtime.
+//   · Therefore the corpse outranked the live cell, unconditionally, until
+//     the live cell's first attempt closed.
+//
+// Observed on the running board: `run-log` resolved the live cell
+// (`off-cell-20260813T051334.log`, written seconds earlier) while
+// `status-stream` — which feeds the GATE WALL and the arm delta — resolved
+// `cumulative.void-truncation-orphan-contention-20260812T0253`, stale by 21
+// hours. The wall's 23 gates belonged to a run the operator had abandoned.
+//
+// ── WHY created_at AND NOT mtime, AND NOT THE LAUNCH LOG ────────────────────
+//
+// mtime is wrong because it measures when a file was last TOUCHED, which an
+// archive/rename or a stray read-modify can move. `created_at` is written once
+// by the harness at run start and is the run's own statement of when it began.
+//
+// The launch log was the obvious alternative and is REJECTED on evidence: the
+// log records an absolute path (`dst=…/runs/<dir>/sessions/…`), but runs are
+// RENAMED WHEN ARCHIVED and the log keeps the original name. Measured: all
+// three `off-cell-*.log` files on disk point at `runs/cumulative`, because each
+// was the live `cumulative` when it ran. Joining through the log would resolve
+// three different runs to one directory.
+//
+// Directory NAME remains deliberately unused: `cumulative.aborted-*` is a
+// convention, not a guarantee, and a rule that depends on someone remembering
+// to rename a directory fails silently the one time they don't.
+//
+// FALLBACK, IN ORDER. A manifest with no parseable `created_at` sorts below
+// every run that declares one — it is never treated as epoch 0 in a way that
+// could let an unparseable manifest win. When NEITHER run declares a start,
+// the older rule is still the right one and is kept: a run carrying real
+// attempt records outranks a bare directory, so a just-created empty manifest
+// cannot steal the screen from a run that is mid-flight. mtime breaks the
+// final tie. Both orderings are pinned by tests in arm-delta-validity.test.mjs.
+//
+// A source that legitimately spans runs must say so explicitly; only
+// stack-ledger.mjs does, and it says so in its header. Cross-run aggregation is
+// what this function exists to prevent.
 export async function activeRun(runsRoot) {
   let best = null;
   for (const ent of await listDir(runsRoot)) {
@@ -143,26 +182,47 @@ export async function activeRun(runsRoot) {
     const manifest = await statOrNull(join(dir, "manifest.json"));
     if (!status?.isFile() && !manifest?.isFile()) continue;
 
-    // A run that has appended an attempt record always outranks one that has
-    // only a manifest, regardless of clock: the manifest is written once at run
-    // start, so a fresh manifest beside a live status stream would otherwise let
-    // a just-created run steal the screen from the one actually producing data.
-    const rank = status?.isFile() ? 1 : 0;
+    // The run's own declared start. null when absent or unparseable — such a
+    // run is outranked by any run that declares one, rather than defaulting to
+    // a number that could win.
+    const declared = manifest?.isFile()
+      ? (Date.parse(String((await readJson(join(dir, "manifest.json")))?.created_at ?? "")) || null)
+      : null;
     const mtime = Math.max(status?.mtimeMs ?? 0, manifest?.mtimeMs ?? 0);
-    if (!best || rank > best.rank || (rank === best.rank && mtime > best.mtime)) {
-      best = {
-        name: ent.name,
-        dir,
-        rank,
-        mtime,
-        statusPath: status?.isFile() ? join(dir, "manifest.status.jsonl") : null,
-        statusStat: status ?? null,
-        manifestPath: manifest?.isFile() ? join(dir, "manifest.json") : null,
-        manifestStat: manifest ?? null,
-      };
-    }
+
+    const candidate = {
+      name: ent.name,
+      dir,
+      declared,
+      // Carries real attempt records. Only consulted when NEITHER run declares
+      // a start — never as the primary key, which is the defect above.
+      rank: status?.isFile() ? 1 : 0,
+      mtime,
+      statusPath: status?.isFile() ? join(dir, "manifest.status.jsonl") : null,
+      statusStat: status ?? null,
+      manifestPath: manifest?.isFile() ? join(dir, "manifest.json") : null,
+      manifestStat: manifest ?? null,
+    };
+
+    if (!best || newerRun(candidate, best)) best = candidate;
   }
   return best;
+}
+
+/**
+ * Is `a` the more current run than `b`?
+ *
+ * Declared start first (the run's own statement of when it began), then — only
+ * when neither declares — presence of attempt data, then mtime.
+ */
+function newerRun(a, b) {
+  if (a.declared !== null && b.declared !== null) {
+    return a.declared !== b.declared ? a.declared > b.declared : a.mtime > b.mtime;
+  }
+  if (a.declared !== null) return true; // a declares, b does not
+  if (b.declared !== null) return false; // b declares, a does not
+  if (a.rank !== b.rank) return a.rank > b.rank; // data beats a bare directory
+  return a.mtime > b.mtime;
 }
 
 /**

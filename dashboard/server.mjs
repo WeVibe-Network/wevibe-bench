@@ -293,6 +293,262 @@ async function getBoard(cfg, mods, broken) {
   return inFlight;
 }
 
+// ── the live stream ──────────────────────────────────────────────────────────
+//
+// ── WHY SERVER-SENT EVENTS AND NOT A WEBSOCKET ──────────────────────────────
+//
+// The ask was "React consumed by events emitted by a web socket". The push
+// semantics are what matter and are delivered here; the wire protocol is SSE,
+// deliberately, for three reasons that are properties of THIS server:
+//
+//   1. NODE HAS NO STDLIB WEBSOCKET SERVER. `globalThis.WebSocket` is a CLIENT
+//      only. Serving RFC6455 means either a dependency (`ws`) or hand-rolling
+//      frame masking, continuation frames, ping/pong and close handshakes. Both
+//      break "no dependencies, no build step" — the stated invariant this image
+//      is built on (README, Dockerfile: there is no package.json by design).
+//   2. A WEBSOCKET IS BIDIRECTIONAL, AND THIS SERVER IS READ-ONLY BY
+//      CONSTRUCTION. Every non-GET is 405 (see below) and the bench mount is
+//      `:ro`. Opening a duplex channel would hand the browser a write path into
+//      a process whose entire safety argument is that it has none. SSE is a
+//      GET that never closes — the read-only property is preserved verbatim.
+//   3. IT IS ALREADY THE HOUSE IDIOM. The control plane consumes the worker's
+//      `opencode serve` over SSE (control/events.mjs), and control/sse-probe.mjs
+//      is a live socket test for exactly this framing. One streaming protocol in
+//      the tree, not two.
+//
+// EventSource additionally gives automatic reconnection with backoff, which a
+// hand-rolled WebSocket client would have to reimplement — and reconnection is
+// the single most important behaviour for a board that must survive a control
+// plane restart mid-run without going dark.
+//
+// ── WHAT IS PUSHED ──────────────────────────────────────────────────────────
+//
+// `board`  the full payload, MINUS the event ring. Sent on connect and whenever
+//          the assembled board changes.
+// `events` ONLY rows newer than the client's cursor.
+//
+// This is the fix for the measured defect: /api/board was 240KB every 2s and
+// 82% of it was 400 event rows that had not changed. Measured against the live
+// control plane: `?limit=400` = 199KB, `?since=<cursor>` = 493 bytes.
+const streamClients = new Set();
+
+/**
+ * Broadcast a named SSE frame to every attached client.
+ *
+ * A client whose socket has gone away is dropped rather than written to — a
+ * dead client must never be able to wedge the broadcast loop.
+ */
+function broadcast(event, data) {
+  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of [...streamClients]) {
+    try {
+      if (res.writableEnded) streamClients.delete(res);
+      else res.write(frame);
+    } catch {
+      streamClients.delete(res);
+    }
+  }
+}
+
+/**
+ * The board minus the event ring.
+ *
+ * Events are streamed separately and incrementally, so shipping them inside the
+ * board payload too would reintroduce exactly the redundancy this exists to
+ * remove. The ring's METADATA (counts, connected, cursor, grading) is kept —
+ * it is small, it changes meaningfully, and the feed header renders from it.
+ */
+export function boardWithoutEvents(board) {
+  const { events, ...rest } = board;
+  if (!events) return { ...rest, events: null };
+  const { events: _rows, ...meta } = events;
+  return { ...rest, events: { ...meta, events: [] } };
+}
+
+/**
+ * A stable digest of the board, used to decide whether a push is warranted.
+ *
+ * `generated_at` is EXCLUDED: it changes on every assembly by construction, so
+ * including it would make every board "changed" and turn push back into a poll
+ * with extra steps. Per-source `ms` timings are excluded for the same reason.
+ */
+export function boardSignature(board) {
+  const b = boardWithoutEvents(board);
+  const { generated_at: _g, sources, ...rest } = b;
+  return JSON.stringify({
+    ...rest,
+    sources: (sources ?? []).map((s) => ({ id: s.id, ok: s.ok, reason: s.reason })),
+  });
+}
+
+/**
+ * Per-section digests.
+ *
+ * ── WHY SECTIONS AND NOT ONE WHOLE-BOARD DIGEST (measured 2026-08-13) ───────
+ *
+ * A single digest was the first implementation and it is not enough. Measured
+ * over 20s of live stream: 8 board frames at ~29KB each, because SOME clock
+ * always moves — `run.elapsed_s`, `run.idle_s`, `run.log_silent_s` and
+ * `tui.bytes` all tick every assembly. Any one of them flipped the whole-board
+ * digest and re-sent every unchanged section with it.
+ *
+ * The worst offender was `tui`: 12.4KB of the 29KB frame, a full terminal
+ * screen, pushed twice a second whether or not the popout was even open.
+ *
+ * Sectioning means a ticking clock in `run` (486 bytes) costs 486 bytes, not
+ * 29KB. Each top-level key is digested and shipped independently, and the
+ * client merges by key.
+ *
+ * `sources[].ms` is normalised out here for the same reason it is excluded from
+ * the whole-board digest: it is a timing measurement of the read itself and
+ * moves on every assembly without carrying information the board renders.
+ */
+export function sectionSignatures(board) {
+  const b = boardWithoutEvents(board);
+  const out = {};
+  for (const [k, v] of Object.entries(b)) {
+    if (k === "generated_at") continue; // never a reason to push
+    if (k === "sources") {
+      out[k] = JSON.stringify((v ?? []).map((s) => ({ id: s.id, ok: s.ok, reason: s.reason })));
+      continue;
+    }
+    out[k] = JSON.stringify(v ?? null);
+  }
+  return out;
+}
+
+/**
+ * Split a section into its own sub-sections when it is large and only a small
+ * part of it moves.
+ *
+ * ── MEASURED, NOT ASSUMED (2026-08-13) ─────────────────────────────────────
+ *
+ * After sectioning, patches were still 7.4KB every 2s. Of that, `control` was
+ * 6,535 bytes — and the only thing that changed between consecutive patches
+ * was a clock nested inside `control.run`. The static 6KB of capabilities and
+ * roster rode along on every tick.
+ *
+ * `control` is the one section big enough and heterogeneous enough to be worth
+ * splitting: `capabilities` and `roster` are effectively static for the life of
+ * a run, while `run` ticks constantly. Splitting it means a ticking clock costs
+ * its own ~300 bytes instead of dragging 6KB of unchanged roster with it.
+ *
+ * Nothing else is split. A section that is small (`run` at 485b) or that
+ * changes as a whole gains nothing from finer granularity, and every split adds
+ * a merge rule the client has to honour — complexity that must be paid for by a
+ * measurement, not by a guess.
+ */
+const SPLIT_SECTIONS = { control: ["capabilities", "roster", "run", "notes"] };
+
+/** Flatten split sections into `parent.child` keys; leave everything else. */
+export function granularSignatures(board) {
+  const b = boardWithoutEvents(board);
+  const out = {};
+  for (const [k, v] of Object.entries(b)) {
+    if (k === "generated_at") continue;
+    if (k === "sources") {
+      out[k] = JSON.stringify((v ?? []).map((s) => ({ id: s.id, ok: s.ok, reason: s.reason })));
+      continue;
+    }
+    const split = SPLIT_SECTIONS[k];
+    if (split && v && typeof v === "object" && !Array.isArray(v)) {
+      // The named children each get their own digest; whatever remains is
+      // digested together so no field can be silently dropped from the wire.
+      const rest = { ...v };
+      for (const child of split) {
+        if (child in v) {
+          out[`${k}.${child}`] = JSON.stringify(v[child] ?? null);
+          delete rest[child];
+        }
+      }
+      out[`${k}.__rest`] = JSON.stringify(rest);
+      continue;
+    }
+    out[k] = JSON.stringify(v ?? null);
+  }
+  return out;
+}
+
+/**
+ * The TUI screen, reduced to its status when nobody is looking at it.
+ *
+ * The terminal frame is 12.4KB — by far the largest section on the board — and
+ * it changes on every capture. Streaming it to a client whose popout is
+ * MINIMIZED spends the entire bandwidth budget on pixels nobody can see.
+ *
+ * The client declares interest by reconnecting with `?tui=1` (panels/tui.js
+ * toggles it). When it has not, the frame is dropped and only the STATUS is
+ * sent — which is exactly what the minimized dock bar renders, so the bar stays
+ * truthful about whether the mirror is alive.
+ *
+ * This is a transport optimisation ONLY. Nothing about what the TUI panel may
+ * display changes; an expanded popout receives the full frame as before.
+ */
+export function tuiForClient(section, wantsFrame) {
+  if (!section || wantsFrame) return section;
+  const { frame: _f, ...status } = section;
+  return { ...status, frame: null, frame_withheld: true };
+}
+
+/**
+ * The TUI fast path.
+ *
+ * ── WHY THE MIRROR NEEDS ITS OWN CADENCE (measured defect 2026-08-13) ───────
+ *
+ * The terminal was repainting about once every 4 seconds. It was not streaming
+ * at all — it was being PULLED through two independent 2s stages that do not
+ * share a phase:
+ *
+ *   pty -> control Capture (continuous)
+ *       -> control /api/tui            (pulled only when asked)
+ *       -> dashboard control-plane source, inside getBoard()
+ *       -> dashboard getBoard CACHE     age < pollMs = 2000ms
+ *       -> dashboard push tick          setInterval(pollMs) = 2000ms
+ *       -> browser
+ *
+ * best case 2s, worst case ~4s — which is exactly what was observed.
+ *
+ * A terminal is not board state. The board's cadence is right for a gate wall
+ * that changes every few minutes and wrong for a screen a human is reading. So
+ * the mirror gets a DIRECT line: this polls control/api/tui on its own short
+ * interval and pushes frames the moment they change, bypassing the board
+ * assembly and its cache entirely.
+ *
+ * IT RUNS ONLY WHILE SOMEONE IS WATCHING. The capture upstream stops itself
+ * when nothing reads it (TUI_IDLE_STOP_MS), and polling IS that keepalive — so
+ * an interval that ran with no subscriber would hold a pty open against a live
+ * benchmark session for no reason.
+ */
+const TUI_STREAM_MS = 250;
+
+/** Clients whose popout is open, and therefore want frames. */
+function tuiSubscribers() {
+  return [...streamClients].filter((res) => res.wevibeWantsTui === true);
+}
+
+/**
+ * Diff two terminal frames to the ROWS that changed.
+ *
+ * ── WHY (measured 2026-08-13) ──────────────────────────────────────────────
+ * Streaming at 250ms made the mirror feel live, and cost 36KB per frame — 80
+ * frames in 20s, ~2.8MB, to fix a latency problem. That trade is not worth
+ * making: a terminal that is being typed into changes a handful of rows, and a
+ * cursor blink changes exactly one.
+ *
+ * So only changed rows go on the wire, addressed by index. The client splices
+ * them into the frame it already holds. A full frame is still sent whenever the
+ * geometry changes or the client has no frame to splice into — correctness
+ * first, and a resize is rare.
+ */
+export function diffTuiRows(prev, next) {
+  if (!Array.isArray(prev) || !Array.isArray(next) || prev.length !== next.length) return null;
+  const rows = [];
+  for (let i = 0; i < next.length; i += 1) {
+    if (JSON.stringify(prev[i]) !== JSON.stringify(next[i])) rows.push([i, next[i]]);
+  }
+  return rows;
+}
+
 // ── http ─────────────────────────────────────────────────────────────────────
 
 // Fixed allowlist — there is no dynamic path resolution anywhere in this
@@ -317,6 +573,15 @@ const STATIC = {
   "/panels/runstart.js": { file: "panels/runstart.js", type: "text/javascript; charset=utf-8" },
   "/panels/popout.js": { file: "panels/popout.js", type: "text/javascript; charset=utf-8" },
   "/panels/extraction.js": { file: "panels/extraction.js", type: "text/javascript; charset=utf-8" },
+
+  // ── VENDORED RUNTIME ──────────────────────────────────────────────────
+  // Preact + hooks + htm, served from the image. Part of the fixed allowlist
+  // like every other file: there is still no dynamic path resolution anywhere
+  // in this server, so traversal remains impossible by construction.
+  "/vendor/preact.mjs": { file: "vendor/preact.mjs", type: "text/javascript; charset=utf-8" },
+  "/vendor/preact-hooks.mjs": { file: "vendor/preact-hooks.mjs", type: "text/javascript; charset=utf-8" },
+  "/vendor/htm.mjs": { file: "vendor/htm.mjs", type: "text/javascript; charset=utf-8" },
+  "/ui.js": { file: "ui.js", type: "text/javascript; charset=utf-8" },
 };
 
 const main = async () => {
@@ -344,6 +609,58 @@ const main = async () => {
       } catch (err) {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: String(err?.message ?? err) }));
+      }
+      return;
+    }
+
+    // ── GET /api/stream ──────────────────────────────────────────────────
+    // The push channel. A GET that never ends, so the read-only property of
+    // this server is preserved exactly (see the SSE rationale above).
+    //
+    // The client sends its event cursor as `?since=`. On connect it receives
+    // the full board and every event newer than that cursor, so a reconnect
+    // after a dropped connection resumes without a gap and without refetching
+    // the whole ring.
+    if (url.pathname === "/api/stream") {
+      res.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-store",
+        connection: "keep-alive",
+        // Defeats proxy buffering, which otherwise holds frames until a buffer
+        // fills and makes a live stream look dead.
+        "x-accel-buffering": "no",
+      });
+      // Tell EventSource to back off to 2s on reconnect rather than its
+      // 3s default — this is a local socket, and a run in flight should not
+      // wait longer than the old poll interval to recover.
+      res.write("retry: 2000\n\n");
+
+      streamClients.add(res);
+      const drop = () => streamClients.delete(res);
+      req.on("close", drop);
+      req.on("error", drop);
+      res.on("error", drop);
+
+      // Does this client's TUI popout want full terminal frames? The frame is
+      // the largest section on the board and is withheld unless asked for.
+      res.wevibeWantsTui = url.searchParams.get("tui") === "1";
+
+      try {
+        const board = await getBoard(cfg, mods, broken);
+        const since = Number(url.searchParams.get("since") ?? 0) || 0;
+        const rows = (board.events?.events ?? []).filter((e) => (e.seq ?? -1) > since);
+        // The cursor this client has been brought up to. The push loop sends
+        // each client only what is newer than ITS OWN cursor, so a client that
+        // connected mid-run is never replayed rows it already has, and a
+        // reconnecting client is never skipped past a gap.
+        res.wevibeCursor = rows.length ? (rows[rows.length - 1].seq ?? since) : since;
+        const full = boardWithoutEvents(board);
+        full.tui = tuiForClient(full.tui, res.wevibeWantsTui);
+        res.write(`event: board\ndata: ${JSON.stringify(full)}\n\n`);
+        res.write(`event: events\ndata: ${JSON.stringify({ events: rows, cursor: board.events?.cursor ?? null })}\n\n`);
+      } catch (err) {
+        // Never swallow: the client is told why its first frame is missing.
+        res.write(`event: error\ndata: ${JSON.stringify({ reason: String(err?.message ?? err) })}\n\n`);
       }
       return;
     }
@@ -377,6 +694,171 @@ const main = async () => {
     res.writeHead(404, { "content-type": "text/plain" }).end("not found");
   });
 
+  // ── THE PUSH LOOP ────────────────────────────────────────────────────────
+  //
+  // The server polls the SOURCES on the same cadence the browser used to, but
+  // it does so ONCE for every attached client and pushes only what changed.
+  // That is the whole win: the sources are files and a local HTTP service, so
+  // something must read them on an interval — the defect was never the polling,
+  // it was that every browser refetched 240KB of mostly-identical payload and
+  // rebuilt the board from it.
+  //
+  // ONLY CHANGED SECTIONS ARE SENT. Per-section digests (see
+  // sectionSignatures) mean a ticking `run.elapsed_s` costs 486 bytes rather
+  // than re-sending the 12.4KB TUI screen beside it. A quiet run costs one
+  // heartbeat comment every 15s and nothing else.
+  let lastSections = null;
+  let lastHeartbeat = 0;
+
+  const tick = async () => {
+    if (!streamClients.size) return; // nobody attached: do no work at all
+    let board;
+    try {
+      board = await getBoard(cfg, mods, broken);
+    } catch (err) {
+      broadcast("error", { reason: String(err?.message ?? err) });
+      return;
+    }
+
+    const sections = granularSignatures(board);
+    if (lastSections === null) {
+      // First tick with a client attached: they were already sent a full board
+      // on connect, so this only primes the comparison.
+      lastSections = sections;
+    } else {
+      const patch = {};
+      let changed = 0;
+      for (const [k, sig] of Object.entries(sections)) {
+        if (lastSections[k] !== sig) {
+          patch[k] = JSON.parse(sig);
+          changed += 1;
+        }
+      }
+      // A section that DISAPPEARED is a real change and must reach the client,
+      // otherwise a panel keeps rendering state the server no longer has.
+      for (const k of Object.keys(lastSections)) {
+        if (!(k in sections)) {
+          patch[k] = null;
+          changed += 1;
+        }
+      }
+      lastSections = sections;
+
+      if (changed) {
+        // THE TUI IS OWNED BY THE FAST PATH. It is dropped from the slow
+        // patch entirely: the board loop reads a value that is already up to
+        // 2s stale by the time it assembles, so letting it through would
+        // overwrite a fresh 250ms frame with an older one and make the mirror
+        // stutter backwards. One writer per section.
+        delete patch.tui;
+        if (!Object.keys(patch).length) return;
+        const shared = JSON.stringify(patch);
+        for (const res of [...streamClients]) {
+          try {
+            res.write(`event: patch\ndata: ${shared}\n\n`);
+          } catch {
+            streamClients.delete(res);
+          }
+        }
+      }
+    }
+
+    // Per-client event deltas. Each client is at its own cursor, so this is a
+    // per-socket write rather than a broadcast.
+    const rows = board.events?.events ?? [];
+    const cursor = board.events?.cursor ?? null;
+    for (const res of [...streamClients]) {
+      const since = res.wevibeCursor ?? 0;
+      const fresh = rows.filter((e) => (e.seq ?? -1) > since);
+      if (!fresh.length) continue;
+      res.wevibeCursor = fresh[fresh.length - 1].seq ?? since;
+      try {
+        res.write(`event: events\ndata: ${JSON.stringify({ events: fresh, cursor })}\n\n`);
+      } catch {
+        streamClients.delete(res);
+      }
+    }
+
+    // A comment frame keeps intermediaries from reaping an idle connection.
+    // It is not data and the client ignores it — but its ABSENCE is how a
+    // silent board becomes a dead board behind a proxy.
+    const now = Date.now();
+    if (now - lastHeartbeat >= 15000) {
+      lastHeartbeat = now;
+      for (const res of [...streamClients]) {
+        try {
+          res.write(`: heartbeat ${now}\n\n`);
+        } catch {
+          streamClients.delete(res);
+        }
+      }
+    }
+  };
+
+  const loop = setInterval(() => void tick(), cfg.pollMs);
+  // Never hold the process open for the sake of the timer.
+  loop.unref?.();
+
+  // ── THE TUI FAST PATH ────────────────────────────────────────────────────
+  // A dedicated short-interval poll straight to the control plane, pushing
+  // frames to subscribed clients only. See TUI_STREAM_MS above for why the
+  // mirror cannot ride the board's cadence.
+  let lastTuiFrame = null;
+  let lastTuiRows = null;
+  let tuiInFlight = false;
+
+  const tuiTick = async () => {
+    const subs = tuiSubscribers();
+    if (!subs.length) {
+      // Nobody is watching. Drop the memo so the next subscriber is guaranteed
+      // a full frame rather than being diffed against a stale one.
+      lastTuiFrame = null;
+      return;
+    }
+    // Never let a slow control plane stack requests on top of each other.
+    if (tuiInFlight) return;
+    tuiInFlight = true;
+    try {
+      const base = cfg.controlUrl ?? "http://127.0.0.1:7718";
+      const res = await fetch(`${base}/api/tui`, {
+        signal: AbortSignal.timeout(2000),
+        headers: { accept: "application/json" },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const sig = JSON.stringify(data);
+      if (sig === lastTuiFrame) return; // an unchanged terminal sends nothing
+      lastTuiFrame = sig;
+
+      // ROW DIFF. The full ~36KB screen is sent only when there is nothing to
+      // splice against or the geometry moved; otherwise only the rows that
+      // actually changed, addressed by index. A cursor blink is one row.
+      const rows = diffTuiRows(lastTuiRows, data.frame);
+      const { frame: _f, ...meta } = data;
+      const body =
+        rows === null
+          ? JSON.stringify({ tui: data })
+          : JSON.stringify({ tui_rows: { rows, meta } });
+      lastTuiRows = data.frame ?? null;
+
+      for (const r of subs) {
+        try {
+          r.write(`event: patch\ndata: ${body}\n\n`);
+        } catch {
+          streamClients.delete(r);
+        }
+      }
+    } catch {
+      // A blink of the control plane must not kill the loop; the next tick
+      // retries and the panel keeps its last good frame on screen.
+    } finally {
+      tuiInFlight = false;
+    }
+  };
+
+  const tuiLoop = setInterval(() => void tuiTick(), TUI_STREAM_MS);
+  tuiLoop.unref?.();
+
   // Precedence: explicit CLI flag > env/config > default. An earlier revision
   // had `cfg.port ?? args.port`, which let an env var silently win over a flag
   // the operator typed — the opposite of what a flag means.
@@ -387,6 +869,7 @@ const main = async () => {
     console.log(`  bench root : ${cfg.benchRoot}`);
     console.log(`  runs root  : ${cfg.runsRoot}`);
     console.log(`  sources    : ${mods.map((m) => m.id).join(", ") || "(none)"}`);
+    console.log(`  stream     : GET /api/stream (SSE, push)`);
     if (broken.length) console.log(`  unwired    : ${broken.map((b) => b.id).join(", ")}`);
   });
 };

@@ -78,6 +78,30 @@ export function setRunSel(key, value) {
   disarm();
 }
 
+/**
+ * PRESET FROM THE LEDGER. The model row's [+ baseline] and a profile's [+ run]
+ * both land here.
+ *
+ * IT PREFILLS AND ARMS — IT DOES NOT LAUNCH. A benchmark cell costs ~3 hours
+ * and starting one while another is live abandons that cell, so the second
+ * click is the cheapest insurance on the board (see the header). Wiring the
+ * ledger buttons straight to `startRun` would delete exactly that protection
+ * for the two paths most likely to be clicked by reflex.
+ *
+ * The org is deliberately NOT guessed for an ON cell: the server refuses an ON
+ * cell with no org, and inventing one would either target the wrong corpus or
+ * produce a restatement the operator cannot check.
+ */
+export function presetRun({ model, arm, context = null }) {
+  ui.sel.model = model ?? "";
+  ui.sel.arm = arm ?? "";
+  if (context !== null) ui.sel.context = String(context);
+  // A preset is a NEW set of parameters, so any token minted for the previous
+  // ones must die with it.
+  disarm();
+  ui.refusal = null;
+}
+
 export function disarm() {
   ui.armed = false;
   ui.token = null;

@@ -136,20 +136,64 @@ export function gradingStatus(rows, { logMtimeMs = null, now = Date.now() } = {}
   let attempt = null;
   let timedOut = false;
 
+  // ── PER-PHASE RESULTS (added 2026-08-13) ────────────────────────────────
+  //
+  // THE GAP THIS FILLS: the harness publishes a real, quantified result for
+  // every grading phase as it completes —
+  //   step=gate-phase-end phase=conformance status=fail problems=3
+  //   step=gate-phase-end phase=backend     status=fail problems=2
+  // — but the only consumer of gate data on the board was `wall.gates`, which
+  // is built from manifest.status.jsonl and is written ONLY AT ATTEMPT END.
+  //
+  // The consequence the operator hit: grading ran for minutes, three phases
+  // reported real failures, and the GATE WALL sat at zero gates showing "the
+  // grader has not run yet" — which was false, and unresponsive-looking,
+  // precisely when there was something to watch.
+  //
+  // These are NOT gate identities and must never be rendered as squares: a
+  // phase problem count is a different measurement from a named failing gate,
+  // and conflating them would invent gates that do not exist. They are carried
+  // as their own list so the panel can state what the grader has found SO FAR,
+  // clearly labelled as in-flight and provisional.
+  const phases = [];
+
   for (const r of rows) {
     if (r.type === "harness:gate-attempt-start") {
       attempt = r.detail?.match(/attempt (\S+)/)?.[1] ?? attempt;
       phase = null;
       active = true;
+      // A new attempt re-grades from scratch; last attempt's phase results are
+      // not this attempt's.
+      phases.length = 0;
     } else if (r.type === "harness:gate-phase-start") {
       phase = r.phase;
       active = true;
+      if (r.phase && !phases.some((p) => p.phase === r.phase)) {
+        phases.push({ phase: r.phase, status: null, problems: null, running: true });
+      }
     } else if (r.type === "harness:gate-phase-end") {
       phase = r.phase;
       active = false;
+      // `detail` is composed as "<phase> <status> · <n> problems" by rowFor().
+      const st = r.detail?.match(/^\S+\s+(\S+)/)?.[1] ?? null;
+      const probs = r.detail?.match(/·\s*(\d+)\s+problems/)?.[1] ?? null;
+      const existing = phases.find((p) => p.phase === r.phase);
+      const done = {
+        phase: r.phase,
+        status: st,
+        problems: probs === null ? null : Number(probs),
+        running: false,
+      };
+      if (existing) Object.assign(existing, done);
+      else phases.push(done);
     } else if (r.type === "harness:gate-timeout") {
       timedOut = true;
       active = false;
+      const open = phases.find((p) => p.running);
+      if (open) {
+        open.running = false;
+        open.status = "timeout";
+      }
     }
   }
 
@@ -167,6 +211,9 @@ export function gradingStatus(rows, { logMtimeMs = null, now = Date.now() } = {}
     // The operator-facing verdict. Deliberately a derived boolean rather than a
     // colour: the panel decides presentation, this decides truth.
     stalled: elapsed !== null && elapsed >= GATE_STALL_THRESHOLD_S,
+    // Per-phase progress. PROVISIONAL BY CONSTRUCTION — the authoritative gate
+    // list still lands in manifest.status.jsonl at attempt end.
+    phases,
   };
 }
 

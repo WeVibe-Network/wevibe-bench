@@ -68,6 +68,9 @@ import { readRoster, CONTEXT_CHOICES } from "./roster.mjs";
 import { readRunState } from "./runstate.mjs";
 import { EventRing, subscribe } from "./events.mjs";
 import { readGateActivity } from "./gate-events.mjs";
+import { readWall, WALL_CONTRACT_VERSION } from "./wall.mjs";
+import { readFeedback, feedbackRows, FEEDBACK_CONTRACT_VERSION } from "./feedback.mjs";
+import { readModelsLedger, baselineFor, collectOffCells } from "./models-ledger.mjs";
 import { ExtractionTracker } from "./extraction.mjs";
 import { TuiMirror } from "./tui.mjs";
 import { readHold, releaseHold } from "./hold.mjs";
@@ -237,7 +240,12 @@ async function markExtractedFrom(runLabel, sourceMode) {
  * `bad_confirmation`. START requires it, and that is what makes the second click
  * meaningful.
  */
-async function validateStart(payload, roster, run, { requireConfirm = true, profile = null } = {}) {
+async function validateStart(
+  payload,
+  roster,
+  run,
+  { requireConfirm = true, profile = null, runsRoot = null } = {},
+) {
   const model = typeof payload?.model === "string" ? payload.model.trim() : "";
   const arm = payload?.arm === "on" || payload?.arm === "off" ? payload.arm : null;
   const org = typeof payload?.org === "string" && payload.org.trim() ? payload.org.trim() : null;
@@ -317,6 +325,39 @@ async function validateStart(payload, roster, run, { requireConfirm = true, prof
     }
   }
 
+  // ── THE BASELINE GATE ──────────────────────────────────────────────────
+  //
+  // An ON cell measures memory lift as a Δ against that model's OFF floor. With
+  // no valid floor there is nothing to subtract from, so the cell burns ~3h to
+  // produce a number that cannot be interpreted — and the failure is silent,
+  // because the cell itself succeeds. Refusing here turns hours into a sentence.
+  //
+  // OFF cells are exempt BY DEFINITION: an OFF cell IS the baseline, and gating
+  // it on a baseline would make the first one impossible to run.
+  //
+  // VOID IS NOT A FLOOR. A void-instrument OFF cell produced numbers, which is
+  // precisely why it must be rejected explicitly — nothing downstream can tell
+  // an instrument artifact from a real measurement.
+  // `runsRoot` is passed by the caller rather than read from module scope so
+  // this function stays testable against a fixture directory. When it is absent
+  // the gate CANNOT be evaluated, and an unevaluable safety gate must fail
+  // closed — silently skipping it would let the exact cell it guards against
+  // through.
+  if (arm === "on") {
+    if (!runsRoot) {
+      return refuse(
+        "baseline_required",
+        "the baseline gate could not be evaluated (no runs root supplied), and an ON cell must " +
+          "never launch on an unverified floor",
+      );
+    }
+    const offCells = await collectOffCells(runsRoot);
+    const baseline = baselineFor(model, offCells);
+    if (!baseline.scorable) {
+      return refuse("baseline_required", baseline.reason, { model, subject_model: model });
+    }
+  }
+
   const expected = confirmationToken({ model, arm, org, context });
   if (requireConfirm && payload?.confirm !== expected) {
     return refuse(
@@ -360,6 +401,13 @@ const server = createServer(async (req, res) => {
         extract: true,
         events: true,
         select_context: true,
+        // The GATE WALL surface. Advertised so the board can tell "this control
+        // plane predates /api/wall" from "the wall has nothing to show".
+        wall: true,
+        wall_contract_version: WALL_CONTRACT_VERSION,
+        // The verbatim graded text the model was handed as user turns.
+        feedback: true,
+        feedback_contract_version: FEEDBACK_CONTRACT_VERSION,
         // Profiles are STORED here (durably, frozen) but never ENFORCED — no
         // recall request carries a producer-model allowlist. The two are
         // separate booleans on purpose: a UI that reads one capability would
@@ -452,6 +500,33 @@ const server = createServer(async (req, res) => {
     // CREATION SIDE EFFECTS — NONE and puts run start on its own control.
     if (path === "/api/profiles/create" && req.method === "POST") {
       const payload = JSON.parse((await readBody(req)) || "{}");
+
+      // ── THE BASELINE GATE, SECOND ENFORCEMENT POINT ────────────────────
+      //
+      // A profile exists to be RUN, and every run under it is scored against
+      // its subject model's OFF floor. Freezing a profile against a model with
+      // no valid floor creates a record that can never produce an
+      // interpretable result — and profiles are frozen forever, so the mistake
+      // is permanent rather than correctable.
+      //
+      // This duplicates the rule /api/run/start applies, deliberately: the two
+      // gates guard different damage (an uninterpretable cell vs a permanently
+      // unusable profile) and both read `baselineFor`, so they cannot disagree
+      // about what a valid floor is.
+      const subject = typeof payload?.subject_model === "string" ? payload.subject_model.trim() : null;
+      if (subject) {
+        const baseline = baselineFor(subject, await collectOffCells(RUNS_ROOT));
+        if (!baseline.scorable) {
+          sendJson(res, 409, {
+            ok: false,
+            code: "baseline_required",
+            reason: baseline.reason,
+            subject_model: subject,
+          });
+          return;
+        }
+      }
+
       const result = await createProfile(RUNS_ROOT, {
         // TWO axes, named separately on the wire. The old single `models` field
         // conflated the measurement with the experiment variable; it is gone
@@ -491,7 +566,7 @@ const server = createServer(async (req, res) => {
         payload,
         roster,
         { ...run, can_start: true, blocked_reason: null },
-        { requireConfirm: false, profile: await activeProfile(RUNS_ROOT) },
+        { requireConfirm: false, profile: await activeProfile(RUNS_ROOT), runsRoot: RUNS_ROOT },
       );
       if (check.ok === false) {
         sendJson(res, 400, check);
@@ -538,7 +613,7 @@ const server = createServer(async (req, res) => {
         activeProfErr = String(err?.message ?? err);
       }
 
-      const check = await validateStart(payload, roster, run, { profile: activeProf });
+      const check = await validateStart(payload, roster, run, { profile: activeProf, runsRoot: RUNS_ROOT });
       if (!check.ok) {
         sendJson(res, 409, check);
         return;
@@ -708,14 +783,42 @@ const server = createServer(async (req, res) => {
         ? gate.rows.filter((r) => kinds.includes(r.kind))
         : gate.rows;
 
+      // GRADED TEXT ROWS ARE MERGED IN TOO (WO-FEEDBACK-1). The harness renders
+      // gate results into prose and hands it to the model AS A USER TURN. That
+      // message is the single most consequential input the model receives and
+      // it appeared nowhere in this feed — the worker's SSE stream shows only
+      // what the model did with it, never what it was given.
+      //
+      // They carry `kind:"user"` deliberately: on this board they ARE user
+      // turns, which is exactly the fiction under test. Labelling them
+      // "harness" would quietly answer the question the operator opened the
+      // feed to judge.
+      let feedback = { rows: [], error: null };
+      try {
+        const fb = await readFeedback({ runsRoot: RUNS_ROOT, runDir: null, limit });
+        feedback = { rows: fb.ok ? feedbackRows(fb.messages) : [], error: null };
+      } catch (err) {
+        // Additive instrumentation: a read failure must degrade the feed to its
+        // previous behaviour, never take the agent stream down with it.
+        feedback = { rows: [], error: String(err?.message ?? err) };
+      }
+      const feedbackRowsOut = kinds && kinds.length
+        ? feedback.rows.filter((r) => kinds.includes(r.kind))
+        : feedback.rows;
+
       // Counts must reflect what the operator can filter on, including the
       // grading rows — a chip whose count is always 0 reads as "never happens".
       const counts = { ...snapshot.counts };
       for (const r of gate.rows) counts[r.kind] = (counts[r.kind] ?? 0) + 1;
+      for (const r of feedback.rows) counts[r.kind] = (counts[r.kind] ?? 0) + 1;
 
       sendJson(res, 200, {
         ...snapshot,
-        events: [...snapshot.events, ...gateRows.slice(-limit)],
+        events: [
+          ...snapshot.events,
+          ...gateRows.slice(-limit),
+          ...feedbackRowsOut.slice(-limit),
+        ],
         counts,
         // The live grading verdict: which phase is open, how long it has been
         // silent, and whether that exceeds the alarm threshold.
@@ -810,6 +913,84 @@ const server = createServer(async (req, res) => {
       });
 
       sendJson(res, started.ok ? 200 : 409, started.ok ? { ok: true, model } : started);
+      return;
+    }
+
+    // ── GET /api/feedback ────────────────────────────────────────────────
+    // The graded text, VERBATIM — exactly what the model was told a user sent.
+    //
+    // This is the surface for judging the fiction: the harness renders gate
+    // results into prose and delivers it as a user turn, and until this existed
+    // nobody could read those bytes. It does not summarise or re-render; a
+    // surface that prettified the text would answer a different question than
+    // the one an operator is asking when they open it.
+    //
+    //   ?run_dir=<name>   default "cumulative"
+    //   ?cell=<name>      default: the most recently written cell
+    //   ?limit=<n>        default 50, newest-last
+    //   ?text=0           omit bodies (index only)
+    if (path === "/api/feedback" && req.method === "GET") {
+      const limitRaw = Number(url.searchParams.get("limit"));
+      const result = await readFeedback({
+        runsRoot: RUNS_ROOT,
+        runDir: url.searchParams.get("run_dir"),
+        cell: url.searchParams.get("cell"),
+        limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50,
+        includeText: url.searchParams.get("text") !== "0",
+      });
+      sendJson(res, result.ok ? 200 : 400, result);
+      return;
+    }
+
+    // ── GET /api/wall ────────────────────────────────────────────────────
+    // The GATE WALL's single source: roster + per-gate outcomes + live grading,
+    // already merged. The board must not stitch three artifacts together — a
+    // second implementation of this fold would disagree with the first, and
+    // every disagreement shows up as a wrong colour on a square.
+    //
+    // The server decides `state`; the board decides colour. Nothing here emits
+    // colours, CSS, or presentation.
+    //
+    // Never 500s on a missing roster: that is a real state (the run predates
+    // the artifact), reported as ok:true + unwired + a reason.
+    if (path === "/api/wall" && req.method === "GET") {
+      const runState = await readRunState({ runsRoot: RUNS_ROOT, launcher });
+      const wall = await readWall({
+        runsRoot: RUNS_ROOT,
+        runDir: url.searchParams.get("run_dir"),
+        launcher,
+        runState,
+      });
+      sendJson(res, wall.ok ? 200 : 400, wall);
+      return;
+    }
+
+    // ── GET /api/models-ledger ───────────────────────────────────────────
+    // One row per bench-eligible model with its profiles nested, and every
+    // launch gate already resolved. The board renders this and decides
+    // nothing: a button's enabled state and the refusal /api/run/start would
+    // actually apply are computed from the same place, so they cannot drift.
+    if (path === "/api/models-ledger" && req.method === "GET") {
+      const runState = await readRunState({ runsRoot: RUNS_ROOT, launcher });
+      const roster = await readRoster({ proxyUrl: args.proxyUrl, runtimeUrl: args.runtimeUrl });
+      const ledger = await readModelsLedger({
+        runsRoot: RUNS_ROOT,
+        benchModels: roster.ok ? (roster.bench_models ?? []) : [],
+        runInFlight: runState.can_start !== true,
+        blockedReason: runState.blocked_reason,
+      });
+      // The roster is the model universe; without it there are no rows to
+      // draw, and saying so is not the same as saying "no models exist".
+      if (!roster.ok) {
+        sendJson(res, 200, {
+          ...ledger,
+          models: [],
+          unwired: ["roster"],
+          unwired_reason: roster.reason ?? "model proxy unreachable",
+        });
+        return;
+      }
+      sendJson(res, 200, ledger);
       return;
     }
 

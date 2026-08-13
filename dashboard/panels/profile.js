@@ -117,8 +117,17 @@ export function currentRefusal() {
 /** Inspector visibility. Separate from the creation modal — different jobs. */
 let inspector = false;
 
-export function openProfileModal(preselect = []) {
-  subject = "";
+/**
+ * `subjectModel` is the model the operator clicked [+ profile] ON. Preselecting
+ * it is not a guess: the ledger row IS the OFF→ON subject, so opening the modal
+ * with the subject blank would make the operator re-pick the one fact the click
+ * already stated, and invites picking the wrong one.
+ *
+ * The memory roster is NOT preselected — that is the experiment variable, and
+ * defaulting it would make a choice the operator never made.
+ */
+export function openProfileModal(preselect = [], subjectModel = "") {
+  subject = subjectModel;
   selection = new Set(preselect);
   ack = false;
   open = true;

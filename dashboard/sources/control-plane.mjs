@@ -26,7 +26,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const id = "control-plane";
-export const fields = ["control", "events", "extraction", "hold", "tui", "profile", "profiles"];
+export const fields = ["control", "events", "extraction", "hold", "tui", "profile", "profiles", "suite", "models_ledger"];
 export function describe() {
   return "host-side control plane — roster, run control, event feed, extraction (opt-in)";
 }
@@ -73,6 +73,45 @@ export function isLoopback(url) {
   return octets[0] === 127;
 }
 
+/**
+ * THE EVENT CURSOR.
+ *
+ * Module-level, and deliberately so: the ring is append-only and monotonic, so
+ * "what have I already seen" is a property of this PROCESS, not of any one
+ * request. Keeping it here lets every read after the first ask for a delta.
+ *
+ * ── THE DEFECT THIS FIXES (measured 2026-08-13) ─────────────────────────────
+ * This module fetched `?limit=400` on every poll, every 2 seconds, forever.
+ * Measured against the live control plane:
+ *
+ *     ?limit=400          199,271 bytes
+ *     ?since=<cursor>         493 bytes
+ *
+ * 82% of the 240KB /api/board payload was event rows the client already had.
+ * The `since` parameter has existed in the control plane the whole time
+ * (control/server.mjs:692) and was never passed.
+ *
+ * WHY THE ROWS ARE STILL RETAINED HERE: /api/board must remain a COMPLETE
+ * snapshot — it is the documented read-only surface, and a client that GETs it
+ * cold has no cursor to resume from. So the delta is merged into a bounded
+ * local window and the full window is published. The saving is on the wire
+ * between this process and the control plane, and — via /api/stream — between
+ * this process and the browser.
+ */
+let eventCursor = 0;
+let eventWindow = [];
+
+/** Mirrors control/contract.mjs EVENT_RENDER_CAP. The feed renders at most this. */
+const EVENT_WINDOW_CAP = 400;
+
+/** Reset the cursor when the ring restarts underneath us. */
+function ringRestarted(data) {
+  // `total` only ever grows within one control-plane process. A drop means the
+  // service restarted and the ring is a new one — replaying from a stale cursor
+  // would silently skip every row the new ring has already collected.
+  return typeof data?.total === "number" && data.total < eventWindow.length;
+}
+
 export async function read(ctx) {
   const base = ctx.config?.controlUrl ?? "http://127.0.0.1:7718";
   // What the BROWSER is told to POST to. Inside a container `base` is a
@@ -96,14 +135,26 @@ export async function read(ctx) {
 
   // The remaining calls are independent: any one may be unwired without
   // invalidating the others, so each failure is recorded rather than aborting.
-  const [roster, run, events, extraction, hold, tui, profiles] = await Promise.all([
+  const [roster, run, events, extraction, hold, tui, profiles, wall, mledger] = await Promise.all([
     get(`${base}/api/roster`, 2500),
     get(`${base}/api/run`),
-    get(`${base}/api/events?limit=400`, 2500),
+    // DELTA, not a full refetch. See the eventCursor note above.
+    get(`${base}/api/events?limit=${EVENT_WINDOW_CAP}&since=${eventCursor}`, 2500),
     get(`${base}/api/extraction`),
     get(`${base}/api/hold`),
     get(`${base}/api/tui`, 2500),
     get(`${base}/api/profiles`),
+    // THE GATE SUITE. Folded server-side (control/wall.mjs) from the write-once
+    // roster + per-attempt gate_results + the live phase signal. Fetched whole
+    // and passed through UNTOUCHED: the server decides gate state, the board
+    // decides colour. Re-deriving state here would let two surfaces disagree
+    // about whether a gate was abandoned or merely untested.
+    get(`${base}/api/wall`, 2500),
+    // THE MODEL LEDGER. One row per bench-eligible model with every launch gate
+    // already resolved server-side. Passed through untouched: the board must
+    // never re-derive a gate, or a button's enabled state could disagree with
+    // the refusal /api/run/start would actually apply.
+    get(`${base}/api/models-ledger`, 2500),
   ]);
 
   const notes = [];
@@ -114,6 +165,40 @@ export async function read(ctx) {
   if (!hold.ok) notes.push(`hold unwired — ${hold.reason}`);
   if (!tui.ok) notes.push(`tui unwired — ${tui.reason}`);
   if (!profiles.ok) notes.push(`profiles unwired — ${profiles.reason}`);
+  if (!wall.ok) notes.push(`gate suite unwired — ${wall.reason}`);
+  if (!mledger.ok) notes.push(`model ledger unwired — ${mledger.reason}`);
+
+  // ── MERGE THE DELTA INTO THE BOUNDED WINDOW ────────────────────────────
+  //
+  // The response now carries only rows newer than `eventCursor`, so they are
+  // APPENDED. The window is trimmed from the FRONT to the cap, which matches
+  // the feed's own oldest-first / cap-400 / trim-from-the-top contract
+  // (panels/live.js).
+  //
+  // A FAILED READ MUST NOT EMPTY THE FEED. When the control plane blinks, the
+  // last known rows stay on screen and `connected:false` is what tells the
+  // operator the counts are frozen — blanking the list would destroy history
+  // that is still true.
+  let eventsPayload = null;
+  if (events.ok) {
+    const data = events.data ?? {};
+    if (ringRestarted(data)) {
+      eventCursor = 0;
+      eventWindow = [];
+    }
+    const fresh = Array.isArray(data.events) ? data.events : [];
+    if (fresh.length) {
+      eventWindow = [...eventWindow, ...fresh];
+      if (eventWindow.length > EVENT_WINDOW_CAP) {
+        eventWindow = eventWindow.slice(eventWindow.length - EVENT_WINDOW_CAP);
+      }
+      eventCursor = fresh[fresh.length - 1].seq ?? eventCursor;
+    }
+    // `cursor` from the service is the authoritative high-water mark; prefer it
+    // so a filtered response cannot stall the cursor behind the ring.
+    if (typeof data.cursor === "number" && data.cursor > eventCursor) eventCursor = data.cursor;
+    eventsPayload = { ...data, events: eventWindow, returned: eventWindow.length };
+  }
 
   // THE FROZEN PROFILE, PROJECTED ONTO THE CONTRACT'S `profile` GROUP.
   //
@@ -185,7 +270,7 @@ export async function read(ctx) {
         run: run.ok ? run.data : null,
         notes,
       },
-      events: events.ok ? events.data : null,
+      events: eventsPayload,
       extraction: extraction.ok ? extraction.data : null,
       hold: hold.ok ? hold.data : null,
       tui: tui.ok ? tui.data : null,
@@ -193,6 +278,15 @@ export async function read(ctx) {
       // The full set, including PRIOR profiles — the inspector's curve overlay
       // draws them hollow and never joins them to the active series.
       profiles: profiles.ok ? profiles.data : null,
+      // PASSED THROUGH VERBATIM. An older control plane has no /api/wall and
+      // returns 404, which lands here as null — the panel then says the suite
+      // surface is unavailable rather than drawing an empty grid, because
+      // "no roster" and "a suite of zero gates" are different facts.
+      suite: wall.ok && wall.data?.ok === true ? wall.data : null,
+      // Null when the endpoint is absent or failed. The panel then states that
+      // the gates cannot be evaluated rather than drawing ungated buttons —
+      // an unverifiable gate must fail closed, not open.
+      models_ledger: mledger.ok && mledger.data?.ok === true ? mledger.data : null,
     },
   };
 }

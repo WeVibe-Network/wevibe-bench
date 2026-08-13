@@ -148,6 +148,18 @@ function screen(t, status) {
   }
 
   if (!t.frame) {
+    // WITHHELD IS NOT ABSENT. The server drops the 12.4KB terminal frame for a
+    // client whose popout is minimized (server.mjs tuiForClient). If that
+    // client then expands, one tick may arrive before the resubscribed stream
+    // delivers a frame — and rendering "NO FRAME" there would claim the mirror
+    // had painted nothing, which is false.
+    if (t.frame_withheld) {
+      return state(
+        "ATTACHING VIEW",
+        "The mirror is running; this view is subscribing to its frames.",
+        "Frames are only streamed while the popout is open, so the board does not spend bandwidth on a terminal nobody is watching. The next frame arrives on the following tick.",
+      );
+    }
     return state("NO FRAME", "Attached, but nothing has been painted yet.", t.reason ?? "the client has produced no output");
   }
 

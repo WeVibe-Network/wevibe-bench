@@ -367,10 +367,31 @@ class Capture {
     // child's output to OUR stdout pipe. We never write to the child's stdin —
     // it is set to 'ignore' so there is no path for a keystroke to reach a live
     // session even by accident.
-    const argv = [
-      "-q", "/dev/null",
-      this.bin, "attach", this.serveUrl, "--session", this.sessionId,
-    ];
+    //
+    // ── THE PTY MUST BE RESIZED FROM INSIDE (measured defect 2026-08-13) ────
+    //
+    // Setting COLUMNS/LINES in the environment DOES NOT SIZE A PTY. A terminal
+    // application asks the kernel via ioctl(TIOCGWINSZ); it does not read those
+    // variables. Our stdout is a PIPE, not a tty, so `script` allocates the pty
+    // at the default 80×24 and the attached client renders to 80×24 forever.
+    //
+    // Measured on this host:
+    //   script -q /dev/null sh -c 'stty size'   with COLUMNS/LINES set  ->  0 0
+    //   script -q /dev/null sh -c 'stty rows 40 cols 130; stty size'    -> 40 130
+    //
+    // The consequence the operator saw: the TUI MIRROR reserves a 130×40 box
+    // (GRID_W×GRID_H, derived from these constants) while the frame carried
+    // only 80 columns and 24 rows of content — the window looked half empty,
+    // and it was, because the pty on the other end really was that size.
+    //
+    // So the size is applied INSIDE the pty with `stty` before exec'ing the
+    // attach client, which is the only place a TIOCGWINSZ can be issued against
+    // the pty we just allocated. The env vars are kept as well: some clients do
+    // consult them as a fallback, and agreeing with the ioctl costs nothing.
+    const inner =
+      `stty rows ${TUI_ROWS} cols ${TUI_COLS} 2>/dev/null; ` +
+      `exec ${shQuote(this.bin)} attach ${shQuote(this.serveUrl)} --session ${shQuote(this.sessionId)}`;
+    const argv = ["-q", "/dev/null", "sh", "-c", inner];
     try {
       this.child = spawn("script", argv, {
         stdio: ["ignore", "pipe", "pipe"],
@@ -466,6 +487,23 @@ class Capture {
   idleFor(now) {
     return now - this.lastPollAt;
   }
+}
+
+/**
+ * POSIX single-quote escaping.
+ *
+ * The capture now execs through `sh -c` in order to size the pty with `stty`
+ * (see Capture.start), which means every interpolated value crosses a SHELL.
+ * `sessionId` comes from a log file and `serveUrl` from config — neither is
+ * attacker-controlled today, but "today" is not a security property, and a
+ * shell metacharacter reaching this command would run as the operator.
+ *
+ * Single quotes disable ALL shell interpretation; the only character that
+ * cannot appear inside them is a single quote itself, which is closed, escaped
+ * and reopened in the standard way.
+ */
+function shQuote(s) {
+  return `'${String(s ?? "").replace(/'/g, `'\\''`)}'`;
 }
 
 // ── the manager ──────────────────────────────────────────────────────────────

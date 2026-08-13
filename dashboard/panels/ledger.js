@@ -1,174 +1,340 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// PANEL: RUN LEDGER
+// PANEL: RUN LEDGER — one row per model, profiles nested inside
 //
-// Every cell in the stack, newest first, with the pinned baseline welded to the
-// bottom as THE FLOOR.
+// THE SHAPE. Model name leftmost, [+baseline] [+profile] rightmost. Clicking a
+// model row expands an accordion of that model's profiles, each carrying the
+// measurement columns and its own [+run].
+//
+// THE THREE RULES THIS SURFACE EXPRESSES, none of them decided here:
+//   1. a run cannot start until the model's baseline is complete and non-void
+//   2. a profile cannot be created until that same baseline exists
+//   3. runs are SERIAL — one cell in flight blocks EVERY button on EVERY model
+//
+// EVERY GATE IS COMPUTED SERVER-SIDE (`control/models-ledger.mjs`) and arrives
+// as `{allowed, reason}`. This panel renders that verdict and never re-derives
+// it. A button whose enabled state disagreed with the refusal the server would
+// actually apply is worse than no button: it teaches the operator that the UI
+// lies, and the lesson generalises to every other control on the board.
+//
+// A DISABLED BUTTON ALWAYS STATES WHY. `reason` is rendered beside the row, not
+// buried in a tooltip nobody on a stream can hover. The most common reason —
+// "no baseline yet" — is the entire point of the layout, so hiding it would
+// hide the workflow.
 //
 // THE FOOTER IS THE HARD RULE MADE VISIBLE. Efficiency and correctness sit in
-// two boxes, SIDE BY SIDE, at the SAME type size, separated by a rule. There is
-// no third box combining them, no arrow, no score, no ranking. Reading order
-// does not imply precedence — they are adjacent, not stacked.
-//
-// This matters because it is the exact place the rule is easiest to break: a
-// single "improvement" number would be the most natural thing to put here and
-// would silently let a faster-and-worse cell read as a win. The layout makes
-// that impossible rather than merely discouraged.
-//
-// THE BASELINE IS PINNED, NOT SORTED. It sits below every scrolling row on its
-// own bright top border, on --bg while the rows sit on --bg-2, so it reads as
-// bedrock rather than as the last row of a list. It is labelled n=1 BY DESIGN
-// at the line — it is a single observation, not a distribution, and saying so
-// in a tooltip would be saying it nowhere.
-//
-// UNFILTERED RECALL rides EVERY ON row. Per the ruling: caveat under the
-// allowlist, badge on every ON run. It is the visible debt, and it disappears
-// the day the recall filter ships.
+// two boxes, SIDE BY SIDE, at the SAME type size. There is no third box
+// combining them, no arrow, no score. A single "improvement" number would be
+// the most natural thing to put here and would silently let a faster-and-worse
+// cell read as a win.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { esc, nul, tok, dur } from "../board.js";
 
+/**
+ * The accordion is CLAMPED, NEVER PRE-ALLOCATED. Space for ten profile rows is
+ * reserved only if ten exist; one profile gets one row's worth of height. A
+ * fixed ten-row well would leave nine rows of dead space under the common case
+ * and read as "nine profiles failed to load".
+ */
+const PROFILE_CLAMP = 10;
+
+/**
+ * WHICH MODEL ROW IS OPEN. Module-local, matching the pattern the inspector
+ * uses (panels/profile.js) — it is view state, not measurement, so it never
+ * belongs on the board payload where a poll would overwrite it.
+ *
+ * ONE ROW AT A TIME. Opening a second row closes the first: the accordion can
+ * hold ten profile rows, and two open at once pushes the two-axis footer — the
+ * board's hard rule made visible — off the bottom of the screen.
+ */
+let expandedModel = null;
+
+export function toggleModelRow(id) {
+  expandedModel = expandedModel === id ? null : id;
+}
+
+export function expandedModelId() {
+  return expandedModel;
+}
+
 export function renderLedger(board) {
   const s = board.stack ?? {};
-  const rows = [...(s.all ?? [])].reverse(); // newest first
-  const p = board.profile ?? {};
+  const ledger = board.models_ledger ?? null;
+
+  // A row whose model left the roster must not stay open invisibly — the state
+  // is reconciled against what is actually being drawn.
+  if (expandedModel && ledger && !(ledger.models ?? []).some((m) => m.id === expandedModel)) {
+    expandedModel = null;
+  }
+  const expanded = expandedModel;
 
   return `
     <section class="ledger">
       <div class="ledger-head">
         <span class="ttl">RUN LEDGER</span>
-        <span class="sub">every cell in this stack · newest first · one profile, frozen at stack creation</span>
+        <span class="sub">every model in this bench · baseline first · profiles nested</span>
         <span class="spacer"></span>
-        ${profileChip(p)}
+        ${serialChip(ledger)}
       </div>
-      <div class="ledger-cols">
-        <span>SEQ</span><span>ARM</span><span>MODEL</span><span>PHASES</span>
-        <span>TURNS</span><span>TOKENS</span><span>TIME</span><span>GATES</span>
-        <span>CORPUS</span><span>VERDICT</span><span>Δ VS BASELINE</span>
-      </div>
-      ${rows.length
-        ? rows.map((r) => row(r, s)).join("")
-        : `<div class="ledger-empty">${esc("no cell has been scheduled in this stack")}</div>`}
+      ${ledger ? models(ledger, expanded) : unwired()}
       ${footer(s)}
     </section>`;
 }
 
-function profileChip(p) {
-  if (!p.exists) {
-    return `<button class="btn sm" data-profile-open="1">CREATE MEMORY PROFILE</button>`;
+/**
+ * THE SERIAL RULE, STATED ONCE AT THE TOP.
+ *
+ * It is a property of the BENCH, not of any model, and a reader scanning rows
+ * should not have to infer it from every row carrying the same refusal.
+ */
+function serialChip(ledger) {
+  if (!ledger) return "";
+  if (!ledger.run_in_flight) {
+    return `<span class="tag">IDLE — NO CELL IN FLIGHT</span>`;
   }
-  // CLICKABLE. This is the operator's entry point into the inspector: before
-  // this, a configured profile had no affordance anywhere on the board and
-  // there was no way to see how it was configured after configuring it.
-  //
-  // The badge is doubled — the words AND the double rule — so it survives a
-  // greyscale screenshot and a viewer with colour vision deficiency.
-  // The chip states the EDGE, not a count. "3 MODELS" said nothing about which
-  // experiment this is — the same count covers same-model and cross-model, and
-  // those are the two things the operator most needs to tell apart at a glance.
-  const t = p.transfer ?? null;
-  const kind =
-    t?.kind === "self" ? "SAME-MODEL" : t?.kind === "cross" ? "CROSS-MODEL" : t?.kind === "mixed" ? "MIXED" : "UNSET";
-  const n = (p.memory_models ?? []).length;
-  return `<button class="tag on chip-btn" data-profile-inspect="1">PROFILE: ${esc(kind)} · ${n} PRODUCER${n === 1 ? "" : "S"} — DECLARED, NOT ENFORCED →</button>`;
+  return `<span class="tag bad" title="${esc(ledger.serial_note ?? "")}">CELL IN FLIGHT — ALL LAUNCHES BLOCKED</span>`;
 }
 
-function row(r, s) {
-  const live = r.state === "running";
-  const base = s.baseline;
-  const isBaseline = base && r.run_dir === base.run_dir && r.sequence_index === base.sequence_index;
-  // The floor is rendered pinned below; it must not also appear as a row.
-  if (isBaseline) return "";
-
-  const g = r.gates ?? {};
-  const c = r.corpus ?? {};
-
+function unwired() {
   return `
-    <div class="ledger-row ${live ? "live" : ""} ${r.void_instrument ? "void" : ""}">
-      <span>${String(r.seq).padStart(2, "0")}</span>
-      <span class="arm">${esc((r.arm ?? "—").toUpperCase())}</span>
-      <span class="model" title="${esc(r.model ?? "")}">${r.model ? esc(r.model) : nul("unobserved")}</span>
-      <span class="${live ? "bright" : ""}">${phases(r)}</span>
-      <span>${cell(r.turns, (v) => String(v), live)}</span>
-      <span>${cell(r.tokens, (v) => tok(v), live)}</span>
-      <span>${cell(r.wall_seconds, (v) => dur(v), live)}</span>
-      <span>${gates(g, r)}</span>
-      <span>${corpus(c)}</span>
-      <span class="${verdictCls(r)}">${verdict(r)}</span>
-      <span class="delta">${delta(r, s)}</span>
+    <div class="ledger-empty">
+      <div class="bright">${esc("The model ledger is unavailable.")}</div>
+      <div class="note">${esc(
+        "GET /api/models-ledger did not answer. Without it the launch gates cannot be evaluated, and this panel will not draw buttons whose enabled state it cannot verify.",
+      )}</div>
     </div>`;
 }
 
-function phases(r) {
-  const p = r.phases ?? {};
-  if (r.state === "not_started") return `<span class="null">not started</span>`;
-  const base = `${p.done ?? 0} / ${p.total ?? 3}`;
-  // Chunks are INTERNAL TO PHASE 1 and are only meaningful while phase 1 runs.
-  if (r.state === "running" && (p.done ?? 0) <= 1 && r.chunk?.current) {
-    return `${base} · wo ${r.chunk.current}/${r.chunk.total ?? 6}`;
+function models(ledger, expanded) {
+  const rows = ledger.models ?? [];
+  if (!rows.length) {
+    const why = ledger.unwired_reason ?? "no bench-eligible model is served by the proxy roster";
+    return `
+      <div class="ledger-empty">
+        <div class="bright">${esc("No bench-eligible models.")}</div>
+        <div class="note">${esc(why)}</div>
+      </div>`;
   }
-  return base;
-}
-
-/** A running cell's numbers are PROVISIONAL and marked ›, never presented final. */
-function cell(v, fmt, live) {
-  if (v === null || v === undefined) return nul("unobserved");
-  return `${esc(fmt(v))}${live ? " <span class='muted'>›</span>" : ""}`;
-}
-
-function gates(g, r) {
-  if (r.state === "not_started") return nul("never ran");
-  if (g.failed === null || g.failed === undefined) return nul("not graded");
-  // The denominator is the OBSERVED universe, never a fabricated suite size,
-  // so it is labelled `obs` at the number rather than silently implying 114.
-  if (!g.total) return `${g.failed} failed`;
-  return `${g.total - g.failed}/${g.total}<span class="muted"> obs</span>`;
-}
-
-function corpus(c) {
-  if (c.at_recall === null || c.at_recall === undefined) {
-    // A hole in the chain is not a zero. Saying "0" here would claim an empty
-    // corpus, which is a measurement we do not have.
-    return nul("unknown");
-  }
-  return c.at_recall.toLocaleString();
-}
-
-function verdict(r) {
-  if (r.void_instrument) return "VOID";
-  if (r.state === "running") return "RUNNING";
-  if (r.state === "not_started") return nul("—");
-  return r.verdict ? esc(r.verdict) : nul("unobserved");
-}
-
-function verdictCls(r) {
-  if (r.void_instrument) return "muted";
-  if (r.verdict === "FAIL") return "danger";
-  return r.state === "running" ? "bright" : "";
+  return `${rows.map((m) => modelRow(m, expanded === m.id)).join("")}${orphans(ledger)}`;
 }
 
 /**
- * Δ IS WITHHELD UNTIL THE CELL CLOSES. A partial cell's turn count is a running
- * total; comparing it to a completed baseline would show a fake improvement
- * that shrinks as the cell finishes.
+ * PROFILES WHOSE SUBJECT MODEL LEFT THE ROSTER.
+ *
+ * The server keeps these deliberately (they still exist on disk) and it would
+ * defeat the point to compute them and then not draw them: a profile that
+ * vanishes the moment its model stops being served looks like data loss, and an
+ * operator hunting for it has no surface that admits it still exists.
+ *
+ * They carry no buttons. Nothing can be run under them until their model is
+ * back on the roster, and that is stated rather than implied by absence.
  */
-function delta(r, s) {
-  const base = s.baseline;
-  if (r.state === "running") return `<span class="null">Δ withheld until the cell closes</span>`;
-  if (r.state === "not_started") return "";
-  if (r.void_instrument) return `<span class="muted">void instrument — not a capability result</span>`;
-  if (!base) return `<span class="null">no baseline</span>`;
-  if (!s.baseline_scorable) return `<span class="null">baseline is void — no valid Δ</span>`;
-  if (r.turns === null || base.turns === null) return nul("unobserved");
+function orphans(ledger) {
+  const list = ledger.orphaned_profiles ?? [];
+  if (!list.length) return "";
+  return `
+    <div class="lorph">
+      <div class="note">${esc(
+        `${list.length} profile${list.length === 1 ? "" : "s"} on disk whose subject model is not currently bench-eligible — `
+        + "kept, but nothing can run under them until that model is served again",
+      )}</div>
+      ${list.map((p) => `<div class="lorph-row"><span class="pname">${esc(p.id)}</span><span class="muted">${esc(p.subject_model ?? "unknown model")}</span></div>`).join("")}
+    </div>`;
+}
 
-  const dTurns = r.turns - base.turns;
-  const dTok = r.tokens !== null && base.tokens !== null ? r.tokens - base.tokens : null;
-  const dSec = r.wall_seconds !== null && base.wall_seconds !== null ? r.wall_seconds - base.wall_seconds : null;
+/**
+ * ONE MODEL. The row is the control surface; the accordion is the detail.
+ *
+ * The whole row is the expand affordance, so the click target is the size of
+ * the row rather than a caret an operator has to aim at. The buttons stop
+ * propagation implicitly by being checked first in board.js's delegated
+ * handler — a [+baseline] click must never also toggle the accordion.
+ */
+function modelRow(m, open) {
+  const b = m.baseline ?? {};
+  const n = (m.profiles ?? []).length;
+
+  return `
+    <div class="lrow-wrap${open ? " open" : ""}">
+      <div class="lrow" data-model-expand="${esc(m.id)}" role="button" tabindex="0" aria-expanded="${open ? "true" : "false"}">
+        <span class="lcaret">${open ? "▾" : "▸"}</span>
+        <span class="lname" title="${esc(m.upstream_model ?? m.id)}">${esc(m.id)}</span>
+        ${baselineChip(b)}
+        <span class="lprof">${n} profile${n === 1 ? "" : "s"}</span>
+        <span class="spacer"></span>
+        ${gateBtn("data-run-baseline", m.id, "+ baseline", m.can_baseline)}
+        ${gateBtn("data-new-profile", m.id, "+ profile", m.can_profile)}
+      </div>
+      ${blockedNote(m)}
+      ${open ? accordion(m) : ""}
+    </div>`;
+}
+
+/**
+ * THE BASELINE STATE, IN WORDS.
+ *
+ * Four distinct states, never collapsed: a valid floor, a VOID floor (numbers
+ * exist but measure the harness), a floor being measured right now, and none at
+ * all. Void is the one that matters most — it looks like success from every
+ * angle except the one that counts.
+ */
+function baselineChip(b) {
+  if (b.scorable) {
+    const when = b.measured_before ? String(b.measured_before).slice(0, 10) : null;
+    const shared = (b.shared_by ?? 0) > 1 ? ` · shared by ${b.shared_by} profiles` : "";
+    return `<span class="tag on" title="${esc(`floor: ${b.run_dir ?? "?"} seq ${b.sequence_index ?? "?"}`)}">BASELINE${when ? ` ${esc(when)}` : ""}${esc(shared)}</span>`;
+  }
+  if (b.voided) return `<span class="tag bad">BASELINE VOID</span>`;
+  if (b.pending) return `<span class="tag">BASELINE RUNNING</span>`;
+  return `<span class="tag">NO BASELINE</span>`;
+}
+
+/**
+ * A gated button renders as a button ONLY when it is allowed. When it is not,
+ * it renders as a disabled control carrying `title`, and the reason is ALSO
+ * printed in full below the row — a disabled control with no visible
+ * explanation is the single most common way a UI wastes an operator's time.
+ */
+function gateBtn(attr, model, label, gate) {
+  const allowed = gate?.allowed === true;
+  if (!allowed) {
+    return `<button class="btn sm" disabled title="${esc(gate?.reason ?? "not available")}">${esc(label)}</button>`;
+  }
+  return `<button class="btn sm primary" ${attr}="${esc(model)}">${esc(label)}</button>`;
+}
+
+/**
+ * The refusal, printed. Only ONE line even when both buttons are blocked for
+ * the same cause — repeating "a cell is in flight" twice per row, on four rows,
+ * is noise that trains the operator to stop reading.
+ */
+function blockedNote(m) {
+  const reasons = [m.can_baseline?.reason, m.can_profile?.reason].filter(Boolean);
+  if (!reasons.length) return "";
+  const unique = [...new Set(reasons)];
+  return `<div class="lwhy">${unique.map((r) => `<span class="null">${esc(r)}</span>`).join("")}</div>`;
+}
+
+// ── THE ACCORDION ───────────────────────────────────────────────────────────
+
+function accordion(m) {
+  const profiles = m.profiles ?? [];
+  if (!profiles.length) {
+    return `
+      <div class="lacc">
+        <div class="null">${esc(
+          m.baseline?.scorable
+            ? "no profile yet — + profile freezes one against this model's baseline"
+            : "no profile yet, and none can be created until this model has a valid baseline",
+        )}</div>
+      </div>`;
+  }
+
+  // CLAMPED, NOT PRE-ALLOCATED: the well grows with the content up to ten rows
+  // and only then scrolls.
+  const clamp = Math.min(profiles.length, PROFILE_CLAMP);
+  const over = profiles.length > PROFILE_CLAMP;
+
+  return `
+    <div class="lacc">
+      <div class="pcols">
+        <span>PROFILE</span><span>PHASES</span><span>TURNS</span><span>TOKENS</span>
+        <span>TIME</span><span>GATES</span><span>CORPUS</span><span>VERDICT</span>
+        <span>Δ VS BASELINE</span><span></span>
+      </div>
+      <div class="pscroll" style="--clamp:${clamp}">
+        ${profiles.map((p) => profileRow(p, m)).join("")}
+      </div>
+      ${over ? `<div class="note">${esc(`${profiles.length} profiles — scrolling; ten fit at a time`)}</div>` : ""}
+    </div>`;
+}
+
+/**
+ * ONE PROFILE. The measurement columns are the CELL's, not the profile's — a
+ * profile with no run has no numbers, and every column says `unobserved`
+ * rather than 0. A zero here would assert a measured result of nothing.
+ */
+function profileRow(p, m) {
+  const runs = p.runs ?? [];
+  const latest = runs.length ? runs[runs.length - 1] : null;
+  const cell = p.latest_cell ?? null;
+  // The server states WHY there is no cell. That sentence is shown once under
+  // the row instead of letting eight `unobserved` columns imply a measurement
+  // is merely pending.
+  const why = !cell && p.latest_cell_unavailable ? p.latest_cell_unavailable : null;
+
+  return `
+    <div class="prow">
+      <span class="pname" title="${esc(p.id)}">${esc(p.id)}${transferTag(p)}</span>
+      <span>${cell ? esc(phases(cell)) : nul("no run")}</span>
+      <span>${num(cell?.turns, (v) => String(v))}</span>
+      <span>${num(cell?.tokens, (v) => tok(v))}</span>
+      <span>${num(cell?.wall_seconds, (v) => dur(v))}</span>
+      <span>${gatesCell(cell)}</span>
+      <span>${corpusCell(cell)}</span>
+      <span class="${cell?.verdict === "FAIL" ? "danger" : ""}">${cell?.verdict ? esc(cell.verdict) : nul("—")}</span>
+      <span class="delta">${profileDelta(cell, m)}</span>
+      <span class="pact">${gateBtn("data-run-profile", p.id, "+ run", p.can_run)}</span>
+    </div>
+    ${p.can_run?.allowed === false && p.can_run?.reason ? `<div class="pwhy"><span class="null">${esc(p.can_run.reason)}</span></div>` : ""}
+    ${why ? `<div class="pwhy"><span class="null">${esc(why)}</span></div>` : ""}
+    ${latest && !cell ? `<div class="pwhy"><span class="null">${esc(`launched ${new Date(latest.started_at).toISOString().slice(0, 16).replace("T", " ")} — no measurement recorded yet`)}</span></div>` : ""}`;
+}
+
+function transferTag(p) {
+  const k = p.transfer?.kind;
+  if (!k) return "";
+  const word = k === "self" ? "SAME" : k === "cross" ? "CROSS" : "MIXED";
+  // DECLARED, NOT ENFORCED stays visible: no recall path filters by producing
+  // model, so the roster states a policy nothing applies.
+  return ` <span class="muted">${esc(word)}${p.enforced ? "" : " · declared"}</span>`;
+}
+
+function num(v, fmt) {
+  if (v === null || v === undefined) return nul("unobserved");
+  return esc(fmt(v));
+}
+
+function phases(c) {
+  if (c.state === "not_started") return "not started";
+  return `${c.phases?.done ?? 0} / ${c.phases?.total ?? 3}`;
+}
+
+function gatesCell(c) {
+  if (!c) return nul("never ran");
+  const g = c.gates ?? {};
+  if (g.failed === null || g.failed === undefined) return nul("not graded");
+  if (!g.total) return `${g.failed} failed`;
+  return `${g.total - g.failed}/${g.total}`;
+}
+
+function corpusCell(c) {
+  const at = c?.corpus?.at_recall;
+  // A hole in the chain is not a zero. "0" would claim an empty corpus, which
+  // is a measurement we do not have.
+  if (at === null || at === undefined) return nul("unknown");
+  return at.toLocaleString();
+}
+
+/**
+ * Δ against THIS MODEL's floor — the baseline the accordion sits under, which
+ * is why it is passed in rather than looked up. A Δ against another model's
+ * floor would be a capability comparison wearing a memory-lift label.
+ */
+function profileDelta(c, m) {
+  const b = m.baseline ?? {};
+  if (!c) return "";
+  if (c.state === "running") return `<span class="null">Δ withheld until the cell closes</span>`;
+  if (c.void_instrument) return `<span class="muted">void instrument — not a capability result</span>`;
+  if (!b.scorable) return `<span class="null">no valid floor</span>`;
+  if (c.turns === null || b.turns === null || b.turns === undefined) return nul("unobserved");
+
+  const dTurns = c.turns - b.turns;
   const worse = dTurns > 0;
-
   const parts = [`${sign(dTurns)}${Math.abs(dTurns)} turns`];
-  if (dTok !== null) parts.push(`${sign(dTok)}${tok(Math.abs(dTok))}`);
-  if (dSec !== null) parts.push(`${sign(dSec)}${dur(Math.abs(dSec))}`);
-
+  if (c.tokens !== null && b.tokens !== null && b.tokens !== undefined) {
+    parts.push(`${sign(c.tokens - b.tokens)}${tok(Math.abs(c.tokens - b.tokens))}`);
+  }
   return `<span class="${worse ? "danger" : "bright"}">${esc(parts.join(" · "))}${worse ? " — worse than baseline" : ""}</span>`;
 }
 

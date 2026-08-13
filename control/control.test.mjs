@@ -13,7 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,33 @@ import { mapEvent, EventRing } from "./events.mjs";
 import { parseGateEvents, gradingStatus } from "./gate-events.mjs";
 import { parseStageLines, foldStages, DECLARED_STAGE_IDS } from "./extraction.mjs";
 import { createProfile, transferOf } from "./profiles.mjs";
+import { readModelsLedger } from "./models-ledger.mjs";
+import {
+  attemptRecords,
+  foldGateStates,
+  inFlightAtStop,
+  maxAttemptsFrom,
+  readStatusRecords,
+  resolveRunDir,
+} from "./wall.mjs";
+import {
+  assignIds,
+  parsePlaywrightList,
+  parseVitestList,
+  suiteFingerprint,
+  tierOf,
+} from "../tasks/backgammon/gates/roster.mjs";
+import {
+  foldGateResults,
+  normalizeStatus,
+} from "../tasks/backgammon/gates/gate-results.mjs";
+import {
+  FEEDBACK_CONTRACT_VERSION,
+  feedbackRows,
+  normalizeMessage,
+  readFeedback,
+  readSidecar,
+} from "./feedback.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BENCH = join(HERE, "..");
@@ -856,4 +883,641 @@ test("the dashboard server stays read-only: no write route, no POST handler", ()
     !/req\.method\s*===\s*"POST"/.test(src),
     "the dashboard server handles a POST — writes belong to the control plane alone",
   );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GATE WALL (WO-GATE-ROSTER)
+//
+// The wall answers a question `failed_gates` structurally could not: for every
+// gate in the suite, what happened to it? These tests pin the distinctions that
+// make that answer honest — most importantly that "no result" is never allowed
+// to read as "passed".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A minimal two-phase roster; enough to exercise every fold branch. */
+function fakeRoster() {
+  return {
+    schema_version: 1,
+    total: 4,
+    by_phase: { backend: 3, frontend: 1 },
+    suite_fingerprint: "sha256:deadbeef",
+    enumeration: { executed_tests: false, complete: true, incomplete_reason: null },
+    gates: [
+      { id: "G01", phase: "backend", req: "REQ-INIT", title: "initial position", gate_token: "G01", tier: "core" },
+      { id: "G02", phase: "backend", req: "REQ-PIP", title: "pip count", gate_token: "G02", tier: "core" },
+      { id: "G03", phase: "backend", req: "REQ-DICE", title: "dice", gate_token: "G03", tier: "core" },
+      { id: "F01", phase: "frontend", req: "REQ-RENDER", title: "renders", gate_token: "F01", tier: "core" },
+    ],
+  };
+}
+
+test("WALL: a gate that never ran is never reported as passed", () => {
+  // THE DEFECT THIS WHOLE SURFACE EXISTS TO REMOVE. Under `failed_gates` alone,
+  // G03 (never executed) and G01 (executed, passed) were both simply "not in
+  // the failing list" — indistinguishable, and the natural reading of that
+  // silence is success.
+  const roster = fakeRoster();
+  const attempts = [
+    {
+      attempt: 1,
+      gate_results: [
+        { id: "G01", status: "pass" },
+        { id: "G02", status: "fail" },
+        { id: "G03", status: "not_run", reason: "phase aborted before execution" },
+      ],
+    },
+  ];
+  const { gates } = foldGateStates({
+    roster,
+    attempts,
+    grading: null,
+    stopped: { stopped: false, phase: null },
+  });
+  const byId = Object.fromEntries(gates.map((g) => [g.id, g]));
+  assert.equal(byId.G01.state, "resolved");
+  assert.equal(byId.G02.state, "failing");
+  assert.equal(byId.G03.state, "untested", "a not_run gate must never be resolved");
+  assert.equal(byId.G03.last_status, "not_run");
+  // A gate absent from the results array entirely is the same class of fact.
+  assert.equal(byId.F01.state, "untested", "an unreported gate must never be resolved");
+  assert.equal(byId.F01.last_status, null);
+});
+
+test("WALL: totals partition the suite exactly", () => {
+  // Every gate lands in exactly one state, so the four totals must sum to the
+  // suite size. If they ever do not, the board is rendering a suite that does
+  // not exist.
+  const roster = fakeRoster();
+  const attempts = [
+    { attempt: 1, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "fail" }] },
+  ];
+  const { gates, totals } = foldGateStates({
+    roster,
+    attempts,
+    grading: null,
+    stopped: { stopped: false, phase: null },
+  });
+  const sum = totals.resolved + totals.failing + totals.untested + totals.abandoned;
+  assert.equal(sum, roster.total, "totals must sum to the suite total");
+  assert.equal(sum, gates.length);
+});
+
+test("WALL: blue vs green — resolved_at_attempt is the FIRST passing attempt", () => {
+  // The design distinguishes "solved on the first try" from "solved only after
+  // feedback". That distinction is the entire information content of the
+  // blue/green split, and it is lost if a later attempt overwrites the first.
+  const roster = fakeRoster();
+  const attempts = [
+    { attempt: 1, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "fail" }] },
+    { attempt: 2, gate_results: [{ id: "G01", status: "pass" }, { id: "G02", status: "pass" }] },
+  ];
+  const byId = Object.fromEntries(
+    foldGateStates({ roster, attempts, grading: null, stopped: { stopped: false, phase: null } })
+      .gates.map((g) => [g.id, g]),
+  );
+  assert.equal(byId.G01.resolved_at_attempt, 1, "passed in attempt 1 → blue");
+  assert.equal(byId.G02.resolved_at_attempt, 2, "passed only in attempt 2 → green");
+});
+
+test("WALL: a gate that passed then regressed stays resolved at its first pass", () => {
+  // A later failure does not un-resolve the gate: the run DID demonstrate the
+  // capability once, and the attempt number records when.
+  const roster = fakeRoster();
+  const attempts = [
+    { attempt: 1, gate_results: [{ id: "G01", status: "pass" }] },
+    { attempt: 2, gate_results: [{ id: "G01", status: "fail" }] },
+  ];
+  const g = foldGateStates({
+    roster, attempts, grading: null, stopped: { stopped: false, phase: null },
+  }).gates.find((x) => x.id === "G01");
+  assert.equal(g.state, "resolved");
+  assert.equal(g.resolved_at_attempt, 1);
+  assert.equal(g.last_status, "fail", "the regression must still be visible");
+});
+
+test("WALL: a stall is not a verdict — in-flight gates go slate, never red", () => {
+  // INVARIANT I-3. When the gate runner is killed mid-phase, the gates it was
+  // executing were never measured. Calling them failed would attribute a
+  // harness death to the model under test.
+  const roster = fakeRoster();
+  const { gates, totals } = foldGateStates({
+    roster,
+    attempts: [],
+    grading: { grading: true, phase: "backend", timed_out: true, phases: [] },
+    stopped: { stopped: true, phase: "backend" },
+  });
+  const byId = Object.fromEntries(gates.map((g) => [g.id, g]));
+  assert.equal(byId.G01.state, "abandoned");
+  assert.equal(byId.G03.state, "abandoned");
+  assert.equal(byId.F01.state, "untested", "a phase never reached is untested, not abandoned");
+  assert.equal(totals.failing, 0, "an abandoned gate must never be counted as failing");
+});
+
+test("WALL: a cold log is not a stop — a silent live run keeps its gates untested", () => {
+  // MEASURED REGRESSION (2026-08-13). `readRunState` reports "failed" for any
+  // run it did not launch once the log goes cold — which is what a live,
+  // CLI-launched campaign looks like mid-grade. Treating that as a stop marked
+  // all 14 frontend gates abandoned while they were still executing.
+  //
+  // Abandonment is a verdict; only the run's OWN terminal record may declare it.
+  const grading = { grading: true, phase: "frontend", timed_out: false, phases: [] };
+  const coldButAlive = { state: "failed", terminal_status: null, log_silent_s: 976 };
+  assert.deepEqual(inFlightAtStop(grading, coldButAlive), { stopped: false, phase: null });
+
+  const declaredOver = { state: "failed", terminal_status: "harness_error" };
+  assert.deepEqual(inFlightAtStop(grading, declaredOver), { stopped: true, phase: "frontend" });
+});
+
+test("WALL: an abandoned gate is never also shown as under test", () => {
+  // Amber says "being measured right now". An abandoned gate never will be.
+  const roster = fakeRoster();
+  const { gates } = foldGateStates({
+    roster,
+    attempts: [],
+    grading: { grading: true, phase: "backend", timed_out: true, phases: [] },
+    stopped: { stopped: true, phase: "backend" },
+  });
+  const abandoned = gates.filter((g) => g.state === "abandoned");
+  assert.ok(abandoned.length > 0);
+  assert.ok(abandoned.every((g) => g.under_test === false));
+});
+
+test("WALL: a live grading run does NOT abandon its own in-flight gates", () => {
+  // The mirror-image error: marking gates abandoned while the phase is still
+  // running would show slate squares for work in progress.
+  const roster = fakeRoster();
+  const { totals } = foldGateStates({
+    roster,
+    attempts: [],
+    grading: { grading: true, phase: "backend", timed_out: false, phases: [] },
+    stopped: inFlightAtStop(
+      { grading: true, phase: "backend", timed_out: false, phases: [] },
+      { state: "running" },
+    ),
+  });
+  assert.equal(totals.abandoned, 0);
+  assert.equal(totals.untested, 4);
+});
+
+test("WALL: under_test marks the open phase's gates as a set", () => {
+  // PER-PHASE-SET is what the harness can actually publish live; the response
+  // says so in `live_signal` so the board never implies per-test precision it
+  // was not given.
+  const roster = fakeRoster();
+  const { gates } = foldGateStates({
+    roster,
+    attempts: [],
+    grading: { grading: true, phase: "backend", timed_out: false, phases: [] },
+    stopped: { stopped: false, phase: null },
+  });
+  const byId = Object.fromEntries(gates.map((g) => [g.id, g]));
+  assert.equal(byId.G01.under_test, true);
+  assert.equal(byId.F01.under_test, false, "a phase that is not running is not under test");
+});
+
+test("WALL: run_dir is confined to a child of the runs root", () => {
+  // The value reaches an fs path. Traversal would let a caller read arbitrary
+  // JSON off the host through a read-only endpoint.
+  assert.equal(resolveRunDir("/runs", "../../etc"), null);
+  assert.equal(resolveRunDir("/runs", "/etc/passwd"), null);
+  assert.equal(resolveRunDir("/runs", "a/b"), null);
+  assert.equal(resolveRunDir("/runs", ".."), null);
+  assert.equal(resolveRunDir("/runs", "cumulative")?.name, "cumulative");
+  assert.equal(resolveRunDir("/runs", "")?.name, "cumulative", "empty falls back to the default run dir");
+});
+
+test("WALL: the attempt ceiling is read from the harness, never assumed", () => {
+  assert.equal(maxAttemptsFrom("run_cumulative.pacing max_attempts=3 max_steps=40"), 3);
+  // Unobservable is null, not a plausible-looking default.
+  assert.equal(maxAttemptsFrom("nothing here"), null);
+  assert.equal(maxAttemptsFrom(""), null);
+});
+
+test("WALL: a truncated status stream yields every intact record before the tear", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wall-"));
+  try {
+    const path = join(dir, "manifest.status.jsonl");
+    writeFileSync(
+      path,
+      '{"type":"attempt","attempt":1,"gate_results":[]}\n' +
+        '{"type":"turn_terminal"}\n' +
+        '{"type":"attempt","attempt":2,"gate_r',
+    );
+    const records = await readStatusRecords(path);
+    assert.equal(records.length, 2, "the intact records survive");
+    assert.equal(attemptRecords(records).length, 1, "the torn attempt record is not invented");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── the producer side ───────────────────────────────────────────────────────
+
+test("ROSTER: a colliding token falls back to a slug instead of merging gates", () => {
+  // [G10] covers five separate tests in the real suite. Using the bare token as
+  // an id would silently merge them into one square and drop four gates from
+  // the denominator.
+  const gates = assignIds([
+    { gate_token: "G01", phase: "backend", file: "backend/a.test.ts", full_name: "s > [G01] one" },
+    { gate_token: "G10", phase: "backend", file: "backend/b.test.ts", full_name: "s > [G10] first" },
+    { gate_token: "G10", phase: "backend", file: "backend/b.test.ts", full_name: "s > [G10] second" },
+  ]);
+  assert.equal(gates[0].id, "G01", "a token identifying exactly one test IS the id");
+  assert.notEqual(gates[1].id, "G10");
+  assert.notEqual(gates[1].id, gates[2].id, "colliding tokens must not produce colliding ids");
+  assert.equal(gates[1].gate_token, "G10", "the token survives for grouping");
+});
+
+test("ROSTER: the fingerprint changes when the suite changes, not when it is reordered", () => {
+  // The fingerprint's whole job is detecting that the suite changed mid-campaign
+  // — which invalidates cross-cell gate comparison. A reorder is not a change.
+  const a = [{ id: "G01" }, { id: "G02" }];
+  const b = [{ id: "G02" }, { id: "G01" }];
+  const c = [{ id: "G01" }, { id: "G03" }];
+  assert.equal(suiteFingerprint(a), suiteFingerprint(b), "order must not affect the fingerprint");
+  assert.notEqual(suiteFingerprint(a), suiteFingerprint(c));
+});
+
+test("ROSTER: the list parsers read what the runners actually print", () => {
+  const vit = parseVitestList(
+    "backend/gates-01-08.test.ts > Backgammon backend gates 01-08 > [G01] REQ-INIT — initial position\n" +
+      "not a test line\n",
+  );
+  assert.equal(vit.length, 1);
+  assert.equal(vit[0].file, "backend/gates-01-08.test.ts");
+  assert.deepEqual(vit[0].chain, ["Backgammon backend gates 01-08", "[G01] REQ-INIT — initial position"]);
+
+  const pw = parsePlaywrightList(
+    "Listing tests:\n" +
+      "  [chromium] › core.spec.ts:108:1 › [F01] REQ-RENDER — page loads\n" +
+      "Total: 1 test in 1 file\n",
+  );
+  assert.equal(pw.length, 1, "the banner and the total are not tests");
+  assert.equal(pw[0].file, "core.spec.ts");
+  assert.equal(pw[0].line, 108);
+  assert.deepEqual(pw[0].chain, ["[F01] REQ-RENDER — page loads"]);
+});
+
+test("GATE RESULTS: every roster gate appears exactly once, not_run included", () => {
+  // INVARIANT I-4 stated as a shape: the output array is the roster, always.
+  const roster = {
+    available: true,
+    fingerprint: "sha256:x",
+    gates: [
+      { id: "G01", phase: "backend", file: "a.test.ts", full_name: "one", test_name: "one" },
+      { id: "G02", phase: "backend", file: "a.test.ts", full_name: "two", test_name: "two" },
+    ],
+    byKey: new Map(),
+  };
+  const matcher = { unmatched: [] };
+  const folded = foldGateResults({
+    roster,
+    matcher,
+    observed: [{ id: "G01", status: "pass", phase: "backend", duration_ms: 3 }],
+    phaseRan: { backend: true },
+  });
+  assert.equal(folded.gate_results.length, 2);
+  const g2 = folded.gate_results.find((r) => r.id === "G02");
+  assert.equal(g2.status, "not_run");
+  assert.match(g2.reason, /produced no result/);
+  assert.deepEqual(folded.gate_totals, { total: 2, pass: 1, fail: 0, not_run: 1, error: 0 });
+});
+
+test("GATE RESULTS: with no roster, the denominator is null — never zero", () => {
+  // INVARIANT I-2. Zero reads as "nothing was missed"; null reads as "unknown".
+  // Only one of those is true when the suite is unknown.
+  const folded = foldGateResults({
+    roster: { available: false, reason: "no --roster supplied", gates: [], byKey: new Map() },
+    matcher: { unmatched: [] },
+    observed: [{ id: "G01", status: "pass" }],
+    phaseRan: {},
+  });
+  assert.equal(folded.gate_totals.total, null);
+  assert.equal(folded.gate_totals.not_run, null);
+  assert.equal(folded.gate_roster.available, false);
+  assert.match(folded.gate_roster.reason, /no --roster/);
+});
+
+test("GATE RESULTS: a runner's status words map onto the published vocabulary", () => {
+  assert.equal(normalizeStatus("passed").status, "pass");
+  assert.equal(normalizeStatus("failed").status, "fail");
+  // A test that blew its own timeout DID run and did NOT satisfy the gate.
+  assert.equal(normalizeStatus("timedOut").status, "fail");
+  // Skipped and interrupted did NOT run — and must never read as pass.
+  assert.equal(normalizeStatus("skipped").status, "not_run");
+  assert.equal(normalizeStatus("interrupted").status, "not_run");
+  // An unknown word is surfaced as an error, never quietly treated as a pass.
+  assert.equal(normalizeStatus("wat").status, "error");
+});
+
+test("ROSTER: tiers partition the suite without shrinking it", () => {
+  // A tier says what KIND of gate this is so the board can render an edge-case
+  // square differently and a scorecard can quote a core-only bar. It is NOT a
+  // way to make a gate optional — `total` stays the true enumerated count
+  // (invariant I-1), and tiers only slice it.
+  const tiers = { fallback: "core", rules: [{ tier: "edge", path_segment: "edge" }] };
+  assert.equal(tierOf("backend/edge/edge-gates.test.ts", tiers), "edge");
+  assert.equal(tierOf("backend/gates-01-08.test.ts", tiers), "core");
+  // Substring matches must not count — only a whole path SEGMENT named `edge`.
+  assert.equal(tierOf("edges.spec.ts", tiers), "core", "edges.spec.ts is a core frontend file");
+  assert.equal(tierOf("backend/hedge/x.test.ts", tiers), "core");
+  // No rules at all: everything is labelled, nothing is dropped.
+  assert.equal(tierOf("anything.test.ts", { fallback: "core", rules: [] }), "core");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRADED TEXT (WO-FEEDBACK-1)
+//
+// The harness renders gate results into prose and hands it to the model as a
+// user turn. These pin the one property that makes the surface worth having:
+// the text is carried VERBATIM. A surface that cleaned it up would answer a
+// different question than the one an operator opens it to judge.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("FEEDBACK: the message text is carried verbatim, byte for byte", () => {
+  // Newlines, bullets, em-dashes and trailing whitespace all survive: the
+  // operator is judging whether this reads like a person wrote it, and any
+  // normalisation here would forge the evidence.
+  const body = "These are still failing \u2014 fix it.\n\n- use higher die: FAILING\n";
+  const m = normalizeMessage({ kind: "feedback", attempt: 2, timestamp: 5, text: body }, 0);
+  assert.equal(m.text, body);
+  assert.equal(m.chars, body.length);
+  assert.equal(m.kind, "feedback");
+  assert.equal(m.kind_inferred, false);
+});
+
+test("FEEDBACK: a record with no kind is defaulted BUT says so", () => {
+  // Sidecar records written before `kind` existed are real data. Relabelling
+  // them as if the writer had stated a kind it never stated is a small lie of
+  // exactly the sort this whole surface exists to prevent.
+  const m = normalizeMessage({ attempt: 1, text: "x" }, 0);
+  assert.equal(m.kind, "feedback");
+  assert.equal(m.kind_inferred, true, "the inference must be visible, not silent");
+});
+
+test("FEEDBACK: feed rows are user-kind, because that is the fiction under test", () => {
+  // Filing them under `harness` would quietly answer the question the operator
+  // opened the feed to judge — whether these read as user turns.
+  const rows = feedbackRows([
+    normalizeMessage({ kind: "feedback", attempt: 2, timestamp: 1, text: "still failing" }, 0),
+    normalizeMessage({ kind: "chunk", attempt: 1, timestamp: 0, text: "build a game" }, 1),
+  ]);
+  assert.ok(rows.every((r) => r.kind === "user"));
+  assert.equal(rows[0].type, "user:feedback");
+  assert.equal(rows[1].type, "user:chunk");
+  assert.match(rows[1].name, /task chunk/);
+});
+
+test("FEEDBACK: an oversized message is capped and SAYS it was capped", () => {
+  // A 33KB chunk prompt would swamp the feed. Truncating silently would let the
+  // tail vanish with nothing to indicate it existed.
+  const big = "x".repeat(9000);
+  const [row] = feedbackRows([normalizeMessage({ kind: "chunk", text: big }, 0)], { textCap: 100 });
+  assert.equal(row.text.length, 100);
+  assert.equal(row.truncated, true);
+  const [small] = feedbackRows([normalizeMessage({ kind: "chunk", text: "short" }, 0)], { textCap: 100 });
+  assert.equal(small.truncated, false);
+});
+
+test("FEEDBACK: a torn sidecar yields every intact message before the tear", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fb-"));
+  try {
+    const path = join(dir, "worktree.user-events.jsonl");
+    writeFileSync(
+      path,
+      '{"type":"user","kind":"chunk","attempt":1,"text":"a"}\n' +
+        '{"type":"user","kind":"feedback","attempt":2,"text":"b"}\n' +
+        '{"type":"user","kind":"feed',
+    );
+    const records = await readSidecar(path);
+    assert.equal(records.length, 2);
+    assert.equal(records[1].text, "b");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FEEDBACK: no sidecar yet is ok:true + unwired, never an error", async () => {
+  // Before the first prompt is sent there is genuinely nothing. That is a state
+  // to report, not a failure — and it must stay distinguishable from "this
+  // surface is not wired up".
+  const dir = mkdtempSync(join(tmpdir(), "fb-"));
+  try {
+    const res = await readFeedback({ runsRoot: dir, runDir: "cumulative" });
+    assert.equal(res.ok, true);
+    assert.deepEqual(res.messages, []);
+    assert.deepEqual(res.unwired, ["user-events"]);
+    assert.match(res.unwired_reasons["user-events"], /first prompt/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FEEDBACK: run_dir traversal is refused, same as the wall", async () => {
+  const res = await readFeedback({ runsRoot: "/runs", runDir: "../../etc" });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "bad_run_dir");
+});
+
+test("FEEDBACK: text can be omitted for an index, and that is stated", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fb-"));
+  try {
+    const cell = join(dir, "cumulative", "sessions", "cell-0");
+    mkdirSync(cell, { recursive: true });
+    writeFileSync(
+      join(cell, "worktree.user-events.jsonl"),
+      '{"type":"user","kind":"feedback","attempt":2,"text":"body here"}\n',
+    );
+    const withText = await readFeedback({ runsRoot: dir, runDir: "cumulative" });
+    assert.equal(withText.messages[0].text, "body here");
+    assert.equal(withText.text_included, true);
+    assert.equal(withText.counts.feedback, 1);
+
+    const without = await readFeedback({ runsRoot: dir, runDir: "cumulative", includeText: false });
+    assert.equal(without.text_included, false, "a client must tell 'no text here' from 'no text sent'");
+    assert.equal(without.messages[0].text, undefined);
+    assert.equal(without.messages[0].chars, "body here".length, "the length still reports");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FEEDBACK: the contract version is declared", () => {
+  assert.equal(typeof FEEDBACK_CONTRACT_VERSION, "number");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE MODEL LEDGER — the three launch gates
+//
+// These pin the rules that cost real hours when broken. A wrongly-OPEN gate
+// starts a ~3h cell that cannot be scored; a wrongly-CLOSED one strands the
+// campaign. Both are silent, which is why they are asserted rather than read.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A run dir on disk: one schedule slot plus its status record. */
+function writeRun(root, dir, { seq = 0, model = "m-a", arm = "off", status = null }) {
+  const d = join(root, dir);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "manifest.json"), JSON.stringify({
+    created_at: "2026-08-13T00:00:00Z",
+    // The arm field is `memory_mode` and the model is bare in `provider_pin`.
+    schedule: [{ sequence_index: seq, memory_mode: arm, provider_pin: model }],
+  }));
+  if (status) writeFileSync(join(d, "manifest.status.jsonl"), `${JSON.stringify(status)}\n`);
+  return d;
+}
+
+const OFF_PASS = { type: "attempt", sequence_index: 0, verdict: "PASS", progress: { turns: 9, total_tokens: 400, wall_seconds: 60 } };
+
+test("LEDGER: a valid OFF cell is the baseline, and it opens + profile but not + baseline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const m = led.models[0];
+  assert.equal(m.baseline.scorable, true);
+  assert.equal(m.can_profile.allowed, true);
+  // Re-baselining is a declared act (RUNBOOK 5.13), never a live button.
+  assert.equal(m.can_baseline.allowed, false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a VOID baseline counts as NO baseline and re-opens + baseline", async () => {
+  // The failure this prevents: void numbers exist and look like success, so a
+  // gate keyed on "a cell completed" would green-light an ON run whose every Δ
+  // is measured against the harness rather than the model.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", {
+    status: { type: "attempt", sequence_index: 0, verdict: "FAIL", terminal_reason: "transport_incomplete", progress: { turns: 2 } },
+  });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const m = led.models[0];
+  assert.equal(m.baseline.scorable, false);
+  assert.equal(m.baseline.voided, true);
+  assert.equal(m.can_profile.allowed, false, "no profile may be frozen on a void floor");
+  assert.equal(m.can_baseline.allowed, true, "the operator must be able to re-measure");
+  assert.match(m.can_baseline.reason ?? "", /^$|void/i);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: attempt_ceiling_reached is a real FAIL, not a void instrument", async () => {
+  // A model that fails every attempt is the bench's most important finding.
+  // Calling it an instrument fault would discard it.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", {
+    status: { type: "attempt", sequence_index: 0, verdict: "FAIL", terminal_reason: "attempt_ceiling_reached", progress: { turns: 40 } },
+  });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  assert.equal(led.models[0].baseline.scorable, true, "a capability FAIL is a usable floor");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: an archived run never supplies a baseline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative.wiped-recommission-20260813T0150", { status: OFF_PASS });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  assert.equal(led.models[0].baseline.exists, false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: one cell in flight blocks EVERY button on EVERY model", async () => {
+  // The serial rule is a property of the bench, not of a row. A per-row UI is
+  // exactly where this gets broken, because each row looks independent.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }, { id: "m-b", bench_eligible: true }],
+    runInFlight: true,
+    blockedReason: "a cell is running (off-cell-3.log)",
+  });
+  assert.equal(led.run_in_flight, true);
+  for (const m of led.models) {
+    assert.equal(m.can_baseline.allowed, false);
+    assert.equal(m.can_profile.allowed, false);
+    assert.match(m.can_baseline.reason, /cell is running/);
+    for (const p of m.profiles) assert.equal(p.can_run.allowed, false);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: + run is closed on any profile that is not the active one", async () => {
+  // The launcher attributes a cell to the NEWEST profile and accepts no profile
+  // id. An open button on an older row would start a real run and file it
+  // under a different profile.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+  const older = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+  await new Promise((r) => setTimeout(r, 5));
+  const newer = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-b"] });
+  assert.equal(older.ok, true);
+  assert.equal(newer.ok, true);
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const profs = led.models[0].profiles;
+  assert.equal(profs.length, 2);
+  const active = profs.filter((p) => p.can_run.allowed);
+  assert.equal(active.length, 1, "exactly one profile may be run under");
+  assert.equal(active[0].is_active, true);
+  for (const p of profs.filter((p) => !p.can_run.allowed)) {
+    assert.match(p.can_run.reason, /newest profile/);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a profile reports no measured cell, and says why", async () => {
+  // Runs are not joined to measured cells. The field is null WITH a reason, so
+  // the board states that rather than rendering eight `unobserved` columns that
+  // imply a measurement is merely pending.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+  await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const p = led.models[0].profiles[0];
+  assert.equal(p.latest_cell, null);
+  assert.match(p.latest_cell_unavailable, /not joined/i);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: profiles whose model left the roster are surfaced, not dropped", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  await createProfile(root, { subjectModel: "gone", memoryModels: ["gone"] });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  assert.equal(led.orphaned_profiles.length, 1);
+  assert.equal(led.orphaned_profiles[0].subject_model, "gone");
+  rmSync(root, { recursive: true, force: true });
 });

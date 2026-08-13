@@ -294,7 +294,8 @@ def test_feedback_gap_injects_pass_verdict_before_failure_feedback_with_sidecar_
     # Gate [G02] B keeps failing until attempt 4, so there's an extra feedback round
     assert len(calls) == 5
 
-    pass_verdict = "That fixed it — [G01] A, [G03] C all pass now."
+    # WO-FEEDBACK-1: grader tokens are stripped from delivered text.
+    pass_verdict = "That fixed it — A, C all pass now."
     failure_feedback = runner._build_feedback_prompt(checks=["[G02] B"], had_pass_verdict=True)
     assert failure_feedback.startswith(
         "The rest are still failing — fix the implementation so they pass. Do not explain, just edit the code."

@@ -229,9 +229,29 @@ export async function read(ctx) {
  */
 function stackState(baseline, on) {
   if (!baseline) return "no_baseline";
-  // A void floor cannot anchor a comparison, so the stack reads as having no
-  // usable baseline even though a cell exists. The panel says which.
-  if (baseline.void_instrument || baseline.turns === null) return "baseline_void";
+
+  // ── PENDING IS NOT VOID (measured defect, 2026-08-13) ──────────────────
+  // This branch used to read `if (baseline.void_instrument || baseline.turns
+  // === null) return "baseline_void"`, and the curve renders that state as
+  // "baseline is void-instrument — an instrument failure, not a capability
+  // result".
+  //
+  // But `turns === null` is ALSO true of a cell that has simply not reported
+  // yet: `state:"not_started"` (scheduled, no attempt record) and
+  // `state:"running"` (in flight, first attempt still open) both carry null
+  // turns, and `void_instrument` is FALSE for both — it is only ever set from
+  // a terminal truncation signal (see cellsInRun()).
+  //
+  // Observed on the live board: the operator's RUNNING baseline was reported
+  // as a void instrument. The board asserted a transport failure that had not
+  // happened, about a cell that was working. That is the precise class of lie
+  // the null-state rules exist to prevent — "not measured yet" and "measured,
+  // and the instrument broke" are different facts and must not share a state.
+  //
+  // VOID is now claimed ONLY about a cell that actually finished.
+  if (baseline.void_instrument) return "baseline_void";
+  if (baseline.turns === null) return "baseline_pending";
+
   const plottable = on.filter((r) => !r.void_instrument && r.turns !== null);
   if (!plottable.length) return "baseline_only";
   if (plottable.length === 1) return "n1_on";

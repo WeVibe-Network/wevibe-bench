@@ -80,6 +80,10 @@ DEFAULT_ORG_ID = "wevibe-org-0"
 DEFAULT_PROXY_RUNS_DIR = Path("/Users/jerrysmith/Desktop/Local LLM Proxy/runs")
 DEFAULT_TASK_LABEL = "backgammon-cumulative-primary"
 DEFAULT_EXTRACT_TIMEOUT_S = 900
+# Gate enumeration shells out to `vitest list` + `playwright --list` twice. Cold,
+# that is tens of seconds; the bound exists so a wedged enumerator can never
+# hold a campaign's first cell hostage — it is instrumentation, not grading.
+GATE_ROSTER_TIMEOUT_S = 300
 DEFAULT_SEED = config.RunConfig().rng_seed
 DEFAULT_ON_BUDGET = 0
 
@@ -1057,6 +1061,19 @@ class RealSessionRunner:
                     attempt_record["verdict"] = attempt.get("verdict", result.verdict)
                     attempt_record["n_problems"] = attempt.get("n_problems")
                     attempt_record["failed_gates"] = list(attempt.get("failed_gates", []) or [])
+                    # WO-GATE-ROSTER: per-gate outcomes alongside the legacy
+                    # failing-only list. `failed_gates` keeps its exact prior
+                    # shape and meaning for every existing consumer; these carry
+                    # the facts it structurally cannot — which gates PASSED, and
+                    # which never ran at all.
+                    #
+                    # `gate_results` is None (not []) when the gate runner did
+                    # not publish it — an older report, or a run with no roster.
+                    # An empty list would claim "the suite ran and contained
+                    # nothing", which is the absent-reads-as-pass defect this
+                    # exists to remove (invariants I-2, I-4).
+                    attempt_record["gate_results"] = attempt.get("gate_results")
+                    attempt_record["gate_totals"] = attempt.get("gate_totals")
                     attempt_record["conformed"] = attempt.get("conformed")
                     attempt_record["attempt_cost_usd"] = attempt.get("attempt_cost_usd")
                 else:
@@ -1148,6 +1165,98 @@ class RealSessionRunner:
             "api_key_source": self._extract_api_key_source,
         }
 
+    @property
+    def _gate_roster_path(self) -> Path | None:
+        """Where the gate roster lives: beside the manifest and status stream.
+
+        The roster describes the CAMPAIGN's gate suite, not one cell's, so it
+        sits at the run root next to ``manifest.json`` /
+        ``manifest.status.jsonl`` rather than inside a per-cell session dir.
+
+        Resolved defensively, mirroring ``_append_status_records``: partially
+        constructed runners (the wiring tests build one without going through
+        ``__init__``) must not crash a run path over an instrumentation
+        artifact. Returns None when no run root can be resolved at all, and the
+        caller then grades without a roster rather than aborting.
+        """
+        base = getattr(self, "_run_manifest_base_path", None)
+        if base is None:
+            runs_dir = getattr(self, "_runs_dir", None)
+            if runs_dir is None:
+                return None
+            base = str(Path(runs_dir) / "manifest.json")
+        return Path(base).parent / "gate-roster.json"
+
+    def _write_gate_roster(self) -> None:
+        """Publish the full enumerable gate suite once, at first cell start.
+
+        WHY (WO-GATE-ROSTER). ``report.mjs`` emits only ``failed_gates``, which
+        gives a board no denominator and no way to tell a gate that passed from
+        one that never ran. The roster is that denominator: every enumerable
+        test, captured BEFORE the agent runs so it describes the suite the run
+        was actually graded against.
+
+        WRITE-ONCE (RC-5 / invariant I-6). A roster rewritten mid-campaign would
+        silently re-baseline every gate comparison already made against it, so
+        an existing file is left exactly as it is — ``roster.mjs`` refuses the
+        overwrite itself, and this skips the subprocess entirely.
+
+        EXECUTION-FREE (invariant I-5). ``roster.mjs`` shells out only to
+        ``vitest list`` and ``playwright test --list``; neither executes a test
+        nor binds :8002, so this is safe beside a live cell and adds no
+        benchmark cost beyond one enumeration per campaign.
+
+        INSTRUMENTATION-ONLY. A roster that cannot be written must never abort a
+        benchmark run: the failure is logged, the artifact is absent, and
+        ``/api/wall`` reports it as unwired rather than inventing a suite.
+        """
+        roster_path = self._gate_roster_path
+        if roster_path is None or roster_path.exists():
+            return
+
+        script = self._task_dir / "gates" / "roster.mjs"
+        if not script.is_file():
+            _LOG.warning(
+                "run_cumulative.gate_roster_missing_script path=%s", script
+            )
+            return
+
+        try:
+            roster_path.parent.mkdir(parents=True, exist_ok=True)
+            completed = subprocess.run(  # noqa: S603 - fixed argv, host-only enumerator
+                ["node", str(script), "--out", str(roster_path), "--task", str(self._task)],
+                cwd=str(script.parent),
+                capture_output=True,
+                text=True,
+                timeout=GATE_ROSTER_TIMEOUT_S,
+                check=False,
+            )
+        except Exception as exc:
+            _LOG.exception(
+                "run_cumulative.gate_roster_failed error_type=%s", type(exc).__name__
+            )
+            return
+
+        if not roster_path.is_file():
+            # Exit code 2 means "enumerated, but a phase could not be listed".
+            # Either way the absence is reported, never papered over.
+            _LOG.warning(
+                "run_cumulative.gate_roster_not_written exit=%s stderr=%s",
+                completed.returncode,
+                (completed.stderr or "").strip()[:400],
+            )
+            return
+
+        _LOG.info(
+            "run_cumulative.gate_roster_written path=%s exit=%s detail=%s",
+            roster_path,
+            completed.returncode,
+            (completed.stderr or "").strip()[:200],
+        )
+        self._progress(
+            f"PROGRESS step=gate-roster path={roster_path} exit={completed.returncode}"
+        )
+
     def prepare_fixture(self, session: SessionRecord) -> None:
         verify_task_template_frozen()
         state = self._state_for_session(session)
@@ -1157,6 +1266,10 @@ class RealSessionRunner:
             shutil.rmtree(worktree)
         worktree.mkdir(parents=True, exist_ok=True)
         self._runner_cls._copy_tree_contents(self._task_dir / "scaffold", worktree)
+
+        # Cell start, before the agent runs — the roster must describe the suite
+        # as it stood when grading began, not as it stands when someone asks.
+        self._write_gate_roster()
 
         _LOG.info(
             "run_cumulative.prepare_fixture sequence_index=%d memory_mode=%s run_label=%s",
@@ -1188,6 +1301,10 @@ class RealSessionRunner:
             "proxy_token": self._proxy_token,
             "logger": _LOG,
             "progress": self._progress,
+            # WO-GATE-ROSTER: lets the gate runner report which gates did NOT
+            # run. Passed unconditionally; the runner itself checks existence,
+            # so a campaign whose enumeration failed simply grades without it.
+            "gate_roster_path": self._gate_roster_path,
         }
         if max_steps_per_attempt is not None:
             runner_kwargs["max_steps_per_attempt"] = max_steps_per_attempt

@@ -357,6 +357,10 @@ test("ONE RUN: a live status stream outranks a newer bare manifest", async () =>
   // A just-created run writes manifest.json before it ever appends an attempt
   // record. Selecting purely on mtime would let that empty directory steal the
   // screen from the run actually producing data mid-flight.
+  //
+  // NOTE: neither directory here declares a `created_at`, which is what puts
+  // this case on the FALLBACK path (attempt-data beats a bare directory). The
+  // primary path is pinned by the `created_at` tests below.
   const root = await mkdtemp(join(tmpdir(), "wevibe-dash-rank-"));
   try {
     const live = join(root, "cumulative");
@@ -375,6 +379,174 @@ test("ONE RUN: a live status stream outranks a newer bare manifest", async () =>
     assert.equal(res.ok, true);
     assert.equal(res.provenance.run, "cumulative", "the run with real data stays on screen");
     assert.equal(res.patch.arm_delta.b.cells, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── THE STALE-CORPSE DEFECT (measured live 2026-08-13) ───────────────────────
+//
+// `manifest.status.jsonl` is appended AT ATTEMPT END — roughly 30 minutes in.
+// The previous rule checked "has a status file" BEFORE recency, so for the
+// first half-hour of every run an ABANDONED run outranked the live one.
+//
+// Observed on the operator's board: `run-log` resolved the live cell while
+// `status-stream` — which feeds the GATE WALL and the arm delta — resolved a
+// run abandoned 21 hours earlier. Two different cells on one screen, and the
+// wall's 23 gates belonged to a run that was not running.
+//
+// The fix ranks on the manifest's own `created_at`. These pin it.
+
+test("ACTIVE RUN: a fresh manifest-only run outranks an older run WITH a status stream", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wevibe-dash-fresh-"));
+  try {
+    // The corpse: has attempt records, declares an OLD start.
+    const dead = join(root, "cumulative.abandoned");
+    await mkdir(dead, { recursive: true });
+    await writeFile(
+      join(dead, "manifest.status.jsonl"),
+      [attempt({ seq: 0, attempt: 1, mode: "off", gates: ["[G91] REQ-DEAD — dead"] })]
+        .map((r) => JSON.stringify(r)).join("\n") + "\n",
+      "utf8",
+    );
+    await writeFile(
+      join(dead, "manifest.json"),
+      JSON.stringify({ org_id: "wevibe-org-0", created_at: "2026-08-12T07:04:09Z" }),
+      "utf8",
+    );
+
+    // The live run: launched later, no attempt has closed yet, so NO status
+    // file exists. This is the exact state of a run in its first 30 minutes.
+    const live = join(root, "cumulative");
+    await mkdir(live, { recursive: true });
+    await writeFile(
+      join(live, "manifest.json"),
+      JSON.stringify({ org_id: "wevibe-org-0", created_at: "2026-08-13T05:13:49Z" }),
+      "utf8",
+    );
+
+    const { activeRun } = await import("./sources/_runtime.mjs");
+    const got = await activeRun(root);
+    assert.equal(
+      got?.name,
+      "cumulative",
+      "the newest DECLARED run wins even with no status stream — a corpse must never hold the screen",
+    );
+    assert.equal(got?.statusPath, null, "and it correctly reports having no attempt records yet");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ACTIVE RUN: created_at beats mtime, so an archived rename cannot win", async () => {
+  // Archiving touches a directory long after its run ended. mtime would let a
+  // freshly-renamed corpse outrank the live run; `created_at` cannot be moved
+  // by a rename.
+  const root = await mkdtemp(join(tmpdir(), "wevibe-dash-archive-"));
+  try {
+    const live = join(root, "cumulative");
+    await mkdir(live, { recursive: true });
+    await writeFile(
+      join(live, "manifest.json"),
+      JSON.stringify({ org_id: "x", created_at: "2026-08-13T05:13:49Z" }),
+      "utf8",
+    );
+
+    const archived = join(root, "cumulative.void-truncation-20260812T0253");
+    await mkdir(archived, { recursive: true });
+    const am = join(archived, "manifest.json");
+    await writeFile(am, JSON.stringify({ org_id: "x", created_at: "2026-08-12T07:04:09Z" }), "utf8");
+    // Touched AFTER the live run's manifest — the archive/rename case.
+    const later = new Date(Date.now() + 60_000);
+    await utimes(am, later, later);
+
+    const { activeRun } = await import("./sources/_runtime.mjs");
+    const got = await activeRun(root);
+    assert.equal(got?.name, "cumulative", "a later mtime must not beat an earlier declared start");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ── PENDING IS NOT VOID (measured live 2026-08-13) ───────────────────────────
+//
+// `stackState()` collapsed "no measurement yet" into "void_instrument" via
+// `baseline.turns === null`. But turns is ALSO null for a cell that is merely
+// scheduled or still running, and `void_instrument` is false for both.
+//
+// Observed on the operator's board: a HEALTHY RUNNING baseline was reported as
+// "baseline is void-instrument — an instrument failure, not a capability
+// result". The board asserted a transport failure that had not happened.
+// "not measured yet" and "the instrument broke" are different facts.
+
+test("BASELINE: a RUNNING off cell is pending, never void-instrument", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wevibe-dash-pending-"));
+  try {
+    const dir = join(root, "cumulative");
+    await mkdir(dir, { recursive: true });
+    // Scheduled, and NO status stream — the cell has opened no attempt yet.
+    await writeFile(
+      join(dir, "manifest.json"),
+      JSON.stringify({
+        org_id: "wevibe-org-0",
+        created_at: "2026-08-13T05:13:49Z",
+        task: "backgammon-cumulative-primary",
+        roster_hash: "abc",
+        seed: 20260709,
+        schedule: [{ sequence_index: 0, memory_mode: "off", provider_pin: "qwen3.6-35b-a3b-bench" }],
+        session_records: [],
+      }),
+      "utf8",
+    );
+
+    const { read: readStack } = await import("./sources/stack-ledger.mjs");
+    const res = await readStack({ runsRoot: root, benchRoot: root, config: {} });
+    assert.equal(res.ok, true);
+    assert.equal(
+      res.patch.stack.state,
+      "baseline_pending",
+      "an unmeasured baseline must not be reported as an instrument failure",
+    );
+    assert.equal(res.patch.stack.baseline.void_instrument, false, "nothing truncated — it simply has not reported");
+    assert.equal(res.patch.stack.baseline_scorable, false, "still not a floor: no delta may be computed from it");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("BASELINE: void_instrument is still reported as void", async () => {
+  // The guard must not swing the other way — a genuinely truncated terminal
+  // cell is an instrument failure and has to keep saying so.
+  const root = await mkdtemp(join(tmpdir(), "wevibe-dash-void-"));
+  try {
+    const dir = join(root, "cumulative");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "manifest.json"),
+      JSON.stringify({
+        org_id: "wevibe-org-0",
+        created_at: "2026-08-13T05:13:49Z",
+        task: "backgammon-cumulative-primary",
+        roster_hash: "abc",
+        seed: 20260709,
+        schedule: [{ sequence_index: 0, memory_mode: "off", provider_pin: "qwen3.6-35b-a3b-bench" }],
+        session_records: [],
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(dir, "manifest.status.jsonl"),
+      [
+        { ...attempt({ seq: 0, attempt: 1, mode: "off", terminalReason: "transport_incomplete", truncatedTurns: 9 }), terminal_outcome: true },
+      ].map((r) => JSON.stringify(r)).join("\n") + "\n",
+      "utf8",
+    );
+
+    const { read: readStack } = await import("./sources/stack-ledger.mjs");
+    const res = await readStack({ runsRoot: root, benchRoot: root, config: {} });
+    assert.equal(res.ok, true);
+    assert.equal(res.patch.stack.state, "baseline_void", "a truncated terminal cell is still void");
+    assert.equal(res.patch.stack.baseline.void_instrument, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

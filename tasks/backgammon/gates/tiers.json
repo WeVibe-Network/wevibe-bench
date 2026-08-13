@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Gate TIERS. Every enumerable test is a gate and every gate is counted; the",
+    "tier says what KIND of gate it is, so the board can render an edge-case",
+    "square differently from a core-requirement square and a scorecard can quote",
+    "a core-only pass bar without hiding the edge gates from the denominator.",
+    "",
+    "A tier is NOT a way to make a gate optional. `total` stays the true count of",
+    "everything enumerable (invariant I-1); tiers only partition it.",
+    "",
+    "RULE: a test file with a path segment named `edge` is tier `edge`. Anything",
+    "else is `default`. Deliberately a path convention rather than a per-test",
+    "list — a list drifts silently the moment a test is renamed, and a silently",
+    "wrong tier is the same class of defect as a silently wrong count.",
+    "",
+    "Absent or unreadable, every gate is `default` — never unlabelled."
+  ],
+  "default": "core",
+  "rules": [
+    {
+      "tier": "edge",
+      "path_segment": "edge",
+      "why": "boundary and degenerate-input gates: real requirements, but not the core capability the benchmark headline measures"
+    }
+  ]
+}

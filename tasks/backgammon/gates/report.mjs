@@ -5,6 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  foldGateResults,
+  loadRoster,
+  makeMatcher,
+  playwrightGateResults,
+  vitestGateResults,
+} from "./gate-results.mjs";
+
 const GATES_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function argValue(flag) {
@@ -18,6 +26,7 @@ function argValue(flag) {
 
 const targetArg = argValue("--target");
 const outArg = argValue("--out");
+const rosterArg = argValue("--roster");
 
 const TARGET = path.resolve(
   targetArg || process.env.BENCH_TARGET || path.join(GATES_DIR, "..", "golden"),
@@ -43,6 +52,37 @@ function truncate(text, max) {
     return clean;
   }
   return `${clean.slice(0, max)}…`;
+}
+
+// ── PER-GATE OUTCOMES (WO-GATE-ROSTER) ──────────────────────────────────────
+//
+// The folding logic lives in `gate-results.mjs` — pure, roster-parameterised
+// and therefore directly testable. It cannot be exercised from here: running
+// this file grades a real target, which boots a server on :8002 and cannot be
+// done beside a live cell.
+const ROSTER = loadRoster(rosterArg);
+const MATCHER = makeMatcher(ROSTER);
+
+/**
+ * Announce the gate set a phase is about to execute.
+ *
+ * PER-PHASE-SET, NOT PER-TEST. `spawnPhase` below uses `spawnSync`, so a
+ * child's output is buffered and reaches no reader until the phase has already
+ * ENDED — per-test hooks inside the runners would therefore arrive as a burst
+ * at phase end, which is not a live signal at all. This line is written by THIS
+ * process before the child starts, so it streams immediately, exactly like the
+ * existing `[report] phase=` marker that the harness already republishes.
+ *
+ * It carries a COUNT, not 47 ids: gate identity already lives in the roster the
+ * board reads, and republishing long slug ids (which contain spaces) through a
+ * whitespace-delimited log line would corrupt them. The count is the one fact
+ * the roster cannot supply — the runner attesting how many gates it is about to
+ * execute, which is what makes roster/runner drift detectable at all.
+ */
+function announceGateSet(phase) {
+  if (!ROSTER.available) return;
+  const count = ROSTER.gates.filter((g) => g.phase === phase).length;
+  process.stderr.write(`[report] gateset phase=${phase} count=${count}\n`);
 }
 
 function firstNonEmptyLine(text) {
@@ -307,6 +347,7 @@ function spawnPhase(phase, cmd, args) {
 }
 
 function runConformancePhase() {
+  announceGateSet("conformance");
   const run = spawnPhase("conformance", "npx", [
     "playwright",
     "test",
@@ -373,7 +414,16 @@ function runConformancePhase() {
   process.stderr.write(
     `[report] phase=conformance status=${run.ok ? "pass" : "fail"} problems=${prefixed.length}\n`,
   );
-  return { passed: run.ok, problems: prefixed, failedGates: uniqueFailedGates };
+  // NOTE: the `conformance:REQ-*` entries in `failedGates` are SUB-CHECKS
+  // inside the single `[CONF]` spec, not gates. They stay in `failed_gates`
+  // for backward compatibility and are deliberately NOT mapped onto roster
+  // ids — doing so would invent gates the suite does not contain.
+  return {
+    passed: run.ok,
+    problems: prefixed,
+    failedGates: uniqueFailedGates,
+    gateResults: playwrightGateResults(parsed, MATCHER),
+  };
 }
 
 function extractExpectedObserved(failureMessage, fallbackExpected) {
@@ -400,6 +450,7 @@ function runBackendPhase() {
     `bg-vitest-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
   );
 
+  announceGateSet("backend");
   const run = spawnPhase("backend", "npx", [
     "vitest",
     "run",
@@ -471,7 +522,14 @@ function runBackendPhase() {
   process.stderr.write(
     `[report] phase=backend status=${run.ok ? "pass" : "fail"} problems=${problems.length}\n`,
   );
-  return { passed: run.ok, problems: dedupeProblems(problems), failedGates: uniqueFailedGates };
+  return {
+    passed: run.ok,
+    problems: dedupeProblems(problems),
+    failedGates: uniqueFailedGates,
+    // EVERY assertion is recorded, not only the failures — recording only
+    // failures is exactly what made a pass indistinguishable from an absence.
+    gateResults: vitestGateResults(report, MATCHER),
+  };
 }
 
 function firstFrontendFailureMessage(spec) {
@@ -513,6 +571,7 @@ function specFailed(spec) {
 }
 
 function runFrontendPhase() {
+  announceGateSet("frontend");
   const run = spawnPhase("frontend", "npx", [
     "playwright",
     "test",
@@ -567,7 +626,12 @@ function runFrontendPhase() {
   process.stderr.write(
     `[report] phase=frontend status=${run.ok ? "pass" : "fail"} problems=${problems.length}\n`,
   );
-  return { passed: run.ok, problems: dedupeProblems(problems), failedGates: uniqueFailedGates };
+  return {
+    passed: run.ok,
+    problems: dedupeProblems(problems),
+    failedGates: uniqueFailedGates,
+    gateResults: playwrightGateResults(report, MATCHER),
+  };
 }
 
 function writeReport(outPath, payload) {
@@ -598,6 +662,23 @@ function main() {
   ]);
 
   const verdict = Object.values(results).every(Boolean) ? "PASS" : "FAIL";
+
+  // A phase "ran" when its runner produced at least one per-test result. That
+  // distinguishes "the phase executed and this gate still has no result" from
+  // "the phase never got far enough to execute anything", which are different
+  // reasons for the same not_run and must not be collapsed (invariant I-2).
+  const phaseRan = {
+    conformance: conformance.gateResults.length > 0,
+    backend: backend.gateResults.length > 0,
+    frontend: frontend.gateResults.length > 0,
+  };
+  const folded = foldGateResults({
+    roster: ROSTER,
+    matcher: MATCHER,
+    observed: [...conformance.gateResults, ...backend.gateResults, ...frontend.gateResults],
+    phaseRan,
+  });
+
   const report = {
     target: TARGET,
     timestamp: nowIso,
@@ -605,7 +686,11 @@ function main() {
     verdict,
     conformed: results.conformance,
     problems,
+    // UNCHANGED, deliberately: every existing consumer of the gate report reads
+    // this key and it keeps its exact prior meaning and shape.
     failed_gates: failedGates,
+    // WO-GATE-ROSTER additions. Purely additive — nothing above is altered.
+    ...folded,
   };
 
   writeReport(OUT_FILE, report);
@@ -639,6 +724,15 @@ try {
       },
     ],
     failed_gates: ["runner:exception"],
+    // The runner died. NOTHING was measured, so every roster gate is not_run —
+    // never fail (the gates did not fail, the harness did) and never absent
+    // (absence reads as pass). Invariants I-3 and I-4.
+    ...foldGateResults({
+      roster: ROSTER,
+      matcher: MATCHER,
+      observed: [],
+      phaseRan: { conformance: false, backend: false, frontend: false },
+    }),
   };
 
   try {

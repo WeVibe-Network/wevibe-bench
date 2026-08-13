@@ -113,6 +113,45 @@
   --ease: cubic-bezier(.2,.6,.2,1);
   --dur-fast:.12s; --dur-base:.15s;
 
+  /* ── MOTION — lifted VERBATIM from the design system's tokens/motion.css ──
+     "Nothing fades in. Everything is TYPED, as if a developer is at the
+      keyboard right now. Cadence is human, not metronomic."
+
+     These sixteen tokens were declared by the design system and NONE of them
+     existed in this board — the README recorded the deviation as "No ambient
+     animation", which was true and was the gap. They live here, in CSS, as the
+     single source of truth: ui.js READS them via getComputedStyle rather than
+     duplicating the numbers in JS, because two copies of a value drift and the
+     board has already been bitten once by exactly that.
+
+     They are not decoration. The typed cadence is the brand's signature and
+     the reason motion here reads as a person at a keyboard rather than a
+     progress bar. */
+
+  /* typing cadence (per character) */
+  --type-char-min: 7ms;
+  --type-char-max: 18ms;
+  --type-space-mult: 1.2;    /* spaces are slightly slower */
+  --type-punct-mult: 1.3;    /* punctuation lingers */
+  --type-think-chance: 0.02; /* 2% chance of a 40–110ms pause */
+
+  /* global tempo knob */
+  --tempo-chill: 1.7;
+  --tempo-normal: 1.0;
+  --tempo-fast: 0.5;
+
+  /* the cursor — hard steps, no fade */
+  --cursor-blink: 1.05s;
+
+  /* grid trail */
+  --trail-hold: 200ms;
+  --trail-fade: 400ms;
+  --trail-life: 600ms;       /* hold + fade */
+
+  /* loading sweep */
+  --sweep-step: 105ms;
+  --sweep-cycles: 3;
+
   /* board geometry — measured off the design source.
      §8.1 of the artifact is a 1920px board with curve|wall at 50/50. */
   --pad: 14px;
@@ -216,11 +255,27 @@ a:hover{color:var(--type)}
 }
 .shell{max-width:var(--board-max);margin:0 auto;display:flex;flex-direction:column;gap:var(--gap);width:100%;min-width:0}
 
-/* NO AMBIENT ANIMATION. The board is on screen for hours. The entire motion
-   budget is one settling flash on a newly arrived event row. */
+/* NO AMBIENT ANIMATION. The board is on screen for hours. Motion is reserved
+   for STATE CHANGES that announce themselves once and settle — never a loop
+   that runs while nothing is happening. */
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important}
 }
+
+/* ── SHARED KEYFRAMES from the design system (tokens/motion.css) ───────────
+   Available to every component. `wv-blink` is HARD STEPS, not a fade — the
+   cursor is a block that is either there or not, which is what makes it read
+   as a terminal rather than a pulsing dot. */
+@keyframes wv-blink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+@keyframes wv-trail{0%,33%{opacity:1}100%{opacity:0}}
+
+/* THE BLOCK CURSOR. The brand's signature mark, shown where the board is
+   waiting on something that is actively producing output. */
+.wv-cursor{
+  display:inline-block;width:.6em;height:1.05em;vertical-align:text-bottom;
+  background:var(--cursor);animation:wv-blink var(--cursor-blink) steps(1) infinite;
+}
+@media (prefers-reduced-motion:reduce){.wv-cursor{animation:none;opacity:1}}
 
 /* ── shared atoms ───────────────────────────────────────────────────────── */
 
@@ -541,36 +596,61 @@ a:hover{color:var(--type)}
    ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── GATE WALL — the correctness axis ─────────────────────────────────────
-   Fixed square cells in a dense grid. The grid's column count is set inline
-   by wall.js from the gate count; only the cell metrics live here.
+   Fixed square cells in a dense grid. Design §9.3 fixes the column count at 12
+   for every suite size; wall.js sets it inline from one constant so the wall
+   reads as the same object from cell to cell. Only cell metrics live here.
 
-   THE THREE STATES ARE THREE DIFFERENT SHAPES, not three colours — the board
-   has to survive a greyscale screenshot and a colour-blind reader:
-     green      solid fill          — was failing, now absent
-     red        hollow + danger rule — failing in the latest attempt
-     unobserved dashed, no fill      — never seen failing; NOT a weaker pass */
-.gwall{display:grid;gap:4px;grid-auto-rows:1fr}
-.gcell{aspect-ratio:1;border-radius:2px;background:var(--fg);border:1px solid var(--fg);min-width:0}
-.gcell.green{background:var(--fg);border-color:var(--fg)}
-.gcell.red{background:transparent;border-color:var(--danger)}
+   SIX STATES. The design fills five of them SOLID and distinguishes them by
+   hue, keeping one shape difference: untested is dashed with no fill, so the
+   single most common state — "nothing has happened here yet" — is legible with
+   no colour at all. The five solid fills do differ in luminance (#82aaff
+   blue · #6dff9e check · #ffb454 amber · #ff6b6b danger · #7e8aa3 slate), so a
+   greyscale screenshot separates them, but hue is doing real work here and the
+   legend below the grid is what carries the meaning in words.
+
+     unobserved dashed, no fill — not yet tested; NOT a weaker pass
+     testing    amber, pulsing  — under test now, no outcome claimed
+     blue       solid           — passed on attempt 1
+     green      solid check     — passed on a later attempt
+     slate      solid, still    — abandoned mid-test, no verdict ever
+     red        solid danger    — tested and failed */
+.gwall{display:grid;gap:3px;grid-auto-rows:1fr}
+.gcell{aspect-ratio:1;border-radius:2px;background:var(--check);border:1px solid transparent;min-width:0}
+.gcell.green{background:var(--check);border-color:var(--check)}
+.gcell.red{background:var(--danger);border-color:var(--danger)}
 .gcell.unobserved{background:transparent;border:1px dashed var(--dim)}
 /* LIVE CHOREOGRAPHY (ask 3). Palette verbatim from the design comp.
-   blue    resolved at attempt 1 — NOT "passed phase 1"; that square cannot exist
+   blue    passed on ATTEMPT 1 — the comp says "phase 1", but the harness's
+           phases partition the suite rather than sequencing it, so attempt is
+           the only axis a single gate can be resolved along
    testing amber, pulsing — under test now, no outcome claimed
    slate   still, never pulsing — abandoned mid-test; a stall is not a verdict */
 .gcell.blue{background:#82aaff;border-color:#82aaff}
-.gcell.testing{background:transparent;border-color:#ffb454;animation:gpulse 1.4s ease-in-out infinite}
+.gcell.testing{background:#ffb454;border-color:#ffb454;animation:gpulse 1.4s ease-in-out infinite}
 .gcell.slate{background:#7e8aa3;border-color:#7e8aa3}
-@keyframes gpulse{0%,100%{background:transparent}50%{background:#ffb454}}
+@keyframes gpulse{0%,100%{opacity:1}50%{opacity:.34}}
 /* TWO KILL-SWITCHES, BOTH LEAVING A DISTINGUISHABLE STATIC STATE.
    `.still` is the takeover freeze (a gate pulsing beside a serve that just fired
    would assert causation the data cannot support). The media query is the
    accessibility guarantee. Neither changes a colour — amber stays amber, so the
    wall loses its motion and none of its meaning. */
-.gwall.still .gcell.testing{animation:none;background:color-mix(in srgb,#ffb454 34%,transparent)}
+.gwall.still .gcell.testing{animation:none;opacity:.62}
 @media (prefers-reduced-motion:reduce){
-  .gcell.testing{animation:none;background:color-mix(in srgb,#ffb454 34%,transparent)}
+  .gcell.testing{animation:none;opacity:.62}
 }
+/* THE ARRIVAL MARK — the one motion a gate square is allowed.
+   Design-system rule: "Nothing fades in." So this is a one-shot RING that
+   contracts onto the cell, not an opacity fade. It touches box-shadow ONLY:
+   never size, never position, never the fill colour — a square that flashes
+   must still be reporting the same verdict during and after the flash, or the
+   motion would be making a claim the data does not support.
+   SLOTS NEVER REFLOW: box-shadow does not participate in layout. */
+@keyframes wv-settle{
+  from{box-shadow:0 0 0 3px var(--glow)}
+  to{box-shadow:0 0 0 0 transparent}
+}
+.gcell.settled{animation:wv-settle var(--trail-life,600ms) var(--ease) 1}
+@media (prefers-reduced-motion:reduce){.gcell.settled{animation:none}}
 .wall-live{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:8px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);font:400 12px var(--font);color:var(--dim);min-width:0}
 .wall-live.stalled{border-color:#7e8aa3}
 .wall-live .note{flex:1 1 260px;min-width:0}
@@ -580,6 +660,20 @@ a:hover{color:var(--type)}
 .wall-legend>span{display:inline-flex;align-items:center;gap:7px;min-width:0}
 .wall-legend .note{flex:1 1 220px;min-width:0}
 .wall-empty{display:flex;flex-direction:column;gap:7px;padding:18px;border:1px dashed var(--border-strong);border-radius:var(--radius-md)}
+/* PER-PHASE GRADING PROGRESS. Shown only while the grader is working and the
+   authoritative gate list has not been written yet. Deliberately drawn as ROWS,
+   never as squares: a phase problem count is not a gate identity, and anything
+   square-shaped on this panel reads as a gate. */
+.gphases{display:flex;flex-direction:column;gap:5px;margin-top:4px}
+.gphase{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font:400 12.5px var(--font);color:var(--fg)}
+.gphase.running{border-color:var(--fg);background:var(--bg)}
+.gphase.running .gp-detail{color:var(--type)}
+.gphase.fail{border-color:var(--danger)}
+.gphase.fail .gp-detail{color:var(--danger)}
+.gphase.timeout{border-color:var(--danger);border-top-width:2px;border-bottom-width:2px}
+.gphase.pass .gp-detail{color:var(--fg)}
+.gp-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:.06em}
+.gp-detail{flex:none;font-weight:700}
 .wall-clusters{display:flex;flex-direction:column;gap:6px;padding-top:10px;border-top:1px solid var(--hairline);min-width:0}
 .cl{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font:400 12.5px var(--font);color:var(--fg)}
 .cl>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -618,6 +712,52 @@ a:hover{color:var(--type)}
    never combined. The hard rule made typographic. */
 .big{flex-direction:row;gap:26px;align-items:baseline;flex-wrap:wrap;font:700 var(--fs-metric)/1.1 var(--font);color:var(--type)}
 .big .null,.big .muted{font:400 14px var(--font)}
+
+/* ── THE MODEL LEDGER ─────────────────────────────────────────────────────
+   Model name leftmost, launch buttons rightmost, profiles in an accordion.
+
+   These names are `l*`/`p*` rather than `m*` because `.mrow` is ALREADY the
+   profile modal's model picker (a 24px/1fr/auto grid, above). Reusing it here
+   would have made two unrelated surfaces share one rule, and a later edit to
+   either would silently deform the other. */
+.lrow-wrap{display:flex;flex-direction:column;gap:0;border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden}
+.lrow-wrap+.lrow-wrap{margin-top:8px}
+.lrow-wrap.open{border-color:var(--fg)}
+/* The row is the click target for the accordion, so it gets the pointer and a
+   hover — a control that expands must look like one. */
+.lrow{display:flex;align-items:center;gap:12px;padding:11px 13px;cursor:pointer;min-width:0;background:var(--bg-2)}
+.lrow:hover{background:color-mix(in srgb, var(--fg) 5%, var(--bg-2))}
+.lrow-wrap.open .lrow{background:var(--bg);border-bottom:1px solid var(--hairline)}
+.lcaret{color:var(--dim);font-size:11px;width:10px;flex:none}
+/* THE MODEL NAME IS THE ANCHOR of the row: it is the only thing at full
+   contrast and full weight, so a four-row ledger scans by model. */
+.lname{font:700 13px/1.3 var(--font);color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.lprof{font:400 11.5px var(--font);color:var(--dim);white-space:nowrap}
+/* THE REFUSAL, printed under the row it belongs to. Never hidden behind a
+   tooltip: a disabled button with no visible cause is the fastest way to
+   waste an operator's time. */
+.lwhy{display:flex;flex-direction:column;gap:3px;padding:0 13px 10px 35px;font:400 11.5px/1.5 var(--font)}
+.lrow-wrap.open .lwhy{padding-top:9px}
+
+/* THE ACCORDION. */
+.lacc{padding:11px 13px 13px;background:var(--bg);display:flex;flex-direction:column;gap:7px;min-width:0}
+/* TEN COLUMNS, shared by the header and every row so they cannot drift.
+   Δ VS BASELINE is widest after the name — it is the reason the row exists. */
+.pcols,.prow{display:grid;grid-template-columns:minmax(0,1.6fr) 62px 52px 68px 62px 62px 68px 66px minmax(84px,1fr) auto;gap:10px;align-items:center;min-width:0}
+.pcols{font:600 9.5px/1 var(--font);letter-spacing:.09em;color:var(--dim);padding:0 8px 6px;border-bottom:1px solid var(--hairline)}
+/* CLAMPED, NOT PRE-ALLOCATED: the well is sized to the rows that exist, up to
+   ten, and only then scrolls. A fixed height would reserve empty space on a
+   ledger with one profile and imply nine more are missing. */
+.pscroll{display:flex;flex-direction:column;gap:2px;max-height:calc(var(--clamp) * 34px);overflow-y:auto;overscroll-behavior:contain}
+.prow{padding:7px 8px;border-radius:var(--radius-sm);font:400 11.5px/1.35 var(--font);color:var(--type)}
+.prow:hover{background:var(--bg-2)}
+.pname{font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pact{display:flex;justify-content:flex-end}
+.pwhy{padding:0 8px 6px 8px;font:400 11px/1.5 var(--font)}
+/* ORPHANED PROFILES. Dashed + dim: present and accounted for, but not a live
+   control surface — nothing can be launched under them. */
+.lorph{margin-top:10px;padding:10px 12px;border:1px dashed var(--border-strong);border-radius:var(--radius-md);display:flex;flex-direction:column;gap:5px}
+.lorph-row{display:flex;gap:10px;align-items:baseline;font:400 11.5px/1.4 var(--font)}
 
 /* ── LIVE RUN ─────────────────────────────────────────────────────────────
    TWO columns: spine | feed. The third column (extraction) was removed in
@@ -838,6 +978,33 @@ a:hover{color:var(--type)}
 </style>
 </head>
 <body>
+<!--
+  ── THE VENDORED RUNTIME ──────────────────────────────────────────────────
+  Preact + hooks + htm, 36KB total, served from this image. NO CDN and NO
+  network fetch: the board must render on a machine with no internet, which is
+  a stated property of this artifact, not a preference. A CDN would make the
+  board a blank page the moment the network hiccups — unacceptable on a live
+  stream.
+
+  THE IMPORT MAP EXISTS BECAUSE preact-hooks.mjs IMPORTS THE BARE SPECIFIER
+  "preact", which a browser cannot resolve on its own. The alternative was
+  rewriting the library's source to a relative path; that is a fork of a
+  dependency, and it would have to be redone by hand on every upgrade. A map
+  is declarative, visible here, and survives `npm pack` of a newer version
+  unchanged.
+
+  NO BUILD STEP. These are the published ESM builds, copied verbatim. There is
+  still no package.json and no `npm install` in the image.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "preact": "/vendor/preact.mjs",
+    "preact/hooks": "/vendor/preact-hooks.mjs",
+    "htm": "/vendor/htm.mjs"
+  }
+}
+</script>
 <div id="root"></div>
 <script type="module" src="./board.js"></script>
 </body>

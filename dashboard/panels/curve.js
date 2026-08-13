@@ -83,9 +83,27 @@ function body(s, state, M) {
     );
   }
 
+  if (state === "baseline_pending") {
+    // NOT A FAILURE. The floor exists and has not reported a measurement yet —
+    // either scheduled and not started, or running with its first attempt still
+    // open. Rendered as the designed "not measured yet" state, never as the
+    // void-instrument state: claiming an instrument failure about a healthy
+    // running cell is the exact defect this state was split out to fix.
+    const b = s.baseline ?? {};
+    const running = b.state === "running";
+    return frame(
+      running ? "baseline is running · no measurement yet" : "baseline scheduled · not started",
+      running
+        ? "The OFF cell is in flight. Turns are not final until the cell closes."
+        : "The OFF cell is scheduled and has produced no attempt record yet.",
+      "A provisional total is not a floor. The curve draws nothing until the baseline closes — that is the wait, not a fault.",
+    );
+  }
+
   if (state === "baseline_void") {
-    // A floor exists but the harness itself refuses to score it. Drawing a
-    // curve against it would measure every ON run against a transport failure.
+    // A floor exists, TERMINATED, and the harness itself refuses to score it.
+    // Drawing a curve against it would measure every ON run against a
+    // transport failure.
     const b = s.baseline ?? {};
     return frame(
       "baseline is void-instrument · no valid floor",
@@ -226,6 +244,11 @@ function footer(s, state, M) {
 
   let verdict;
   if (state === "no_baseline") verdict = "arm an OFF run — it is the only cell that can be first";
+  else if (state === "baseline_pending")
+    verdict =
+      s.baseline?.state === "running"
+        ? "baseline running — the floor is not measured until the cell closes"
+        : "baseline scheduled — no measurement yet";
   else if (state === "baseline_void") verdict = "no valid floor — re-run the baseline before any ON run";
   else if (state === "baseline_only") verdict = "floor established · no ON run yet";
   else if (state === "n1_on") verdict = "one ON run — a single delta, stated as a single delta";

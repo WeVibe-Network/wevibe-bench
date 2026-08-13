@@ -1115,7 +1115,17 @@ class BackgammonRunner(AgentRunner):
         agent: str = "build",
         logger: Any = None,
         progress: Callable[[str], None] | None = None,
+        gate_roster_path: Path | str | None = None,
     ) -> None:
+        # WO-GATE-ROSTER: the campaign's gate roster, written once at cell start
+        # by the sequencer. Passed to `report.mjs` so it can report which gates
+        # did NOT run. None is legitimate (a run predating the artifact); the
+        # gate report then says so rather than inferring an empty suite.
+        self.gate_roster_path = (
+            Path(gate_roster_path).expanduser().resolve()
+            if gate_roster_path is not None
+            else None
+        )
         self.task_dir = Path(task_dir).expanduser().resolve()
         self.work_root = Path(work_root).expanduser().resolve()
         self.work_root.mkdir(parents=True, exist_ok=True)
@@ -1509,6 +1519,7 @@ class BackgammonRunner(AgentRunner):
                     termination_reason = "attempts_exhausted_by_budget"
                 else:
                     self._append_user_event(
+                        kind="chunk",
                         run_label=run_label,
                         sidecar_path=user_events_path,
                         attempt=1,
@@ -1646,11 +1657,56 @@ class BackgammonRunner(AgentRunner):
                 self._progress(
                     f"PROGRESS run_label={run_label} step=gate-attempt-start attempt={attempt} target={worktree}"
                 )
-                report = self._run_gate_report(
-                    worktree=worktree,
-                    report_path=report_json,
-                    log_path=gate_log,
-                )
+                try:
+                    report = self._run_gate_report(
+                        worktree=worktree,
+                        report_path=report_json,
+                        log_path=gate_log,
+                    )
+                except GateTimeoutError as exc:
+                    # A STALL IS NOT A VERDICT (WO-FEEDBACK-1).
+                    #
+                    # This exception was raised and never caught anywhere in the
+                    # repo, so a timed-out gate propagated out of run_cell and
+                    # ABORTED THE CAMPAIGN. The evidence existed (gate log,
+                    # `step=gate-timeout`) but never reached the scored
+                    # artifacts, so the canonical impractical-not-impossible
+                    # event was the one outcome the record could not express.
+                    #
+                    # The gate was KILLED: nothing was measured. That is not the
+                    # model failing, and it must never be recorded as such —
+                    # hence its own termination_reason, and an
+                    # `attempts_to_green` that says so in words rather than
+                    # borrowing FAIL.
+                    verdict = "FAIL"
+                    attempts_to_green = "GATE_TIMEOUT"
+                    termination_reason = "gate_timeout"
+                    self._progress(
+                        f"PROGRESS run_label={run_label} step=gate-timeout-recorded "
+                        f"attempt={attempt} termination_reason=gate_timeout detail={exc}"
+                    )
+                    if _worker_exit_annot != "harness_error":
+                        attempt_reports.append(
+                            {
+                                "attempt": attempt,
+                                "verdict": "FAIL",
+                                "conformed": False,
+                                "n_problems": 0,
+                                # Empty, NOT populated with the suite: no gate
+                                # failed, the runner was killed before it could
+                                # say. Inventing failures here would attribute a
+                                # harness death to the model.
+                                "failed_gates": [],
+                                # None, not [] — "not published" rather than
+                                # "published and empty" (invariants I-2 / I-4).
+                                "gate_results": None,
+                                "gate_totals": None,
+                                "gate_timeout": True,
+                                "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
+                                "parity_pending": True,
+                            }
+                        )
+                    break
                 final_report = report
 
                 attempt_verdict = str(report.get("verdict", "FAIL"))
@@ -1658,6 +1714,14 @@ class BackgammonRunner(AgentRunner):
                 problems = report.get("problems") if isinstance(report.get("problems"), list) else []
                 failed_gates_raw = report.get("failed_gates")
                 failed_gates = [str(item) for item in failed_gates_raw] if isinstance(failed_gates_raw, list) else []
+                # WO-GATE-ROSTER. Carried through as-published, or None when the
+                # gate runner did not emit them (no roster, or an older report).
+                # None and [] mean different things here and must stay distinct:
+                # [] would assert "the suite ran and held no gates".
+                gate_results_raw = report.get("gate_results")
+                gate_results = gate_results_raw if isinstance(gate_results_raw, list) else None
+                gate_totals_raw = report.get("gate_totals")
+                gate_totals = gate_totals_raw if isinstance(gate_totals_raw, dict) else None
 
                 if _worker_exit_annot != "harness_error":
                     attempt_reports.append(
@@ -1667,6 +1731,8 @@ class BackgammonRunner(AgentRunner):
                             "conformed": conformed,
                             "n_problems": len(problems),
                             "failed_gates": failed_gates,
+                            "gate_results": gate_results,
+                            "gate_totals": gate_totals,
                             "attempt_cost_usd": float(attempt_costs_usd.get(attempt, 0.0)),
                             # Scored cell whose metering awaits parity confirmation against the
                             # first scored cell / the proxy log before it is treated as data.
@@ -1836,6 +1902,7 @@ class BackgammonRunner(AgentRunner):
                             cumulative_cost_usd=cell_cost_usd,
                         )
                         self._append_user_event(
+                            kind="pass_verdict",
                             run_label=run_label,
                             sidecar_path=user_events_path,
                             attempt=next_attempt,
@@ -1908,13 +1975,25 @@ class BackgammonRunner(AgentRunner):
                     for p in problems
                     if isinstance(p, dict) and str(p.get("check", "")).strip()
                 ]
+                # THE GRADIENT (WO-FEEDBACK-1): a gate that ALSO failed last
+                # attempt gets one line of observed evidence attached, so the
+                # message the model receives actually changes when its fix did
+                # not work. Keyed on the raw gate id — the same strings
+                # `failed_gates` carries — so the match is exact.
+                repeat_checks = (
+                    set(attempt_reports[-2]["failed_gates"])
+                    & set(attempt_reports[-1]["failed_gates"])
+                    if len(attempt_reports) >= 2
+                    else set()
+                )
                 feedback = self._build_feedback_prompt(
-                    checks=feedback_checks,
+                    problems=problems,
                     had_pass_verdict=bool(newly_passing),
+                    repeat_checks=repeat_checks,
                 )
                 self._progress(
                     f"PROGRESS run_label={run_label} step=feedback-problems-only-built attempt={attempt} "
-                    f"checks={len(feedback_checks)}"
+                    f"checks={len(feedback_checks)} repeats={len(repeat_checks)}"
                 )
                 self._progress(
                     f"PROGRESS run_label={run_label} step=feedback-injection attempt={attempt} "
@@ -1928,6 +2007,7 @@ class BackgammonRunner(AgentRunner):
                 )
 
                 self._append_user_event(
+                    kind="feedback",
                     run_label=run_label,
                     sidecar_path=user_events_path,
                     attempt=next_attempt,
@@ -2576,6 +2656,61 @@ class BackgammonRunner(AgentRunner):
         """Single-text rendering of the chunk plan (stdout fallback path only)."""
         return "\n\n---\n\n".join(chunks)
 
+    # ── FEEDBACK VOICE (WO-FEEDBACK-1) ───────────────────────────────────────
+    #
+    # The benchmark's fiction is that a USER is telling the model what is still
+    # broken. Everything the model receives must read that way, because a model
+    # that recognises an automated grader loop can optimise toward test names
+    # instead of toward the product — which is a different measurement than the
+    # one this instrument claims to take.
+    #
+    # Grader-internal identity (`[G05]`, `[F01]`, `conformance:`, `REQ-*`) is
+    # therefore STRIPPED from the delivered text. It is NOT stripped from the
+    # artifacts: `failed_gates`, `gate_results` and the roster keep the exact
+    # tokens, so the board and every scorecard still address gates precisely.
+    # The model hears a human; the record keeps the ids.
+
+    _GATE_TOKEN_RE = re.compile(r"^\s*\[[A-Z]+[0-9]*\]\s*")
+    _REQ_PREFIX_RE = re.compile(r"^\s*REQ-[A-Z0-9-]+(?:/\S+)?\s*[—–-]\s*")
+    _PHASE_PREFIX_RE = re.compile(r"^\s*(?:conformance|backend|frontend):")
+    # Absolute paths and stack frames in an assertion message point at the gate
+    # files, which the worker cannot read (`external_directory: deny`). Leaving
+    # them in only invites turns wasted trying.
+    _PATH_RE = re.compile(r"(?:file://)?/\S+")
+
+    @classmethod
+    def _humanize_check(cls, check: str) -> str:
+        """Render a gate id as the phrase a person would actually say.
+
+        `[G05] REQ-HIGHER-DIE — use higher die` becomes `use higher die`.
+        Falls back to the original string rather than to an empty one: a gate
+        the model cannot be told about is worse than one told awkwardly.
+        """
+        text = str(check or "").strip()
+        text = cls._PHASE_PREFIX_RE.sub("", text, count=1)
+        text = cls._GATE_TOKEN_RE.sub("", text, count=1)
+        text = cls._REQ_PREFIX_RE.sub("", text, count=1)
+        text = " ".join(text.split())
+        return text or " ".join(str(check or "").split())
+
+    @classmethod
+    def _sanitize_observed(cls, observed: str, *, limit: int = 160) -> str:
+        """The one line of evidence a person would quote back.
+
+        First line only, host paths removed, bounded. Enough to say WHAT went
+        wrong without pasting a stack trace no user would paste.
+        """
+        first = str(observed or "").split("\n", 1)[0]
+        # vitest appends its comparator as a trailing `// Object.is equality`
+        # note. It is runner furniture, not evidence.
+        first = first.split(" // ", 1)[0]
+        first = cls._PATH_RE.sub("", first)
+        first = first.replace("AssertionError:", "").strip()
+        first = " ".join(first.split())
+        if len(first) > limit:
+            first = f"{first[:limit].rstrip()}…"
+        return first
+
     @staticmethod
     def _build_pass_verdict(*, newly_passing: list[str]) -> str:
         if not newly_passing:
@@ -2585,9 +2720,12 @@ class BackgammonRunner(AgentRunner):
         seen: set[str] = set()
         for item in newly_passing:
             first_line = str(item).split("\n", 1)[0]
-            sanitized = " ".join(first_line.split())
+            sanitized = BackgammonRunner._humanize_check(first_line)
             if len(sanitized) > 80:
-                sanitized = sanitized[:80]
+                # Trim at a word boundary and mark it. The previous hard slice
+                # cut mid-word and left a dangling space — a tell that no human
+                # wrote the line.
+                sanitized = f"{sanitized[:80].rsplit(' ', 1)[0]}…"
             if not sanitized or sanitized in seen:
                 continue
             seen.add(sanitized)
@@ -2605,32 +2743,80 @@ class BackgammonRunner(AgentRunner):
             joined = f"{joined} and {remaining} more"
         return f"That fixed it — {joined} all pass now."
 
-    @staticmethod
-    def _build_feedback_prompt(*, checks: list[str], had_pass_verdict: bool = False) -> str:
+    @classmethod
+    def _build_feedback_prompt(
+        cls,
+        *,
+        problems: list[dict[str, Any]] | None = None,
+        checks: list[str] | None = None,
+        had_pass_verdict: bool = False,
+        repeat_checks: set[str] | None = None,
+    ) -> str:
+        """Compose the message the model receives after a failed attempt.
+
+        THE GRADIENT (WO-FEEDBACK-1). Previously this listed gate names and
+        nothing else, so a gate failing in attempt 2 and again in attempt 3
+        produced BYTE-IDENTICAL text. A failed fix therefore returned zero new
+        information and the model could not distinguish "closer" from "no
+        change" — across a 3-attempt ceiling the loop had no gradient at all,
+        which capped the achievable score for reasons that had nothing to do
+        with capability.
+
+        The escalation is deliberate:
+          · FIRST failure  — the requirement only. Can the model infer the
+            implementation from the requirement? That is the thing being
+            measured, and handing over the assertion would answer it for free.
+          · REPEAT failure — the requirement PLUS one line of what was actually
+            observed. The model already had its chance to infer; continuing to
+            withhold measures patience, not capability.
+
+        Evidence is one sanitised line, never a stack trace — a user quoting
+        back what they saw, not a CI job pasting a log.
+        """
         header = (
             "The rest are still failing — fix the implementation so they pass. Do not explain, just edit the code."
             if had_pass_verdict
             else "These are still failing — fix the implementation so they pass. Do not explain, just edit the code."
         )
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for item in checks:
-            first_line = str(item).split("\n", 1)[0]
-            sanitized = " ".join(first_line.split())
-            if len(sanitized) > 120:
-                sanitized = sanitized[:120]
-            if not sanitized or sanitized in seen:
-                continue
-            seen.add(sanitized)
-            deduped.append(sanitized)
+
+        # Accept either the rich problem records or a bare check list, so older
+        # callers and tests keep working unchanged.
+        records: list[dict[str, Any]]
+        if problems is not None:
+            records = [p for p in problems if isinstance(p, dict)]
+        else:
+            records = [{"check": c} for c in (checks or [])]
+
+        repeats = repeat_checks or set()
 
         lines: list[str] = [header, ""]
-        if not deduped:
-            lines.append("- (gate runner reported FAIL with no itemised checks): FAILING")
-            return "\n".join(lines)
+        seen: set[str] = set()
+        rendered = 0
 
-        for label in deduped:
-            lines.append(f"- {label}: FAILING")
+        for record in records:
+            raw_check = str(record.get("check", "")).strip()
+            if not raw_check:
+                continue
+            label = cls._humanize_check(raw_check.split("\n", 1)[0])
+            if len(label) > 120:
+                label = f"{label[:120].rsplit(' ', 1)[0]}…"
+            if not label or label in seen:
+                continue
+            seen.add(label)
+
+            # The gradient: evidence only on a REPEAT failure, keyed on the raw
+            # gate id (stable) rather than the humanised label (lossy).
+            evidence = ""
+            if raw_check in repeats:
+                observed = cls._sanitize_observed(record.get("observed", ""))
+                if observed:
+                    evidence = f" — I'm still seeing: {observed}"
+
+            lines.append(f"- {label}: FAILING{evidence}")
+            rendered += 1
+
+        if rendered == 0:
+            lines.append("- something is still broken but the checks came back empty: FAILING")
         return "\n".join(lines)
 
     def _run_gate_report(self, *, worktree: Path, report_path: Path, log_path: Path) -> dict[str, Any]:
@@ -2668,6 +2854,11 @@ class BackgammonRunner(AgentRunner):
             "--out",
             str(report_path.resolve()),
         ]
+        # Only when the artifact actually exists. Passing a path to a missing
+        # file would make the report claim an unreadable roster instead of the
+        # true "this run has no roster", and those are different facts.
+        if self.gate_roster_path is not None and self.gate_roster_path.is_file():
+            gate_cmd += ["--roster", str(self.gate_roster_path)]
         gates_cwd = str((self.task_dir / "gates").resolve())
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2790,6 +2981,31 @@ class BackgammonRunner(AgentRunner):
         malformed line is ignored rather than raised.
         """
         text = line.strip()
+
+        # WO-GATE-ROSTER live signal. The gate runner announces each phase's
+        # gate SET before spawning it, so the wall can mark those gates
+        # under-test the moment the phase begins instead of waiting ~30 minutes
+        # for the attempt record. PER-PHASE-SET, not per-test: `report.mjs`
+        # spawns each runner with `spawnSync`, so a child's per-test output is
+        # buffered until the phase has already ended and could never be live.
+        #
+        # The line carries a COUNT, not ids — identity already lives in the
+        # roster the board reads, and the count is what makes roster/runner
+        # drift detectable.
+        if text.startswith("[report] gateset "):
+            fields = dict(
+                part.split("=", 1)
+                for part in text[len("[report] gateset ") :].split()
+                if "=" in part
+            )
+            phase = fields.get("phase")
+            if phase:
+                self._progress(
+                    f"PROGRESS step=gate-phase-gates phase={phase} "
+                    f"count={fields.get('count', 'unknown')} log={log_path}"
+                )
+            return
+
         if not text.startswith("[report] phase="):
             return
         fields = dict(
@@ -4279,19 +4495,44 @@ class BackgammonRunner(AgentRunner):
         sidecar_path: Path,
         attempt: int,
         text: str,
+        kind: str = "feedback",
     ) -> None:
+        """Record, VERBATIM, every message the model is told a user sent.
+
+        THIS FILE IS THE TRUTH (WO-FEEDBACK-1). It is the only place the exact
+        bytes handed to the model are preserved — the PROGRESS log carries a
+        length and a fingerprint but not the text, and the worker's own event
+        stream shows the message only as it was consumed. The control plane
+        serves this file so the TUI and the event feed show the operator what
+        the model was actually told, not a reconstruction of it.
+
+        `kind` distinguishes the three voices: `chunk` (the task itself),
+        `pass_verdict` ("that fixed it"), `feedback` ("still failing"). The UI
+        needs that separation — a chunk prompt and a failure report are not the
+        same kind of message and must not render identically.
+
+        Append-only, one JSON object per line: a run that dies mid-write leaves
+        every earlier message intact and parseable.
+        """
         payload = {
             "type": "user",
+            "kind": str(kind),
             "timestamp": int(time.time() * 1000),
             "attempt": int(attempt),
+            "chars": len(str(text)),
+            "text_fp": self._fingerprint_text(text),
             "text": str(text),
         }
         sidecar_path.parent.mkdir(parents=True, exist_ok=True)
         with sidecar_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        # The marker stays a fingerprint + length, never the body: this text is
+        # multi-line and a single-line log record cannot carry it without
+        # corrupting either the text or the log.
         self._progress(
             f"PROGRESS run_label={run_label} step=user-event-sidecar attempt={attempt} "
-            f"chars={len(text)} text_fp={self._fingerprint_text(text)} path={sidecar_path}"
+            f"kind={kind} chars={len(text)} text_fp={self._fingerprint_text(text)} "
+            f"path={sidecar_path}"
         )
 
     def _extract_event_counts(self, events_path: Path) -> tuple[int | None, int | None]:
