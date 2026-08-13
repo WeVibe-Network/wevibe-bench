@@ -50,7 +50,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -67,7 +67,11 @@ import {
 import { readRoster, CONTEXT_CHOICES } from "./roster.mjs";
 import { readRunState } from "./runstate.mjs";
 import { EventRing, subscribe } from "./events.mjs";
+import { readGateActivity } from "./gate-events.mjs";
 import { ExtractionTracker } from "./extraction.mjs";
+import { TuiMirror } from "./tui.mjs";
+import { readHold, releaseHold } from "./hold.mjs";
+import { readProfiles, createProfile, activeProfile, attachRun } from "./profiles.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -130,6 +134,15 @@ const extraction = new ExtractionTracker();
 // must not require an operator action to recover the feed.
 subscribe(`${args.serveUrl}/event`, ring);
 
+// The TUI mirror is ON-DEMAND, unlike the event feed. It costs a resident
+// `opencode attach` client, so it starts on the first poll and stops itself once
+// nothing is reading — polling IS the keepalive. It NEVER writes to the pty, so
+// it cannot disturb the live session it is showing.
+const tui = new TuiMirror({ serveUrl: args.serveUrl });
+process.on("exit", () => tui.shutdown());
+process.on("SIGINT", () => { tui.shutdown(); process.exit(0); });
+process.on("SIGTERM", () => { tui.shutdown(); process.exit(0); });
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function sendJson(res, status, body) {
@@ -160,8 +173,71 @@ async function readBody(req, cap = 64 * 1024) {
   });
 }
 
+async function readJsonOrNull(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function extractionEligibility(runLabel, sourceMode) {
+  const manifest = await readJsonOrNull(join(RUNS_ROOT, String(runLabel), "manifest.json"));
+  if (!manifest) {
+    return { ok: false, code: "complete_gate_missing", reason: `manifest not found for run_label=${runLabel}` };
+  }
+  const records = Array.isArray(manifest.session_records) ? manifest.session_records : [];
+  const candidates = records.filter((r) => r?.memory_mode === sourceMode);
+  const record = candidates.length ? candidates[candidates.length - 1] : null;
+  if (!record) {
+    return { ok: false, code: "complete_gate_missing", reason: `no ${sourceMode} session record in manifest` };
+  }
+  if (record.complete_gate !== true) {
+    return {
+      ok: false,
+      code: "complete_gate_missing",
+      reason: "extraction requires a completed-cell gate stamped on the source cell",
+    };
+  }
+  if (record.extracted_from === true) {
+    return {
+      ok: false,
+      code: "already_extracted",
+      reason: "this completed cell has already been extracted from; changing the corpus requires a new cell",
+    };
+  }
+  return { ok: true };
+}
+
+async function markExtractedFrom(runLabel, sourceMode) {
+  const path = join(RUNS_ROOT, String(runLabel), "manifest.json");
+  const manifest = await readJsonOrNull(path);
+  if (!manifest || !Array.isArray(manifest.session_records)) {
+    throw new Error(`manifest not found or missing session_records for run_label=${runLabel}`);
+  }
+  for (let i = manifest.session_records.length - 1; i >= 0; i -= 1) {
+    const record = manifest.session_records[i];
+    if (record?.memory_mode !== sourceMode) continue;
+    record.extracted_from = true;
+    manifest.updated_at = new Date().toISOString();
+    await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    return;
+  }
+  throw new Error(`no ${sourceMode} session record in manifest`);
+}
+
 /** Every precondition a start must satisfy, each with its own stated reason. */
-async function validateStart(payload, roster, run) {
+/**
+ * Validate a start request.
+ *
+ * `requireConfirm` separates the two callers. PREVIEW must run every PARAMETER
+ * check (so it can never green-light a run that start would refuse) but cannot
+ * require the confirmation token — the token is what preview EXISTS to mint, so
+ * demanding it there is circular and refuses every valid preview with
+ * `bad_confirmation`. START requires it, and that is what makes the second click
+ * meaningful.
+ */
+async function validateStart(payload, roster, run, { requireConfirm = true, profile = null } = {}) {
   const model = typeof payload?.model === "string" ? payload.model.trim() : "";
   const arm = payload?.arm === "on" || payload?.arm === "off" ? payload.arm : null;
   const org = typeof payload?.org === "string" && payload.org.trim() ? payload.org.trim() : null;
@@ -193,6 +269,30 @@ async function validateStart(payload, roster, run) {
     );
   }
 
+  // THE SUBJECT RULE. A profile freezes ONE subject model, and both arms of the
+  // measurement are that model: OFF is the floor for ON, so a stack that swaps
+  // model mid-flight produces a Δ measuring A-vs-B capability rather than memory
+  // lift. The harness catches this eventually and expensively — a model swap
+  // changes the roster hash, which invalidates the manifest (RUNBOOK §0,
+  // archive-and-rerun) — i.e. after the cell has already burned hours. Refusing
+  // at launch turns that into a one-line refusal.
+  //
+  // Enforced ONLY when a profile exists. A cell with no profile is unattributed
+  // but legitimate (the CLI case), and inventing a subject for it would be
+  // worse than having none.
+  if (profile?.subject_model && model !== profile.subject_model) {
+    return refuse(
+      "model_not_subject",
+      `profile ${profile.id} froze '${profile.subject_model}' as its subject model, and both ` +
+        `arms of the measurement must be that model — an ON cell on '${model}' measured against ` +
+        `an OFF floor on '${profile.subject_model}' yields a delta between two models' ` +
+        "capabilities, not the memory lift this stack exists to measure. To benchmark " +
+        `'${model}', freeze a new profile with it as the subject; the memory roster can be ` +
+        "the same.",
+      { subject_model: profile.subject_model, profile_id: profile.id },
+    );
+  }
+
   // ON cells extract into an org; OFF cells must not carry one. This mirrors
   // the harness's own argparse contract rather than inventing a new rule.
   if (arm === "on" && !org) {
@@ -218,7 +318,7 @@ async function validateStart(payload, roster, run) {
   }
 
   const expected = confirmationToken({ model, arm, org, context });
-  if (payload?.confirm !== expected) {
+  if (requireConfirm && payload?.confirm !== expected) {
     return refuse(
       "bad_confirmation",
       "the confirmation did not match these parameters — they changed after the " +
@@ -260,6 +360,12 @@ const server = createServer(async (req, res) => {
         extract: true,
         events: true,
         select_context: true,
+        // Profiles are STORED here (durably, frozen) but never ENFORCED — no
+        // recall request carries a producer-model allowlist. The two are
+        // separate booleans on purpose: a UI that reads one capability would
+        // otherwise imply the other.
+        profiles: true,
+        profile_enforcement: false,
         stall_threshold_s: STALL_THRESHOLD_S,
         bench_root: BENCH_ROOT,
         python_present: existsSync(PYTHON),
@@ -284,19 +390,122 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // ── GET /api/tui ─────────────────────────────────────────────────────
+    // A frame of the operator's attached view, reconstructed from a read-only
+    // pty capture. This route is the keepalive: the capture starts on the first
+    // poll and stops itself when polling stops, so a closed drawer does not
+    // leave a client attached to a live benchmark session.
+    //
+    // The session is resolved from run state rather than taken from the query
+    // string — a caller-supplied session id would let the board attach a client
+    // to an arbitrary session, and the mirror should only ever show the cell
+    // that is actually running.
+    if (path === "/api/tui" && req.method === "GET") {
+      const run = await readRunState({ runsRoot: RUNS_ROOT, launcher });
+      sendJson(res, 200, {
+        ...tui.poll(run.session_id),
+        // Stated on the surface: this is a second client, not a screen-share.
+        note: "second attach client — same session, independent scroll position",
+      });
+      return;
+    }
+
+    if (path === "/api/tui/detach" && req.method === "POST") {
+      tui.shutdown();
+      sendJson(res, 200, { ok: true, reason: "tui mirror detached and closed" });
+      return;
+    }
+
+    // ── GET /api/hold ────────────────────────────────────────────────────
+    // null means no hold file exists. If the file vanishes while being read,
+    // that is the release success path, not an error.
+    if (path === "/api/hold" && req.method === "GET") {
+      sendJson(res, 200, await readHold({ runsRoot: RUNS_ROOT }));
+      return;
+    }
+
+    // ── POST /api/hold/release ───────────────────────────────────────────
+    // Release means create release.path from hold-ui.json. It is idempotent;
+    // posting when nothing is held is harmless and returns ok.
+    if (path === "/api/hold/release" && req.method === "POST") {
+      const result = await releaseHold({ runsRoot: RUNS_ROOT });
+      sendJson(res, result.ok ? 200 : 409, result);
+      return;
+    }
+
+    // ── GET /api/profiles ────────────────────────────────────────────────
+    // The frozen memory profiles. `active` is the newest; `prior` are the
+    // earlier ones the inspector draws as a hollow overlay on the curve.
+    if (path === "/api/profiles" && req.method === "GET") {
+      sendJson(res, 200, await readProfiles(RUNS_ROOT));
+      return;
+    }
+
+    // ── POST /api/profiles/create ────────────────────────────────────────
+    // Freeze an allowlist. THIS IS THE WHOLE OPERATION.
+    //
+    // It writes one file and does NOTHING else: it does not arm a cell, open a
+    // session, or attach a TUI. That is the answer to the operator report "I
+    // created a memory profile and nothing happened" — nothing was supposed to
+    // happen, but the board never said so and the profile was not even stored.
+    // Storage is fixed here; the silence is fixed in the UI, which states
+    // CREATION SIDE EFFECTS — NONE and puts run start on its own control.
+    if (path === "/api/profiles/create" && req.method === "POST") {
+      const payload = JSON.parse((await readBody(req)) || "{}");
+      const result = await createProfile(RUNS_ROOT, {
+        // TWO axes, named separately on the wire. The old single `models` field
+        // conflated the measurement with the experiment variable; it is gone
+        // rather than aliased, because an alias would let a caller freeze a
+        // profile with no subject and never learn it.
+        subjectModel: payload?.subject_model,
+        memoryModels: payload?.memory_models,
+        stackId: typeof payload?.stack_id === "string" ? payload.stack_id : null,
+        note: typeof payload?.note === "string" ? payload.note : null,
+      });
+      sendJson(res, result.ok ? 200 : 409, result);
+      return;
+    }
+
     // ── POST /api/run/preview ────────────────────────────────────────────
     // The restatement the UI must show before START. The SERVER composes it so
     // the words the operator reads are the words the server will act on.
     if (path === "/api/run/preview" && req.method === "POST") {
       const payload = JSON.parse((await readBody(req)) || "{}");
-      const model = typeof payload.model === "string" ? payload.model : null;
-      const arm = payload.arm === "on" || payload.arm === "off" ? payload.arm : null;
-      const org = typeof payload.org === "string" && payload.org ? payload.org : null;
-      const context = Number.isFinite(payload.context) ? Number(payload.context) : null;
+      const roster = await readRoster({ proxyUrl: args.proxyUrl, runtimeUrl: args.runtimeUrl });
+
+      // PREVIEW RUNS THE SAME VALIDATION AS START.
+      // It previously minted a token for ANY payload, so an ON cell with no org
+      // returned 200 and the UI armed a confirm button for a run the server
+      // would then refuse. A preview that can green-light an impossible run is
+      // worse than no preview: it moves the refusal to after the operator has
+      // committed.
+      //
+      // The serial gate is deliberately EXCLUDED — `can_start` is a fact about
+      // right now, not about these parameters, and an operator must be able to
+      // review what they intend to run next while a cell is still in flight.
+      const run = await readRunState({ runsRoot: RUNS_ROOT, launcher });
+      // The subject rule is checked at PREVIEW too. A preview that green-lights
+      // a model the start will refuse moves the refusal to after the operator
+      // has committed — the same defect the org check was moved here to fix.
+      const check = await validateStart(
+        payload,
+        roster,
+        { ...run, can_start: true, blocked_reason: null },
+        { requireConfirm: false, profile: await activeProfile(RUNS_ROOT) },
+      );
+      if (check.ok === false) {
+        sendJson(res, 400, check);
+        return;
+      }
+
+      const { model, arm, org, context } = check;
       sendJson(res, 200, {
         ok: true,
         token: confirmationToken({ model, arm, org, context }),
         restatement: restatement({ model, arm, org, context }),
+        // Stated so the UI can show the operator that the serial rule will
+        // block this run, WITHOUT pretending the parameters are invalid.
+        blocked_now: run.can_start === true ? null : (run.blocked_reason ?? "a cell is already in flight"),
       });
       return;
     }
@@ -312,7 +521,24 @@ const server = createServer(async (req, res) => {
       }
 
       const run = await readRunState({ runsRoot: RUNS_ROOT, launcher });
-      const check = await validateStart(payload, roster, run);
+
+      // Read ONCE and reuse for both the subject check and the attribution
+      // below. Reading twice would let the two disagree if a profile were
+      // frozen in between — the cell would be validated against one profile and
+      // recorded against another.
+      //
+      // A read failure is NOT fatal here: it is carried and reported in the
+      // attribution, because failing to read a profile must not block a run
+      // the operator is entitled to start.
+      let activeProf = null;
+      let activeProfErr = null;
+      try {
+        activeProf = await activeProfile(RUNS_ROOT);
+      } catch (err) {
+        activeProfErr = String(err?.message ?? err);
+      }
+
+      const check = await validateStart(payload, roster, run, { profile: activeProf });
       if (!check.ok) {
         sendJson(res, 409, check);
         return;
@@ -379,6 +605,45 @@ const server = createServer(async (req, res) => {
         log_path: logPath,
       };
 
+      // ATTRIBUTION, recorded from what this service actually did. The run is
+      // attached to whichever profile is active at launch, which is the only
+      // moment the association is knowable — a cell launched at the CLI has no
+      // profile and must never be swept into one after the fact.
+      //
+      // BEST-EFFORT AND NON-FATAL: the process is already running. Failing the
+      // response now would tell the operator the run did not start when it did,
+      // which is the more damaging error. The failure is REPORTED in the
+      // payload, never swallowed.
+      let attribution = null;
+      try {
+        const active = activeProf;
+        if (activeProfErr) {
+          throw new Error(`profile store unreadable at launch: ${activeProfErr}`);
+        }
+        if (active) {
+          const att = await attachRun(RUNS_ROOT, active.id, {
+            log_name: logPath.split("/").pop(),
+            arm,
+            model,
+            org,
+            context,
+            pid: child.pid,
+            started_at: launcher.started_at,
+          });
+          attribution = att.ok
+            ? { profile_id: active.id, recorded: true, reason: null }
+            : { profile_id: active.id, recorded: false, reason: att.reason };
+        } else {
+          attribution = {
+            profile_id: null,
+            recorded: false,
+            reason: "no profile exists — this cell is unattributed and will not appear in any profile's history",
+          };
+        }
+      } catch (err) {
+        attribution = { profile_id: null, recorded: false, reason: String(err?.message ?? err) };
+      }
+
       sendJson(res, 200, {
         ok: true,
         pid: child.pid,
@@ -387,6 +652,7 @@ const server = createServer(async (req, res) => {
         arm,
         org,
         context,
+        attribution,
         restatement: restatement({ model, arm, org, context }),
       });
       return;
@@ -406,13 +672,55 @@ const server = createServer(async (req, res) => {
     // Polled snapshot of the mapped ring, OLDEST-FIRST (it is a transcript,
     // not a ticker). `cursor` lets the board fetch only what is new without
     // holding a second SSE connection open.
+    //
+    // HARNESS GRADING ROWS ARE MERGED IN HERE (WO-GRADE-VIS-1). They come from
+    // a different source than every other row — the harness's own PROGRESS
+    // lines in the run log, not the worker's SSE stream — because during
+    // grading the worker is idle BY DESIGN and its stream says nothing. Without
+    // them the feed goes silent for the length of a grade (measured at 32
+    // minutes on 2026-08-12) and a working run is indistinguishable from a
+    // wedged one.
+    //
+    // They are APPENDED rather than interleaved by timestamp: grading happens
+    // between agent turns, so appending preserves true chronology, and the
+    // harness's naive local timestamps cannot be compared against the worker's
+    // epoch times without reintroducing the timezone defect documented at
+    // contract.mjs STALL_THRESHOLD_S.
     if (path === "/api/events" && req.method === "GET") {
       const raw = Number(url.searchParams.get("limit") ?? EVENT_RENDER_CAP);
       const limit = Math.min(EVENT_RENDER_CAP, raw || EVENT_RENDER_CAP);
       const since = Number(url.searchParams.get("since") ?? 0) || 0;
       const kindsRaw = url.searchParams.get("kinds");
       const kinds = kindsRaw ? kindsRaw.split(",").filter(Boolean) : null;
-      sendJson(res, 200, ring.snapshot({ limit, kinds, since }));
+      const snapshot = ring.snapshot({ limit, kinds, since });
+
+      // Never let a log-read failure take the agent feed down: grading rows are
+      // additive instrumentation, and the feed must degrade to exactly its
+      // previous behaviour if they are unavailable.
+      let gate = { rows: [], status: null };
+      try {
+        gate = await readGateActivity(RUNS_ROOT);
+      } catch (err) {
+        gate = { rows: [], status: null, error: String(err?.message ?? err) };
+      }
+
+      const gateRows = kinds && kinds.length
+        ? gate.rows.filter((r) => kinds.includes(r.kind))
+        : gate.rows;
+
+      // Counts must reflect what the operator can filter on, including the
+      // grading rows — a chip whose count is always 0 reads as "never happens".
+      const counts = { ...snapshot.counts };
+      for (const r of gate.rows) counts[r.kind] = (counts[r.kind] ?? 0) + 1;
+
+      sendJson(res, 200, {
+        ...snapshot,
+        events: [...snapshot.events, ...gateRows.slice(-limit)],
+        counts,
+        // The live grading verdict: which phase is open, how long it has been
+        // silent, and whether that exceeds the alarm threshold.
+        grading: gate.status,
+      });
       return;
     }
 
@@ -469,6 +777,12 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      const eligibility = await extractionEligibility(runLabel, sourceMode);
+      if (!eligibility.ok) {
+        sendJson(res, 409, refuse(eligibility.code, eligibility.reason));
+        return;
+      }
+
       // An ON cell extracts into an org; the script itself refuses to run
       // without one ("--org-id MUST be explicitly pinned ... no silent
       // default"). Failing here with that reason is better than letting the
@@ -492,6 +806,7 @@ const server = createServer(async (req, res) => {
         sourceMode,
         orgId,
         model,
+        onComplete: () => markExtractedFrom(runLabel, sourceMode),
       });
 
       sendJson(res, started.ok ? 200 : 409, started.ok ? { ok: true, model } : started);

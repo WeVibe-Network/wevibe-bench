@@ -119,6 +119,7 @@ export class ExtractionTracker {
     this.n_memories = null;
     this.exit_code = null;
     this._buf = "";
+    this._completed = false;
   }
 
   get running() {
@@ -166,7 +167,7 @@ export class ExtractionTracker {
    * they are argv entries, not shell words. This is the single most important
    * property of this function.
    */
-  start({ python, script, cwd, runLabel, sourceMode, orgId, model, env }) {
+  start({ python, script, cwd, runLabel, sourceMode, orgId, model, env, onComplete }) {
     if (this.running) {
       return { ok: false, code: "run_in_flight", reason: "an extraction is already running" };
     }
@@ -192,6 +193,7 @@ export class ExtractionTracker {
     this.n_memories = null;
     this.exit_code = null;
     this._buf = "";
+    this._completed = false;
 
     let child;
     try {
@@ -234,6 +236,11 @@ export class ExtractionTracker {
       // stage records carry the distinction.
       const gated = this.records.some((r) => r.state === "gated");
       this.state = gated ? "gated" : code === 0 ? "complete" : "failed";
+      if (this.state === "complete" && this.status === "ok" && typeof onComplete === "function") {
+        Promise.resolve(onComplete()).catch((err) => {
+          this.reason = `extraction completed but source-cell stamp failed: ${String(err?.message ?? err)}`;
+        });
+      }
       if (this.state === "failed" && !this.reason) {
         this.reason = `extraction exited ${code} without a stated reason`;
       }
@@ -241,6 +248,7 @@ export class ExtractionTracker {
 
     return { ok: true };
   }
+
 }
 
 /** Declared stage ids, for the drift test against the Python emitter. */

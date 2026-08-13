@@ -32,7 +32,7 @@
 // corrupt the measurement it is displaying.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { EVENT_MAP, EVENT_TEXT_MAX, EVENT_RING_MAX } from "./contract.mjs";
+import { EVENT_MAP, EVENT_IGNORED, PART_KIND, EVENT_TEXT_MAX, EVENT_RING_MAX } from "./contract.mjs";
 
 /** Truncate payload text and report whether it was cut. Never silently. */
 function clipText(s) {
@@ -49,99 +49,176 @@ function clipText(s) {
 export function mapEvent(raw) {
   const type = typeof raw?.type === "string" ? raw.type : null;
   if (!type) return null;
-  const kind = EVENT_MAP[type];
-  if (!kind) return null;
+  if (EVENT_IGNORED.has(type)) return null;
+  const envelopeKind = EVENT_MAP[type];
+  if (!envelopeKind) return null;
 
   const p = raw.properties ?? {};
-  const at = Number.isFinite(p.timestamp) ? p.timestamp : null;
   const base = {
     id: typeof raw.id === "string" ? raw.id : null,
-    kind,
+    kind: envelopeKind,
     type,
-    at,
+    at: null,
     session_id: typeof p.sessionID === "string" ? p.sessionID : null,
     tool: null,
     file: null,
+    name: null,
+    detail: null,
     text: null,
     truncated: false,
   };
 
   switch (type) {
-    case "session.next.tool.called":
-    case "session.next.tool.progress":
-    case "session.next.tool.success":
-    case "session.next.tool.failed": {
-      base.tool = typeof p.tool === "string" ? p.tool : null;
-      // Tool INPUT is deliberately summarised, not dumped: it can contain an
-      // entire file body. The board shows what tool ran, not its payload.
-      const detail =
-        type === "session.next.tool.failed"
-          ? errorText(p.error)
-          : type === "session.next.tool.called"
-            ? summariseInput(p.input)
-            : null;
-      Object.assign(base, clipText(detail));
-      // A failed tool call is an error the operator must see, even though it
-      // arrives on the tool channel.
-      if (type === "session.next.tool.failed") base.kind = "error";
-      return base;
-    }
+    // The substantive channel. The ENVELOPE says only "a part changed" — the
+    // Part's own `type` is what makes it a tool call, a thought, or a step, so
+    // the kind is refined here rather than read off the envelope.
+    case "message.part.updated":
+      return fromPart(base, p.part, p.time);
 
-    case "file.edited": {
+    case "file.edited":
+      base.name = "edit";
       base.file = typeof p.file === "string" ? p.file : null;
-      return base;
-    }
-
-    case "session.next.reasoning.delta": {
-      Object.assign(base, clipText(p.delta));
-      return base;
-    }
-    case "session.next.reasoning.ended": {
-      Object.assign(base, clipText(p.text));
-      return base;
-    }
-    case "session.next.reasoning.started":
+      base.detail = base.file;
       return base;
 
     case "session.error":
-    case "session.next.step.failed": {
+      base.kind = "error";
+      base.name = "error";
       Object.assign(base, clipText(errorText(p.error)));
+      base.detail = base.text;
+      return base;
+
+    case "session.idle":
+      base.name = "idle";
+      base.detail = "session went idle";
+      return base;
+
+    case "session.compacted":
+      base.name = "compacted";
+      base.detail = "context compacted";
+      return base;
+
+    // Carries the run's own status line. Useful, but only when it actually
+    // says something — a status event with no status is not a row.
+    case "session.status": {
+      const s = typeof p.status === "string" ? p.status : null;
+      if (!s) return null;
+      base.name = "status";
+      Object.assign(base, clipText(s));
+      base.detail = base.text;
       return base;
     }
 
-    case "session.next.step.ended": {
-      const t = p.tokens ?? {};
+    default:
+      return null;
+  }
+}
+
+/**
+ * Refine a `message.part.updated` into a feed row using the Part's own type.
+ *
+ * Returns null for parts that are real but must not become rows — `text` is
+ * assistant prose that belongs in the TRANSCRIPT tab, and a part type we do not
+ * recognise is counted as unmapped rather than rendered as a mystery row.
+ */
+function fromPart(base, part, time) {
+  if (!part || typeof part !== "object") return null;
+  const pt = typeof part.type === "string" ? part.type : null;
+  const kind = pt ? PART_KIND[pt] : null;
+  if (!kind) return null;
+
+  base.kind = kind;
+  base.type = `${base.type}:${pt}`;
+  base.id = typeof part.id === "string" ? part.id : base.id;
+  base.session_id = typeof part.sessionID === "string" ? part.sessionID : base.session_id;
+  base.at = partTime(part, time);
+
+  switch (pt) {
+    case "tool": {
+      base.tool = typeof part.tool === "string" ? part.tool : null;
+      base.name = base.tool ?? "tool";
+      const st = part.state ?? {};
+      const status = typeof st.status === "string" ? st.status : null;
+
+      // A failed tool call is an error the operator must see, even though it
+      // arrives on the tool channel.
+      if (status === "error") {
+        base.kind = "error";
+        Object.assign(base, clipText(errorText(st.error) ?? "tool failed"));
+        base.detail = base.text;
+        return base;
+      }
+
+      // Tool INPUT is deliberately summarised, not dumped: it can carry an
+      // entire file body. The board shows WHAT ran, not its payload.
+      const summary = summariseInput(st.input);
+      Object.assign(base, clipText(summary));
+      base.detail = [status, base.text].filter(Boolean).join(" · ") || status;
+      return base;
+    }
+
+    case "reasoning": {
+      // Reasoning text streams in via deltas we drop; the completed part is
+      // often empty at the moment it updates. Duration is the honest signal.
+      const ms = spanMs(part.time);
+      base.name = "thinking";
+      base.detail = ms == null ? "reasoning" : `reasoning ${Math.round(ms / 1000)}s`;
+      return base;
+    }
+
+    case "patch": {
+      const files = Array.isArray(part.files) ? part.files : [];
+      base.name = "patch";
+      base.file = files[0] ?? null;
+      base.detail = files.length
+        ? (files.length === 1 ? files[0] : `${files.length} files · ${files[0]}`)
+        : "patch";
+      return base;
+    }
+
+    case "step-start":
+      base.name = "step";
+      base.detail = "step started";
+      return base;
+
+    case "step-finish": {
+      const t = part.tokens ?? {};
       const bits = [];
-      if (typeof p.finish === "string") bits.push(p.finish);
+      if (typeof part.reason === "string") bits.push(part.reason);
       if (Number.isFinite(t.input)) bits.push(`in ${t.input}`);
       if (Number.isFinite(t.output)) bits.push(`out ${t.output}`);
       if (Number.isFinite(t.reasoning)) bits.push(`think ${t.reasoning}`);
-      Object.assign(base, clipText(bits.join(" · ")));
+      base.name = "step";
+      base.detail = bits.join(" · ") || "step finished";
       return base;
     }
-
-    case "session.next.step.started": {
-      Object.assign(base, clipText(typeof p.model === "string" ? p.model : null));
-      return base;
-    }
-
-    case "session.next.retried": {
-      Object.assign(base, clipText(`attempt ${p.attempt ?? "?"} — ${errorText(p.error) ?? "retry"}`));
-      return base;
-    }
-
-    case "session.next.compaction.started":
-    case "session.next.compaction.ended": {
-      Object.assign(base, clipText(typeof p.reason === "string" ? p.reason : null));
-      return base;
-    }
-
-    case "session.idle":
-      return base;
 
     default:
-      return base;
+      return null;
   }
+}
+
+/**
+ * Best-effort event time. Parts carry `time.start`/`time.end`; the envelope
+ * carries its own `time`. Null is returned rather than Date.now() — stamping a
+ * received-at time onto an event that never had one would fabricate ordering
+ * evidence the feed then displays as fact.
+ */
+function partTime(part, envelopeTime) {
+  const t = part?.time;
+  if (t && typeof t === "object") {
+    if (Number.isFinite(t.end)) return t.end;
+    if (Number.isFinite(t.start)) return t.start;
+  }
+  if (Number.isFinite(envelopeTime)) return envelopeTime;
+  return null;
+}
+
+function spanMs(t) {
+  if (!t || typeof t !== "object") return null;
+  if (!Number.isFinite(t.start)) return null;
+  if (!Number.isFinite(t.end)) return null;
+  return t.end - t.start;
 }
 
 /** Pull a human string out of the several error shapes upstream emits. */

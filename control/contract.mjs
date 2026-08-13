@@ -244,7 +244,40 @@ export const EVENT_KINDS = /** @type {const} */ ([
   "thinking", // reasoning text
   "error",    // a genuine error, never a normal retry
   "lifecycle",// step/session boundaries — quiet, structural
+  "harness",  // the HARNESS itself — grading phases. see below.
 ]);
+
+/**
+ * WHY `harness` EXISTS AS A KIND (WO-GRADE-VIS-1).
+ *
+ * Every other kind describes what the AGENT did, sourced from the worker's
+ * `opencode serve` event stream. But between attempts the agent is IDLE BY
+ * DESIGN while the harness grades its work — so the agent feed correctly goes
+ * silent, and nothing on the board distinguished "grading" from "wedged".
+ * Measured 2026-08-12: a 32-minute grade during which the operator had no
+ * signal at all and had to ask an agent to inspect process stacks.
+ *
+ * These rows come from the harness's own PROGRESS lines (`step=gate-phase-*`),
+ * tailed from the run log rather than the serve stream. They share the feed
+ * because grading and agent work are one chronological narrative — the whole
+ * value is seeing the handoff — and carry their own kind so they can be
+ * filtered out when only agent activity is wanted.
+ */
+
+/**
+ * Grading stall ALARM threshold, in seconds.
+ *
+ * DELIBERATELY MUCH SMALLER than the harness's own gate timeout
+ * (DEFAULT_GATE_TIMEOUT_S = 3600s, backgammon.py). Two different jobs:
+ * this is a VISUAL signal that must fire early so a human can look, while the
+ * timeout is a DESTRUCTIVE kill that must fire late so it never truncates a
+ * slow-but-working grade. Alarm << timeout, by construction.
+ *
+ * Evidence for 600: healthy grades measured at 45s and 113s; the pathological
+ * one ran 1918s. 600s is >5x the healthy wall (no false alarms) and would have
+ * surfaced the 2026-08-12 stall ~22 minutes before it actually ended.
+ */
+export const GATE_STALL_THRESHOLD_S = 600;
 
 /**
  * Upstream event type -> board kind. Anything absent from this map is counted
@@ -256,24 +289,72 @@ export const EVENT_KINDS = /** @type {const} */ ([
  * the fail colour would read as alarm at exactly the moment the instrument is
  * behaving correctly.
  */
+/**
+ * WHICH EVENTS THIS WORKER ACTUALLY EMITS — VERIFIED AT RUNTIME, NOT FROM THE
+ * SCHEMA.
+ *
+ * The `/doc` OpenAPI Event union advertises 89 variants including a full
+ * `session.next.*` family (tool.called, reasoning.started, step.ended …). That
+ * family belongs to opencode's NEXT session engine. The pinned bench worker
+ * does not run that engine, so those events are in the schema and NEVER on the
+ * wire. An earlier version of this map was built from the schema and mapped
+ * 5 of 1635 live events (99.7% unmapped) — schema presence is NOT runtime
+ * emission, and only a live capture settles it.
+ *
+ * What the worker really emits, confirmed by a 45s capture against a running
+ * cell (ses_00b54ddb…): `message.part.updated` carrying a full Part is the
+ * substantive channel — the Part's OWN `type` (tool / reasoning / step-start /
+ * step-finish / patch / text) is what distinguishes a tool call from a thought.
+ * So the kind cannot be decided by the envelope type alone; see kindOf().
+ *
+ * `message.part.delta` is the token-by-token stream. It is the highest-volume
+ * event by an order of magnitude (172 of 208 in that capture) and carries no
+ * standalone meaning — the completed part arrives separately as
+ * `message.part.updated`. Mapping it would flood the feed with one row per
+ * token, so it is deliberately IGNORED rather than rendered.
+ */
 export const EVENT_MAP = {
-  "session.next.tool.called": "tool",
-  "session.next.tool.progress": "tool",
-  "session.next.tool.success": "tool",
-  "session.next.tool.failed": "tool",
+  // Substantive: kind is refined from the Part's own type by kindOf().
+  "message.part.updated": "lifecycle",
+
+  // File writes. `file.edited` is the editor's own signal; `patch` parts carry
+  // the batched file list and are handled in kindOf().
   "file.edited": "file",
-  "session.next.reasoning.started": "thinking",
-  "session.next.reasoning.delta": "thinking",
-  "session.next.reasoning.ended": "thinking",
+
+  // Terminal + error states.
   "session.error": "error",
-  "session.next.step.failed": "error",
-  "session.next.step.started": "lifecycle",
-  "session.next.step.ended": "lifecycle",
-  "session.next.retried": "lifecycle",
-  "session.next.compaction.started": "lifecycle",
-  "session.next.compaction.ended": "lifecycle",
   "session.idle": "lifecycle",
+
+  // Session-level lifecycle.
+  "session.compacted": "lifecycle",
+  "session.status": "lifecycle",
 };
+
+/**
+ * Part types that map to a kind when they arrive on `message.part.updated`.
+ * `text` is excluded on purpose: assistant prose belongs in the TRANSCRIPT tab,
+ * not in an activity feed where it would drown the tool calls.
+ */
+export const PART_KIND = {
+  tool: "tool",
+  reasoning: "thinking",
+  patch: "file",
+  "step-start": "lifecycle",
+  "step-finish": "lifecycle",
+};
+
+/** Envelope types that are real but deliberately never rendered as rows. */
+export const EVENT_IGNORED = new Set([
+  "message.part.delta",   // one row per token — the completed part is enough
+  "server.heartbeat",
+  "server.connected",
+  "file.watcher.updated", // fires for every fs change, not agent activity
+  "message.updated",
+  "session.updated",
+  "session.diff",
+  "message.part.removed",
+  "message.removed",
+]);
 
 /**
  * @typedef {Object} BoardEvent
