@@ -37,6 +37,9 @@ import { BENCH_PURPOSE } from "./contract.mjs";
 export const DECLARED_CONTEXT = {
   "wevibe-bench-worker": 262144,
   "qwen3.6-35b-a3b-bench": 262144,
+  "deepseek-v4-flash-bench": 262144,
+  "nemotron-3-nano-30b-bench": 262144,
+  "gemma-4-26b-a4b-bench": 262144,
 };
 
 /** Context options offered by the UI. */

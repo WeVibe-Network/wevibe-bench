@@ -419,6 +419,47 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             "output": 32_768,
         },
     },
+    # Pinned bench aliases (2026-08-13, WO roster-sync): one per additional
+    # model served through the Local LLM Proxy and added to the bench roster.
+    # Each mirrors the qwen3.6-35b-a3b-bench shape (bench output budget 32768
+    # so reasoning can never eat the whole completion, RUNBOOK §6). Selected
+    # via `run_cumulative.py run --model <alias>` (exclusive load on call).
+    "deepseek-v4-flash-bench": {
+        "name": "DeepSeek V4 Flash 0731 MXFP4 via Proxy (bench)",
+        "reasoning": True,
+        "tool_call": True,
+        "temperature": True,
+        "attachment": False,
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+    },
+    "nemotron-3-nano-30b-bench": {
+        "name": "Nemotron-3 Nano 30B-A3B 4bit via Proxy (bench)",
+        "reasoning": True,
+        "tool_call": True,
+        "temperature": True,
+        "attachment": False,
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+    },
+    "gemma-4-26b-a4b-bench": {
+        "name": "Gemma 4 26B-A4B QAT 4bit VLM via Proxy (bench)",
+        "reasoning": True,
+        "tool_call": True,
+        "temperature": True,
+        "attachment": False,
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {
+            "context": 262_144,
+            "output": 32_768,
+        },
+    },
 }
 
 # Schema version for the frozen ladder run manifest. Bump whenever the manifest
