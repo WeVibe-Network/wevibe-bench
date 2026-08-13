@@ -36,6 +36,33 @@ export function renderRail(board) {
     ${latency(h)}
     ${cost(h)}
     ${serves(h)}
+    ${profileEnforcement(board)}
+  </div>`;
+}
+
+/**
+ * PROFILE ENFORCEMENT — the debt badge's permanent home on the board.
+ *
+ * Hard requirement (§5.4 of the brief, finding 3.3): model provenance exists
+ * in the schema but NO recall request carries a producer-model allowlist, so
+ * the profile is DECLARED, not enforced. Wherever the profile appears this
+ * rides with it, doubled (words + danger border) so it survives greyscale.
+ * It disappears the day the backend filter ships.
+ */
+function profileEnforcement(board) {
+  const p = board.profile ?? {};
+  if (!p.exists) {
+    return box(
+      "profile enforcement",
+      "NO PROFILE",
+      "no ON stack exists, so there is no profile to enforce",
+    );
+  }
+  return `
+  <div class="railbox debt-box">
+    <div class="label">profile enforcement</div>
+    <div class="railval" style="color:var(--danger)">NOT ENFORCED</div>
+    <div class="railnote">the declared allowlist is not applied to retrieval — every ON run recalls the whole corpus</div>
   </div>`;
 }
 

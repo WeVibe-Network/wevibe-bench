@@ -1,43 +1,76 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// CHROME — top bar + provenance strip
+// CHROME — top bar + provenance strip, restyled to v2
 //
 // NON-NEGOTIABLES LIVE HERE:
+//  - BRAND TEXT IS A HARD REQUIREMENT: HOW GOOD IS <u>YOUR</u> MEMORY SYSTEM.
 //  - `bench-mock/self-declared` renders permanently as PLAIN LABEL TEXT.
 //    Never a badge. Never a tier. It is provenance, not a credential.
 //  - The policy anchor status is shown verbatim. A run on an unverified anchor
 //    is not a valid run, so a viewer must be able to see which it is.
+//  - NOWRAP IS LOAD-BEARING: these are single-line identity chips. Only the
+//    long identifiers (stack id, model) may ellipsize.
+//  - A cell that has stopped must never imply motion (constraint 7).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { esc, dur, nul, armOf } from "../board.js";
+import { esc, dur, nul, controlReachability } from "../board.js";
 
 export function renderTopbar(board, { stale, lastError }) {
   const r = board.run ?? {};
   const p = board.provenance ?? {};
-  const arm = armOf(r.arm);
+  const s = board.stack ?? {};
 
   // The feed being stale is information. Say it plainly rather than freezing a
   // number that looks live.
   const feed = stale
-    ? `<span class="attest" style="color:var(--fail)">FEED STALE — ${esc(lastError ?? "poll failed")}</span>`
+    ? `<span class="chip danger">FEED STALE — ${esc(lastError ?? "poll failed")}</span>`
     : "";
 
-  // A cell that has stopped is not a cell that is running. Never imply motion.
-  const state = r.state === "complete"
-    ? `<span class="attest">CELL COMPLETE${r.terminal_status ? ` · ${esc(r.terminal_status)}` : ""}</span>`
-    : r.elapsed_s !== null && r.elapsed_s !== undefined
-      ? `<span class="attest">RUNNING ${esc(dur(r.elapsed_s) ?? "")}</span>`
-      : `<span class="attest">${nul("no run observed")}</span>`;
+  // A stopped cell is not a running cell. Never imply motion in a stopped cell.
+  const state =
+    r.state === "complete"
+      ? `<span class="tag">CELL COMPLETE${r.terminal_status ? ` · ${esc(r.terminal_status)}` : ""}</span>`
+      : r.state === "running"
+        ? `<span class="tag on">RUNNING${r.elapsed_s !== null && r.elapsed_s !== undefined ? ` ${esc(dur(r.elapsed_s))}` : ""}</span>`
+        : `<span class="chip dimchip">${nul("no run observed")}</span>`;
+
+  const stackId = s.id ? String(s.id).split("|")[0] : null;
+
+  // WRITES → CONTROL PLANE is a CLAIM, and it is false when the browser cannot
+  // reach the control plane. Leaving it up while every write silently fails is
+  // the same defect class as a button that looks alive and is not.
+  const reach = controlReachability(board);
 
   return `
   <div class="topbar">
     <span class="brand">HOW GOOD IS <u>YOUR</u> MEMORY SYSTEM</span>
-    <span class="ident">${r.cell_label ? esc(r.cell_label) : nul("no cell")}</span>
-    <span class="armtag" style="color:${arm.color}">${arm.label}</span>
-    <span class="ident">${r.model ? esc(r.model) : nul("model unobserved")}</span>
+    <span class="vr"></span>
+    <span class="chip shrink">stack <span class="bright">${stackId ? esc(stackId) : nul("no stack")}</span></span>
+    <span class="chip dimchip shrink">${r.model ? esc(r.model) : nul("model unobserved")}</span>
     <span class="spacer"></span>
     ${feed}
-    <span class="attest">${esc(p.attestation ?? "bench-mock/self-declared")}</span>
+    <span class="chip">${esc(p.attestation ?? "bench-mock/self-declared")}</span>
     ${state}
+    ${reach.ok
+      ? `<span class="tag">READ-ONLY · WRITES → CONTROL PLANE</span>`
+      : `<span class="tag bad">READ-ONLY · CONTROLS UNAVAILABLE HERE</span>`}
+  </div>
+  ${reach.ok ? "" : reachBanner(reach)}`;
+}
+
+/**
+ * Why the controls are dead, stated ONCE at the top of the board rather than
+ * per-button. The operator learns it before clicking, not after a failure.
+ *
+ * The remedy is included because this condition is fixable by the operator in
+ * one command — and a diagnosis with no remedy leaves them exactly as stuck.
+ */
+function reachBanner(reach) {
+  return `
+  <div class="reach-warn" role="alert">
+    <span class="rw-head">CONTROL PLANE NOT REACHABLE FROM THIS BROWSER</span>
+    <span class="rw-body">${esc(reach.reason)}</span>
+    ${reach.fix ? `<span class="rw-fix">${esc(reach.fix)}</span>` : ""}
+    <span class="rw-note">${esc("The board itself is fully live — everything you can see is real and current. Only the controls that write are unavailable.")}</span>
   </div>`;
 }
 
@@ -45,14 +78,15 @@ export function renderProvenance(board) {
   const p = board.provenance ?? {};
   const anchor = p.policy_anchor_status;
 
-  // anchor_verified is the only good state; anything else is shown in the fail
-  // colour because it means the run should not be trusted.
+  // anchor_verified is the only good state; anything else means the run should
+  // not be trusted, and it is shown in the one off-hue rather than quietly.
   const anchorHtml =
     anchor === null || anchor === undefined
       ? nul("anchor unobserved")
-      : `<span style="color:${anchor === "anchor_verified" ? "var(--pass)" : "var(--fail)"}">${esc(anchor)}</span>`;
+      : `<span class="${anchor === "anchor_verified" ? "bright" : "danger"}">${esc(anchor)}</span>`;
 
-  const bit = (label, v) => `${label} ${v === null || v === undefined ? nul("—") : esc(String(v))}`;
+  const bit = (label, v) =>
+    `${label} ${v === null || v === undefined ? nul("—") : esc(String(v))}`;
 
   return `
   <div class="prov">
@@ -61,8 +95,9 @@ export function renderProvenance(board) {
     <span>${bit("org", board.run?.org_id)}</span>
     <span>${bit("leader", p.leader_fp)}</span>
     <span>${bit("seed", p.seed)}</span>
-    <span>corpus ${esc(p.corpus ?? "benchmark")}</span>
-    <span>contract v${esc(board.contract_version ?? "?")}</span>
+    <span>clock: harness wall, not agent-reported</span>
+    <span class="spacer"></span>
+    <span>serial by contract — one session, one cell, HTTP 409 on overlap</span>
     <span>${renderSourceHealth(board)}</span>
   </div>`;
 }

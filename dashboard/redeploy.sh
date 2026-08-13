@@ -72,20 +72,34 @@ for s in d.get('sources',[]):
 if [ "${1:-}" = "--control" ]; then
   echo
   echo "── restarting control plane ───────────────────────────────────────"
-  pkill -f "control/server.mjs" 2>/dev/null || true
+  # Match on the PORT, not the path. The process is started from inside
+  # control/ so its argv is just `node server.mjs --port 7718` — a pattern like
+  # "control/server.mjs" matches NOTHING and silently leaves the old process
+  # running, which then keeps serving pre-edit code while the new one dies on
+  # EADDRINUSE. That failure looks exactly like "my fix did not work".
   pkill -f "server.mjs --port ${CONTROL_PORT}" 2>/dev/null || true
-  sleep 1
+  for i in $(seq 1 10); do
+    pgrep -f "server.mjs --port ${CONTROL_PORT}" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  if pgrep -f "server.mjs --port ${CONTROL_PORT}" >/dev/null 2>&1; then
+    echo "  FAILED: a control plane on :${CONTROL_PORT} would not die — refusing to"
+    echo "          start a second one that would serve stale code."
+    exit 1
+  fi
+
   cd "$BENCH/control"
   # `< /dev/null` is mandatory: without it the shell suspends the job the
   # instant the process touches stdin.
   nohup node server.mjs --port "${CONTROL_PORT}" > /tmp/wevibe-control-plane.log 2>&1 < /dev/null &
   disown || true
-  sleep 2
+  sleep 3
   if curl -fsS -m 3 "http://127.0.0.1:${CONTROL_PORT}/api/health" >/dev/null 2>&1; then
     echo "  control plane up on :${CONTROL_PORT}  (log: /tmp/wevibe-control-plane.log)"
   else
     echo "  FAILED: control plane did not answer on :${CONTROL_PORT}"
     tail -20 /tmp/wevibe-control-plane.log || true
+    exit 1
   fi
 fi
 
