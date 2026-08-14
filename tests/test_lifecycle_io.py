@@ -3,14 +3,10 @@ from __future__ import annotations
 import io
 import logging
 import os
-import re
 import subprocess
 
 import pytest
 
-from wevibe_bench.lifecycle.admin_cli import AdminCli
-from wevibe_bench.lifecycle.hub_client import HubClient
-from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 import wevibe_bench.lifecycle.mcp_process as mcp_process_module
 from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
@@ -186,102 +182,6 @@ def test_mcp_process_export_pairing_returns_response_body(tmp_path) -> None:
     )
 
     assert manager.export_pairing(inst) == {"code": "PAIR-CODE", "pairing_id": "pair-123"}
-
-
-def test_admin_cli_create_org_parses_org_id_from_stdout() -> None:
-    logger, _ = _capture_logger("test.lifecycle.admin_create_org")
-    captured: dict[str, object] = {}
-
-    def runner(*args, **kwargs):
-        captured["cmd"] = args[0]
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(
-            args=args[0],
-            returncode=0,
-            stdout="Org created: org-test-123\n",
-            stderr="",
-        )
-
-    cli = AdminCli("/workspace", {"WEVIBE_KEYSTORE_PATH": "/tmp/ks"}, logger, runner=runner)
-    result = cli.create_org("Acme", "acme.example", "wallet-abc")
-
-    assert result["org_id"] == "org-test-123"
-    assert captured["cmd"] == [
-        "node",
-        "/workspace/wevibe-mcp/dist/admin.js",
-        "create-org",
-        "--name",
-        "Acme",
-        "--domain",
-        "acme.example",
-    ]
-    env = captured["env"]
-    assert isinstance(env, dict)
-    assert env["WEVIBE_LEADER_WALLET"] == "wallet-abc"
-
-
-def test_admin_cli_uses_wevibe_bench_mcp_root_env(monkeypatch) -> None:
-    logger, _ = _capture_logger("test.lifecycle.admin_mcp_root")
-    captured: dict[str, object] = {}
-    monkeypatch.setenv("WEVIBE_BENCH_MCP_ROOT", "/workspace/wevibe-mcp-clone")
-
-    def runner(*args, **kwargs):
-        captured["cmd"] = args[0]
-        captured["cwd"] = kwargs["cwd"]
-        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="ok\n", stderr="")
-
-    cli = AdminCli("/workspace", {}, logger, runner=runner)
-    cli.invite(
-        org_id="org-1",
-        invitee_pubkey="ed-1",
-        invitee_x25519="x-1",
-        invitee_pre_pubkey="pre-1",
-    )
-
-    assert captured["cmd"][0:2] == ["node", "/workspace/wevibe-mcp-clone/dist/admin.js"]
-    assert captured["cwd"] == "/workspace/wevibe-mcp-clone"
-
-
-def test_admin_cli_raises_on_nonzero_exit() -> None:
-    logger, _ = _capture_logger("test.lifecycle.admin_fail")
-
-    def runner(*args, **kwargs):
-        return subprocess.CompletedProcess(args=args[0], returncode=1, stdout="", stderr="boom")
-
-    cli = AdminCli("/workspace", {}, logger, runner=runner)
-    with pytest.raises(RuntimeError, match="boom"):
-        cli.create_org("Acme", "acme.example", "wallet-abc")
-
-
-def test_hub_client_enable_recall_builds_expected_request() -> None:
-    logger, _ = _capture_logger("test.lifecycle.hub_enable")
-    identity = Identity.from_hex("11" * 32)
-    captured: dict[str, object] = {}
-
-    def transport(url: str, headers: dict[str, str], body: dict[str, object] | None):
-        captured["url"] = url
-        captured["headers"] = headers
-        captured["body"] = body
-        return 200, {"status": "ok"}, True
-
-    cfg = LifecycleConfig(hub_url="http://127.0.0.1:4440")
-    client = HubClient(cfg, logger, transport=transport)
-    response = client.enable_recall(identity, "org-1", "aa" * 32, free=True)
-
-    assert response == {"status": "ok"}
-    assert captured["url"] == f"http://127.0.0.1:4440/v1/orgs/org-1/members/{'aa' * 32}/enable-recall"
-    assert captured["body"] == {"signed_by": identity.ed_pubkey_hex, "free": True}
-
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    auth = headers["Authorization"]
-    pattern = (
-        r"^WeVibe-Signed pubkey=[0-9a-f]{64},"
-        r"timestamp=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z,"
-        r"signature=[0-9a-f]{128}$"
-    )
-    assert re.fullmatch(pattern, auth)
-    assert headers["X-WeVibe-Trace-Id"].startswith("lc-")
 
 
 def test_mcp_rest_extract_and_recall_build_expected_urls_and_bearer_header(tmp_path) -> None:

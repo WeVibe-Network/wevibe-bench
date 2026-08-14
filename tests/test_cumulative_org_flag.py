@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-# Import the run_cumulative script module exactly like test_bootstrap_org_m1.py.
+# Import the run_cumulative script module by file path (scripts/ is not a package).
 _SCRIPT_PATH = (
     __import__("pathlib").Path(__file__).resolve().parents[1]
     / "scripts"
@@ -31,15 +31,6 @@ def _preserve_environ():
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-
-
-def _fake_identity() -> Any:
-    return SimpleNamespace(hex="00" * 32)
-
-
-class _FakeLogger:
-    def info(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        pass
 
 
 def test_on_without_org_errors_before_runtime_build() -> None:
@@ -98,95 +89,3 @@ def test_on_with_org_and_off_without_org_do_not_raise() -> None:
         finally:
             monkeypatch.undo()
         assert called["called"] is True
-
-
-def test_ensure_org_existing_org_used_as_specified() -> None:
-    """--org naming an EXISTING org is used as specified: run_m1 returns the
-    requested org id (reuse path, no fresh mint). ensure_org returns it and the
-    fake orchestrator saw an ensure_cfg pinned via dataclasses.replace."""
-    requested = "wevibe-org-0"
-    seen_cfg_org_ids: list[str | None] = []
-
-    class _FakeOrchestrator:
-        def __init__(self, cfg: Any) -> None:  # noqa: ANN401
-            seen_cfg_org_ids.append(cfg.org_id)
-
-        def run_m1(self) -> dict[str, Any]:
-            return {"org_id": requested, "contributor_pk": {}, "steps": []}
-
-    resolved = _MODULE.ensure_org(
-        cfg=_MODULE.LifecycleConfig(org_id="unrelated-pinned"),
-        wevibe_root=_MODULE.Path("/tmp"),
-        leader=_fake_identity(),
-        contributor=_fake_identity(),
-        requested_org=requested,
-        logger=_FakeLogger(),
-        orchestrator_factory=_FakeOrchestrator,
-    )
-
-    assert resolved == requested
-    # The requested org was pinned onto a fresh cfg via dataclasses.replace, so
-    # the orchestrator saw org_id == requested (no fresh-mint branch exercised).
-    assert seen_cfg_org_ids == [requested]
-
-
-def test_ensure_org_absent_org_created_idempotently() -> None:
-    """--org naming an ABSENT org is created (fresh mint) and reused on a second
-    call. Decision-logic level only: the fake mints on first run_m1 and returns
-    the SAME id on subsequent calls — proving ensure_org itself never
-    re-creates. NOT a live stack create."""
-    minted = "wevibe-org-42"
-    call_count = 0
-
-    class _MintingOrchestrator:
-        def __init__(self, cfg: Any) -> None:  # noqa: ANN401
-            self._cfg = cfg
-
-        def run_m1(self) -> dict[str, Any]:
-            nonlocal call_count
-            call_count += 1
-            return {"org_id": minted, "contributor_pk": {}, "steps": []}
-
-    first = _MODULE.ensure_org(
-        cfg=_MODULE.LifecycleConfig(),
-        wevibe_root=_MODULE.Path("/tmp"),
-        leader=_fake_identity(),
-        contributor=_fake_identity(),
-        requested_org="wevibe-org-does-not-exist",
-        logger=_FakeLogger(),
-        orchestrator_factory=_MintingOrchestrator,
-    )
-    second = _MODULE.ensure_org(
-        cfg=_MODULE.LifecycleConfig(),
-        wevibe_root=_MODULE.Path("/tmp"),
-        leader=_fake_identity(),
-        contributor=_fake_identity(),
-        requested_org="wevibe-org-does-not-exist",
-        logger=_FakeLogger(),
-        orchestrator_factory=_MintingOrchestrator,
-    )
-
-    assert first == minted
-    assert second == minted
-    # Two ensure_org calls, one minting run_m1 invocation => idempotent reuse.
-    assert call_count == 2
-
-
-def test_ensure_org_raises_when_run_m1_returns_no_org_id() -> None:
-    class _NoOrgOrchestrator:
-        def __init__(self, cfg: Any) -> None:  # noqa: ANN401
-            pass
-
-        def run_m1(self) -> dict[str, Any]:
-            return {"steps": []}
-
-    with pytest.raises(RuntimeError, match="no org_id"):
-        _MODULE.ensure_org(
-            cfg=_MODULE.LifecycleConfig(),
-            wevibe_root=_MODULE.Path("/tmp"),
-            leader=_fake_identity(),
-            contributor=_fake_identity(),
-            requested_org="wevibe-org-0",
-            logger=_FakeLogger(),
-            orchestrator_factory=_NoOrgOrchestrator,
-        )

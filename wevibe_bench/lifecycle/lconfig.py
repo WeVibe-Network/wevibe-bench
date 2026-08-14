@@ -11,46 +11,8 @@ from pathlib import Path
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
-DEFAULT_ORG_DESCRIPTION = (
-    "WeVibe benchmark org for the coding-agent memory-ablation harness. Its memory corpus holds reusable engineering knowledge extracted while an agent builds a TypeScript/Node backgammon game server: board and movement rules (bar entry, hitting, bearing off, use-max-dice), pip counting, doubling-cube strategy, and AI move selection. The corpus exists to measure how org memory recall affects agent correctness across OFF/ON ablation runs."
-)
-DEFAULT_ORG_TECH_STACK = (
-    "TypeScript, Node.js, HTTP/REST JSON API (port 8002), npm, Vitest, Playwright"
-)
-DEFAULT_ORG_FOCUS_AREAS = (
-    "Backgammon game-server engineering: board state and move legality (bar entry, hitting, bearing off, use-max rules), pip counting, doubling-cube decisions, AI difficulty levels, HTTP API design"
-)
-DEFAULT_ORG_KEYWORDS = (
-    "backgammon",
-    "game_state",
-    "board_state",
-    "checker",
-    "blot",
-    "hitting",
-    "bar_entry",
-    "bearing_off",
-    "use_max_dice",
-    "higher_die",
-    "pip_count",
-    "home_board",
-    "doubling_cube",
-    "cube_decision",
-    "take_point",
-    "gammon",
-    "win_probability",
-    "legal_moves",
-    "ai_difficulty",
-    "http_api",
-)
 DEFAULT_LEADER_KEYSTORE_PATH = str(Path.home() / ".wevibe" / "bench" / "leader-keystore")
 DEFAULT_CONTRIB_KEYSTORE_PATH = str(Path.home() / ".wevibe" / "bench" / "contrib-keystore")
-
-
-def _parse_org_keywords(raw: str | None) -> tuple[str, ...]:
-    if raw is None:
-        return DEFAULT_ORG_KEYWORDS
-    parsed = tuple(part.strip() for part in raw.split(",") if part.strip())
-    return parsed or DEFAULT_ORG_KEYWORDS
 
 
 @dataclass(frozen=True)
@@ -65,10 +27,9 @@ class LifecycleConfig:
     # whose identity is seed-derived (WEVIBE_IDENTITY_SEED_HEX) and therefore
     # equal to the harness leader. NEVER default this to :4450: that is the real
     # host wevibe-mcp, which has no seed support at all and always loads the
-    # interactive keychain identity. `create_org` hands this URL to leader-signer
-    # as WEVIBE_MCP_URL, and /v1/org-setup stamps THAT MCP's pubkey as the org's
-    # leader — so a :4450 default silently mints every fresh org under the wrong
-    # identity, and the harness then never confirms its own membership.
+    # interactive keychain identity. The bench's org membership and recall are
+    # bound to THIS seed-derived identity — running under the :4450 keychain
+    # identity means the harness never confirms its own membership.
     leader_mcp_url: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_MCP_URL")
         or "http://127.0.0.1:4550"
@@ -93,31 +54,11 @@ class LifecycleConfig:
     contributor_identity_seed_hex: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_SEED_HEX", "")
     )
-    org_name: str = "wevibe-bench-lifecycle"
-    domain: str = "bench.wevibe.local"
-    org_description: str = field(
-        default_factory=lambda: os.environ.get("WEVIBE_BENCH_ORG_DESCRIPTION")
-        or DEFAULT_ORG_DESCRIPTION
-    )
-    org_tech_stack: str = field(
-        default_factory=lambda: os.environ.get("WEVIBE_BENCH_ORG_TECH_STACK")
-        or DEFAULT_ORG_TECH_STACK
-    )
-    org_focus_areas: str = field(
-        default_factory=lambda: os.environ.get("WEVIBE_BENCH_ORG_FOCUS_AREAS")
-        or DEFAULT_ORG_FOCUS_AREAS
-    )
-    org_keywords: tuple[str, ...] = field(
-        default_factory=lambda: _parse_org_keywords(
-            os.environ.get("WEVIBE_BENCH_ORG_KEYWORDS")
-        )
-    )
     session_token_path: str = "~/.wevibe/mcp-session-token"
-    # Optional explicit org pin for the m1 bring-up (WEVIBE_BENCH_ORG_ID).
-    # Without it, create_org's owned-org resolution picks sorted-first when the
-    # leader belongs to several orgs — wrong target on re-runs. With it set and
-    # present in the leader's memberships, that org is reused; absent from
-    # memberships, a fresh org is created and the chain-assigned id returned.
+    # Org SELECTOR pin (WEVIBE_BENCH_ORG_ID): identifies the PRE-PROVISIONED org
+    # the run targets — created by the production dashboard, never by the bench.
+    # The bench consumes this id as data only (no mint/verify/fund). Empty string
+    # means no pin; callers resolve the org or fail loud themselves.
     org_id: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_ORG_ID") or ""
     )
@@ -145,12 +86,6 @@ class LifecycleConfig:
             "contributor_keystore_path": self.contributor_keystore_path,
             "leader_identity_seed_hex": self.leader_identity_seed_hex,
             "contributor_identity_seed_hex": self.contributor_identity_seed_hex,
-            "org_name": self.org_name,
-            "domain": self.domain,
-            "org_description": self.org_description,
-            "org_tech_stack": self.org_tech_stack,
-            "org_focus_areas": self.org_focus_areas,
-            "org_keywords": list(self.org_keywords),
             "session_token_path": self.session_token_path,
             "org_id": self.org_id,
             "leader_signer_dir": self.leader_signer_dir,

@@ -171,14 +171,6 @@ class HubClient:
                 f"{op} failed submission_hash={submission_hash} error={error!r}"
             )
 
-    def enable_recall(self, identity: Identity, org_id: str, member_pubkey: str, free: bool = True) -> Any:
-        return self._request(
-            "lifecycle.hub.enable_recall",
-            identity,
-            f"/v1/orgs/{org_id}/members/{member_pubkey}/enable-recall",
-            {"signed_by": identity.ed_pubkey_hex, "free": free},
-        )
-
     def verify_keywords(self, identity: Identity, org_id: str, entries: list[dict[str, Any]]) -> Any:
         payload = self._request(
             "lifecycle.hub.verify_keywords",
@@ -191,14 +183,6 @@ class HubClient:
             if isinstance(submission_hash, str) and submission_hash:
                 self._require_passed_result("verify_keywords", payload, submission_hash)
         return payload
-
-    def add_keyword(self, identity: Identity, org_id: str, keyword: str) -> Any:
-        return self._request(
-            "lifecycle.hub.add_keyword",
-            identity,
-            f"/v1/orgs/{org_id}/keywords",
-            {"keyword": keyword},
-        )
 
     def submit_keyword_results(
         self,
@@ -290,11 +274,3 @@ class HubClient:
         if not isinstance(payload, dict):
             raise RuntimeError(f"hub deny_submission expected object payload, got: {payload}")
         return payload
-
-    def member_orgs(self, identity: Identity) -> Any:
-        return self._request(
-            "lifecycle.hub.member_orgs",
-            identity,
-            f"/v1/members/{identity.ed_pubkey_hex}/orgs",
-            None,
-        )

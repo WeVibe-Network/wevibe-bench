@@ -6,7 +6,6 @@ import re
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from wevibe_bench.lifecycle.canonical import (
-    create_org_message,
     deny_submission_message,
     keywords_hash,
     remove_member_message,
@@ -43,48 +42,6 @@ def test_remove_member_message_matches_expected_vector() -> None:
 def test_keywords_hash_matches_expected_vector() -> None:
     expected = hashlib.sha256(b"docker:0.600000\nnginx:0.800000").hexdigest()
     assert keywords_hash([("nginx", 0.8), ("docker", 0.6)]) == expected
-
-
-def test_create_org_message_has_sorted_keys_and_is_deterministic() -> None:
-    message = create_org_message(
-        leader_pubkey="aa" * 32,
-        leader_x25519_pubkey="aa" * 32,
-        org_name="Test Org",
-        domain="test.com",
-        enc_envelope="enc_env_hex",
-        search_envelope="search_env_hex",
-        mod_envelope="mod_env_hex",
-        pk_mod="pk_mod_hex",
-        fee_model={
-            "tier": "starter",
-            "monthly_credits": 1000,
-            "per_query_cost": 1,
-            "currency": "USD",
-        },
-    )
-
-    assert message.startswith("wevibe.create_org.v1\n")
-    lines = message.split("\n")
-    keys = [line.split(":", 1)[0] for line in lines[1:]]
-    assert keys == sorted(keys)
-
-    message_again = create_org_message(
-        leader_pubkey="aa" * 32,
-        leader_x25519_pubkey="aa" * 32,
-        org_name="Test Org",
-        domain="test.com",
-        enc_envelope="enc_env_hex",
-        search_envelope="search_env_hex",
-        mod_envelope="mod_env_hex",
-        pk_mod="pk_mod_hex",
-        fee_model={
-            "tier": "starter",
-            "monthly_credits": 1000,
-            "per_query_cost": 1,
-            "currency": "USD",
-        },
-    )
-    assert message.encode("utf-8") == message_again.encode("utf-8")
 
 
 def test_identity_round_trip_signing_and_verification() -> None:

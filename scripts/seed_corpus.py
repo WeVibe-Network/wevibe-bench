@@ -25,7 +25,7 @@ from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_process import McpInstance, McpProcessManager
 from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
 from wevibe_bench.lifecycle.qdrant_probe import find_org_collection, snapshot_counts
-from wevibe_bench.preflight import PreflightError, preflight, verify_org_checklist
+from wevibe_bench.preflight import PreflightError, preflight
 
 
 def _required_env(name: str) -> str:
@@ -537,30 +537,8 @@ def main() -> int:
     qdrant_after_count = 0
 
     deliveries: list[dict[str, Any]] = []
-    fund_script = Path(__file__).resolve().parent / "fund_leader.sh"
 
     try:
-        logger.info(
-            "op=seed.corpus.prefund.start script=%s leader_seed_fp=%s leader_signer_dir=%s",
-            fund_script,
-            leader.seed_fp(),
-            cfg.leader_signer_dir,
-        )
-        subprocess.run(
-            ["bash", str(fund_script)],
-            env={
-                **os.environ,
-                "WEVIBE_BENCH_LEADER_SEED_HEX": leader.seed_hex,
-                "LEADER_SIGNER_DIR": cfg.leader_signer_dir,
-            },
-            check=True,
-        )
-        logger.info(
-            "op=seed.corpus.prefund.ok script=%s leader_seed_fp=%s",
-            fund_script,
-            leader.seed_fp(),
-        )
-
         loaded_checkpoint = _load_checkpoint(checkpoint_path)
         if loaded_checkpoint is not None:
             _validate_checkpoint(
@@ -606,27 +584,22 @@ def main() -> int:
             )
         else:
             leader_instance, contributor_instance = orchestrator.bring_up(build=build_dist)
-            m1 = orchestrator.run_m1()
-            logger.info("op=seed.corpus.m1 org_id=%s", m1.get("org_id"))
-            org_id = orchestrator.org_id or ""
+            org_id = (getattr(cfg, "org_id", "") or "").strip()
             if not org_id:
-                raise RuntimeError("orchestrator.run_m1 completed without org_id")
+                raise RuntimeError(
+                    "seed_corpus requires a pre-provisioned org: set WEVIBE_BENCH_ORG_ID "
+                    "(the production dashboard owns org creation; the bench no longer mints)"
+                )
+            setattr(orchestrator, "org_id", org_id)
 
             checkpoint["org_id"] = org_id
             _save_checkpoint(checkpoint_path, checkpoint)
             checkpoint_msg = (
-                f"[seed] checkpoint write reason=m1_org checkpoint={checkpoint_path} "
+                f"[seed] checkpoint write reason=org_resolved checkpoint={checkpoint_path} "
                 f"org_id={org_id} committed={len(_committed_ids(checkpoint))}/{total_memories}"
             )
             logger.info(checkpoint_msg)
             print(checkpoint_msg)
-
-        verify_org_checklist(
-            hub_url=cfg.hub_url,
-            org_id=org_id,
-            identity=leader,
-            logger=logger,
-        )
 
         keep_leader_alive = True
 

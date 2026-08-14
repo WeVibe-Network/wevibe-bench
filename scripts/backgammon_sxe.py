@@ -546,16 +546,12 @@ def main() -> int:
         stage = "org_resolve"
         emit_stage("orchestrator", "complete")
         emit_stage("org_resolve", "running")
-        progress("run_m1 start (org resolve)")
-        m1_result = orchestrator.run_m1()
-        resolved_org_id = str(m1_result.get("org_id") or "").strip()
-        if not resolved_org_id:
-            raise RuntimeError("run_m1 completed without org_id")
-        if args.org_id and resolved_org_id != args.org_id:
+        org_id = str(getattr(args, "org_id", "") or "").strip()
+        if not org_id:
             raise RuntimeError(
-                f"resolved org_id mismatch: run_m1={resolved_org_id} expected={args.org_id}"
+                "--org-id is required: the bench no longer mints orgs; "
+                "pass the production-dashboard org id"
             )
-        org_id = args.org_id or resolved_org_id
         progress(f"org resolve ok org_id={org_id}")
         emit_stage("org_resolve", "complete", detail=f"org_id={org_id}")
 

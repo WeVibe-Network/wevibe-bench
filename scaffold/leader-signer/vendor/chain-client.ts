@@ -278,66 +278,6 @@ export function buildReportMemoryMsg(args: {
   };
 }
 
-export interface RegisterOrgMsgValue {
-  signer: string;
-  leader: string;
-  storageQuota: number;
-  retrievalBudget: number;
-  domain: string;
-  hubServingKey: string;
-  leaderWallet: string;
-  name: string;
-  description: string;
-  tech_stack: string;
-  focus_areas: string;
-}
-
-export function buildRegisterOrgMsg(value: RegisterOrgMsgValue): EncodeObject {
-  const fields: number[] = [
-    ...encodeStringField(0x0a, value.signer),
-    ...encodeStringField(0x1a, value.leader),
-    ...encodeVarint(0x20), ...encodeVarint(value.storageQuota),
-    ...encodeVarint(0x28), ...encodeVarint(value.retrievalBudget),
-    ...encodeStringField(0x32, value.domain),
-    ...encodeStringField(0x3a, value.hubServingKey),
-    ...encodeStringField(0x42, value.leaderWallet),
-    ...encodeStringField(0x62, value.name),
-    ...encodeStringField(0x4a, value.description),
-    ...encodeStringField(0x52, value.tech_stack),
-    ...encodeStringField(0x5a, value.focus_areas),
-  ];
-
-  return {
-    typeUrl: '/wevibe.org.v1.MsgRegisterOrg',
-    value: Uint8Array.from(fields),
-  };
-}
-
-export function buildAddMemberMsg(
-  signer: string,
-  orgId: string,
-  pubkey: string,
-  role: string,
-  x25519Pubkey: string,
-  canContribute: boolean,
-  canModerate: boolean,
-): EncodeObject {
-  const fields: number[] = [
-    ...encodeStringField(0x0a, signer),
-    ...encodeStringField(0x12, orgId),
-    ...encodeStringField(0x1a, pubkey),
-    ...encodeStringField(0x22, role),
-    ...encodeStringField(0x2a, x25519Pubkey),
-    ...encodeBoolField(0x30, canContribute),
-    ...encodeBoolField(0x38, canModerate),
-  ];
-
-  return {
-    typeUrl: '/wevibe.org.v1.MsgAddMember',
-    value: Uint8Array.from(fields),
-  };
-}
-
 export function buildRemoveMemberMsg(
   signer: string,
   orgId: string,

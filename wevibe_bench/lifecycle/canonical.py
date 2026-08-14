@@ -73,58 +73,6 @@ def keywords_hash(keywords: list[tuple[str, float]]) -> str:
     return _sha256_hex(rendered)
 
 
-def create_org_message(
-    leader_pubkey: str,
-    leader_x25519_pubkey: str,
-    org_name: str,
-    domain: str,
-    enc_envelope: str,
-    search_envelope: str,
-    mod_envelope: str,
-    pk_mod: str,
-    fee_model: Mapping[str, Any] | None,
-) -> str:
-    fields = {
-        "domain": domain,
-        "enc_envelope": enc_envelope,
-        "fee_model_hash": fee_model_hash(fee_model),
-        "leader_pubkey": leader_pubkey,
-        "leader_x25519_pubkey": leader_x25519_pubkey,
-        "mod_envelope": mod_envelope,
-        "org_name": org_name,
-        "pk_mod": pk_mod,
-        "search_envelope": search_envelope,
-    }
-    return _canonical_message("wevibe.create_org.v1", fields)
-
-
-def invite_member_message(
-    org_id: str,
-    pubkey: str,
-    x25519_pubkey: str,
-    role: str,
-    enc_envelope: str,
-    search_envelope: str,
-    mod_envelope: str,
-    signed_by: str,
-    can_contribute: bool,
-    can_moderate: bool,
-) -> str:
-    fields = {
-        "can_contribute": can_contribute,
-        "can_moderate": can_moderate,
-        "enc_envelope": enc_envelope,
-        "mod_envelope": mod_envelope,
-        "org_id": org_id,
-        "pubkey": pubkey,
-        "role": role,
-        "search_envelope": search_envelope,
-        "signed_by": signed_by,
-        "x25519_pubkey": x25519_pubkey,
-    }
-    return _canonical_message("wevibe.invite_member.v1", fields)
-
-
 def submit_memory_message(
     ciphertext_hash: str,
     contributor_pubkey: str,

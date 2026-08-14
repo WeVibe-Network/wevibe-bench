@@ -9,7 +9,6 @@ are diagnostic/historical paths and are **not** the active primary path.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -58,7 +57,7 @@ from wevibe_bench.lifecycle.identity import Identity
 from wevibe_bench.lifecycle.lconfig import LifecycleConfig
 from wevibe_bench.lifecycle.m2_proof import M2Proof
 from wevibe_bench.lifecycle.mcp_rest import McpRest
-from wevibe_bench.preflight import verify_org_checklist, verify_worker_model_acceptance
+from wevibe_bench.preflight import verify_worker_model_acceptance
 from wevibe_bench.process_reaper import (
     ProcessReaper,
     run_reaper_unconditional,
@@ -345,16 +344,49 @@ def _apply_model_override(
     from API responses and recorded (RC-7); this flag selects, it does not
     gate. Changing the model changes the roster hash, which invalidates an
     existing manifest by design (archive + rerun, RUNBOOK §0).
+
+    THE OVERRIDE IS REQUIRED (2026-08-14). Without one the roster resolved to
+    ``local-llm-proxy/wevibe-bench-worker`` — the retired auto-resident rung,
+    which measures whichever model happened to be loaded and records no
+    identity. This is the single point every roster path passes through
+    (``_build_roster`` and the worker-acceptance preflight both call it), so
+    refusing here is what makes the retired design unreachable rather than
+    merely discouraged.
+
+    It is not a new obstacle in practice: the board has always launched with
+    ``--model``, and a bare CLI invocation ALREADY failed a step later with
+    ``roster hash drift detected`` — the manifest froze a named alias and the
+    auto rung does not hash to it. This turns that confusing failure into a
+    stated one. The rung itself stays in config.py; deleting it would change the
+    ladder fingerprint and invalidate the live campaign (see the note there).
     """
     override = str(model_override or "").strip()
+    registry = getattr(config, "WORKER_MODEL_REGISTRY", {})
+    retired = getattr(config, "RETIRED_MODEL_ALIASES", {})
+    available = ", ".join(sorted(str(k) for k in registry if k not in retired)) or "none"
+
     if not override:
-        return slugs
+        print(
+            "error: --model is required. The auto-resident roster rung is retired — a cell "
+            "run on it measures whichever model is loaded and records no identity. "
+            f"name the bench alias to measure. available aliases: {available}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     alias = override
     if alias.startswith("local-llm-proxy/"):
         alias = alias[len("local-llm-proxy/"):]
-    registry = getattr(config, "WORKER_MODEL_REGISTRY", {})
+    if alias in retired:
+        # Refused by its RETIREMENT, not as an unknown alias: "unknown" would
+        # send the operator hunting for a typo in a name that is spelled right.
+        print(
+            f"error: --model {model_override!r} — {retired[alias]} "
+            f"available aliases: {available}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if alias not in registry:
-        available = ", ".join(sorted(str(key) for key in registry)) or "none"
         print(
             f"error: --model {model_override!r} is not a known worker model alias. "
             f"available aliases: {available}",
@@ -1522,57 +1554,6 @@ def _build_offline_leader_client(
     )
 
 
-def ensure_org(
-    cfg: LifecycleConfig,
-    wevibe_root: Path,
-    leader: Identity,
-    contributor: Identity,
-    requested_org: str,
-    logger: logging.Logger,
-    orchestrator_factory: Callable[..., LifecycleOrchestrator] | None = None,
-) -> str:
-    """Idempotently ensure the requested org exists and is gate-ready.
-
-    Reuses LifecycleOrchestrator.run_m1() (seeds keywords + org profile, exactly
-    what verify_org_checklist gates on). run_m1 reuses an already-owned org
-    (no recreation) or mints a fresh one via leader-signer register-org. The
-    requested org is pinned via dataclasses.replace on a fresh LifecycleConfig
-    (LifecycleConfig is frozen). Returns the resolved org_id.
-    """
-    from wevibe_bench.lifecycle.orchestrator import LifecycleOrchestrator
-    from wevibe_bench.lifecycle.mcp_process import McpProcessManager, _resolve_role_keystore
-
-    ensure_cfg = dataclass_replace(cfg, org_id=requested_org)
-    if orchestrator_factory is not None:
-        orch = orchestrator_factory(ensure_cfg)
-    else:
-        leader_keystore, _ = _resolve_role_keystore(ensure_cfg, "leader")
-        contributor_keystore, _ = _resolve_role_keystore(ensure_cfg, "contributor")
-        leader_wallet = os.environ.get("WEVIBE_BENCH_LEADER_WALLET", "")
-        procman = McpProcessManager(
-            wevibe_root=str(wevibe_root),
-            cfg=ensure_cfg,
-            logger=logger,
-        )
-        orch = LifecycleOrchestrator(
-            cfg=ensure_cfg,
-            wevibe_root=str(wevibe_root),
-            leader=leader,
-            contributor=contributor,
-            leader_keystore=leader_keystore,
-            contributor_keystore=contributor_keystore,
-            leader_wallet=leader_wallet,
-            logger=logger,
-            procman=procman,
-        )
-    result = orch.run_m1()
-    org_id = result.get("org_id")
-    if not isinstance(org_id, str) or not org_id:
-        raise RuntimeError(f"org-ensure run_m1 returned no org_id: {result}")
-    logger.info("run_cumulative.org_ensured requested=%s resolved=%s", requested_org, org_id)
-    return org_id
-
-
 def _build_real_runner_and_leader_client(
     args: argparse.Namespace,
     layout: PathLayout,
@@ -1611,26 +1592,10 @@ def _build_real_runner_and_leader_client(
     leader = Identity.from_hex(_required_env("WEVIBE_BENCH_LEADER_SEED_HEX"))
     contributor = Identity.from_hex(_required_env("WEVIBE_BENCH_CONTRIB_SEED_HEX"))
 
-    requested_org = str(getattr(args, "org", "") or "").strip() or None
-    org_id = requested_org or DEFAULT_ORG_ID
-    if requested_org:
-        org_id = ensure_org(
-            cfg=cfg,
-            wevibe_root=os.environ.get("WEVIBE_BENCH_WEVIBE_ROOT", str(repo_root.parent)),
-            leader=leader,
-            contributor=contributor,
-            requested_org=requested_org,
-            logger=_LOG,
-        )
+    org_id = str(getattr(args, "org", "") or "").strip() or DEFAULT_ORG_ID
     args.org = org_id
 
     hub_client = HubClient(cfg, _LOG)
-    verify_org_checklist(
-        hub_url=cfg.hub_url,
-        org_id=str(args.org),
-        identity=leader,
-        logger=_LOG,
-    )
     roster_filter = str(getattr(args, "roster_model", "") or "").strip()
     roster_marker = roster_filter.casefold() if roster_filter else None
     accepted_models: list[str] = []
@@ -1874,7 +1839,7 @@ def _handle_run(args: argparse.Namespace) -> int:
     if validated_mode == "on" and not validated_org:
         raise RuntimeError(
             "--mode on requires --org <org>: an ON cell needs a target org. "
-            "Pass --org <org> (created idempotently if absent) or use --mode off."
+            "Pass --org <org> (provisioned by the production dashboard) or use --mode off."
         )
 
     context = _build_context(args, require_runtime=True)
@@ -2120,7 +2085,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--org",
         default=None,
-        help="Org id for extraction/commit flow; required for the campaign/commit flow, no default.",
+        help=(
+            "Org id for extraction/commit flow; the org is provisioned by the "
+            "production dashboard, not the bench. Required for the campaign/commit flow, no default."
+        ),
     )
     parser.add_argument(
         "--roster-model",
