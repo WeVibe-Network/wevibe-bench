@@ -35,11 +35,32 @@ import { BENCH_PURPOSE } from "./contract.mjs";
  * a test rather than silently offering a context the worker will not use.
  */
 export const DECLARED_CONTEXT = {
-  "wevibe-bench-worker": 262144,
   "qwen3.6-35b-a3b-bench": 262144,
   "deepseek-v4-flash-bench": 262144,
   "nemotron-3-nano-30b-bench": 262144,
   "gemma-4-26b-a4b-bench": 262144,
+};
+
+/**
+ * RETIRED BENCH ALIASES — advertised by the proxy, refused by the bench.
+ *
+ * `wevibe-bench-worker` is the auto-detect slug: it maps upstream to `auto`, so
+ * a cell run on it measures WHICHEVER model happened to be resident and records
+ * no model identity. That design is retired — every cell now names its subject —
+ * and the alias must not appear as a bench-eligible model on any surface.
+ *
+ * IT IS EXCLUDED HERE RATHER THAN WISHED AWAY. The proxy still advertises it
+ * with purpose=wevibe-bench (its roster lives in the local-llm-proxy service,
+ * not this repo), so eligibility computed from `purpose` alone would keep
+ * offering it a [+ baseline] button. Naming the retirement in one place means
+ * the ledger, the run-start gate and the profile modal all refuse it for the
+ * same stated reason, and the entry can be deleted outright the day the proxy
+ * stops serving it.
+ */
+export const RETIRED_ALIASES = {
+  "wevibe-bench-worker":
+    "retired: this alias resolves to whatever model is resident behind the proxy, so a cell "
+    + "run on it measures an unrecorded subject. Benchmark a named bench alias instead.",
 };
 
 /** Context options offered by the UI. */
@@ -137,11 +158,17 @@ export async function readRoster({ proxyUrl, runtimeUrl }) {
     const declared = DECLARED_CONTEXT[id] ?? null;
     const loaded = rt?.loaded_context ?? null;
 
+    const retired = RETIRED_ALIASES[id] ?? null;
+
     return {
       id,
       upstream_model: upstream,
       purpose,
-      bench_eligible: purpose === BENCH_PURPOSE,
+      // A retired alias is NOT bench-eligible however the proxy labels it. The
+      // reason travels with the row so a surface that wants to explain the
+      // absence can, rather than the model simply vanishing.
+      bench_eligible: purpose === BENCH_PURPOSE && !retired,
+      retired_reason: retired,
       // `resident` is null (unobserved) when the runtime is unreachable —
       // NOT false. "We cannot see whether it is loaded" and "it is not loaded"
       // are different facts and must not collapse.

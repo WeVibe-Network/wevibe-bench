@@ -369,8 +369,9 @@ export async function attachRun(runsRoot, profileId_, entry) {
  *
  * `attributable` is stated explicitly rather than left for the UI to infer: it
  * is false when profiles exist but this service launched none of the runs (the
- * CLI-launch case), and the inspector must then say the history is incomplete
- * instead of drawing an empty list that looks like "no runs happened".
+ * CLI-launch case), and the board must then say the history is incomplete
+ * instead of drawing an empty list that looks like "no runs happened" — today
+ * that surface is the RUN LEDGER's profile drawer (dashboard/panels/ledger.js).
  */
 export async function readProfiles(runsRoot) {
   const { profiles, unreadable } = await listProfiles(runsRoot);

@@ -3,7 +3,26 @@
 //
 // THE SHAPE. Model name leftmost, [+baseline] [+profile] rightmost. Clicking a
 // model row expands an accordion of that model's profiles, each carrying the
-// measurement columns and its own [+run].
+// measurement columns and its own [+run]. Clicking a PROFILE row opens the
+// frozen policy underneath it.
+//
+// ── THE CONSOLIDATION (this panel is now the only home) ─────────────────────
+//
+// A frozen profile used to be readable on TWO other surfaces: a board-level
+// MEMORY PROFILE card and a full-screen inspector modal it opened. Both are
+// gone, and their content is the drawer at the foot of this file.
+//
+// They were not merely duplicates, they were WRONG. Both read `board.profile` —
+// a single global "the profile", from the era of one profile per machine — so
+// with four profiles on disk they showed exactly one and gave the operator no
+// way to tell which. The ledger already holds every profile, keyed to the model
+// it measures, which is the shape the data actually has. The card also carried
+// its own frozen timestamp, subject, roster and transfer edge: four restatements
+// of facts that appear in this accordion, free to disagree with it.
+//
+// What was NOT duplicated — the full memory roster with per-model corpus counts,
+// the transfer prose, the debt block and the run history — is preserved here in
+// full. The consolidation removes surfaces, not facts.
 //
 // THE THREE RULES THIS SURFACE EXPRESSES, none of them decided here:
 //   1. a run cannot start until the model's baseline is complete and non-void
@@ -29,6 +48,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { esc, nul, tok, dur } from "../board.js";
+// The profile VOCABULARY is imported, never re-worded. The transfer edge, the
+// debt block and the UNFILTERED RECALL badge must read identically here and in
+// the creation modal — two phrasings of "declared, not enforced" would be two
+// claims, and the operator has no way to know they mean the same thing.
+import { transferBlock, debtBlock, unfilteredBadge } from "./profile.js";
 
 /**
  * The accordion is CLAMPED, NEVER PRE-ALLOCATED. Space for ten profile rows is
@@ -49,12 +73,36 @@ const PROFILE_CLAMP = 10;
  */
 let expandedModel = null;
 
+/**
+ * WHICH PROFILE'S FROZEN POLICY IS OPEN.
+ *
+ * Also one at a time, and for a stronger reason than the model rows: the drawer
+ * carries the full memory roster, and two open drawers would push the row an
+ * operator is comparing against off the screen.
+ *
+ * A profile id is globally unique, so this is NOT scoped to the open model —
+ * closing a model row leaves the id set but unreachable, and it is reconciled on
+ * the next draw rather than tracked in two places.
+ */
+let expandedProfile = null;
+
 export function toggleModelRow(id) {
   expandedModel = expandedModel === id ? null : id;
+  // Collapsing the model takes its drawer with it. Leaving the id set would
+  // re-open a drawer the operator closed the row on, minutes later.
+  expandedProfile = null;
+}
+
+export function toggleProfileRow(id) {
+  expandedProfile = expandedProfile === id ? null : id;
 }
 
 export function expandedModelId() {
   return expandedModel;
+}
+
+export function expandedProfileId() {
+  return expandedProfile;
 }
 
 export function renderLedger(board) {
@@ -65,6 +113,7 @@ export function renderLedger(board) {
   // is reconciled against what is actually being drawn.
   if (expandedModel && ledger && !(ledger.models ?? []).some((m) => m.id === expandedModel)) {
     expandedModel = null;
+    expandedProfile = null;
   }
   const expanded = expandedModel;
 
@@ -74,11 +123,33 @@ export function renderLedger(board) {
         <span class="ttl">RUN LEDGER</span>
         <span class="sub">every model in this bench · baseline first · profiles nested</span>
         <span class="spacer"></span>
+        ${floorsChip(ledger)}
         ${serialChip(ledger)}
       </div>
-      ${ledger ? models(ledger, expanded) : unwired()}
-      ${footer(s)}
+      ${ledger ? models(board, ledger, expanded) : unwired()}
+      ${footer(s, ledger)}
     </section>`;
+}
+
+/**
+ * HOW MANY MODELS HAVE A FLOOR — read from the stored baseline index.
+ *
+ * `models_ledger.baselines` is the control plane's single baseline export
+ * (control/baselines.mjs, also served at /api/baselines and written to
+ * runs/baselines.json). Every gate in the rows below resolves from that same
+ * object, so this count cannot disagree with the buttons underneath it.
+ *
+ * It answers the question the row-by-row view makes slow: a bench of four
+ * models with one floor is one measurement and three models that cannot be
+ * benchmarked yet, and that ratio is the campaign's actual progress.
+ */
+function floorsChip(ledger) {
+  const idx = ledger?.baselines ?? null;
+  if (!idx?.models) return "";
+  const all = Object.values(idx.models);
+  if (!all.length) return "";
+  const floored = all.filter((b) => b?.scorable).length;
+  return `<span class="tag${floored === all.length ? " on" : ""}" title="${esc(idx.note ?? "")}">FLOORS ${floored}/${all.length}</span>`;
 }
 
 /**
@@ -105,7 +176,7 @@ function unwired() {
     </div>`;
 }
 
-function models(ledger, expanded) {
+function models(board, ledger, expanded) {
   const rows = ledger.models ?? [];
   if (!rows.length) {
     const why = ledger.unwired_reason ?? "no bench-eligible model is served by the proxy roster";
@@ -115,7 +186,7 @@ function models(ledger, expanded) {
         <div class="note">${esc(why)}</div>
       </div>`;
   }
-  return `${rows.map((m) => modelRow(m, expanded === m.id)).join("")}${orphans(ledger)}`;
+  return `${rows.map((m) => modelRow(board, m, expanded === m.id)).join("")}${orphans(ledger)}`;
 }
 
 /**
@@ -150,7 +221,7 @@ function orphans(ledger) {
  * propagation implicitly by being checked first in board.js's delegated
  * handler — a [+baseline] click must never also toggle the accordion.
  */
-function modelRow(m, open) {
+function modelRow(board, m, open) {
   const b = m.baseline ?? {};
   const n = (m.profiles ?? []).length;
 
@@ -166,7 +237,7 @@ function modelRow(m, open) {
         ${gateBtn("data-new-profile", m.id, "+ profile", m.can_profile)}
       </div>
       ${blockedNote(m)}
-      ${open ? accordion(m) : ""}
+      ${open ? accordion(board, m) : ""}
     </div>`;
 }
 
@@ -217,7 +288,7 @@ function blockedNote(m) {
 
 // ── THE ACCORDION ───────────────────────────────────────────────────────────
 
-function accordion(m) {
+function accordion(board, m) {
   const profiles = m.profiles ?? [];
   if (!profiles.length) {
     return `
@@ -235,37 +306,87 @@ function accordion(m) {
   const clamp = Math.min(profiles.length, PROFILE_CLAMP);
   const over = profiles.length > PROFILE_CLAMP;
 
+  // ── THE TABLE IS ONLY DRAWN WHEN THERE IS SOMETHING TO PUT IN IT ─────────
+  //
+  // The eight measurement columns (PHASES…VERDICT, Δ) are the CELL's. Today no
+  // cell can be attributed to a profile at all — a profile's run record carries
+  // a log name and the launcher records no run_dir, so `latest_cell` is null for
+  // every row and the server says so in `latest_cell_unavailable`.
+  //
+  // Drawn anyway, that is ten columns squeezed into an accordion where eight of
+  // them read `unobserved` / `never ran` / `unknown` — text wider than the 52px
+  // and 62px tracks holding it, so the values overflowed into each other and the
+  // row became unreadable. Worse, it repeated the same "no cell attributed"
+  // sentence under EVERY row.
+  //
+  // So: the full table appears when at least one profile here has a measured
+  // cell, and until then the row states what is actually known — how many cells
+  // were launched under the profile and when the last one was — with the reason
+  // no measurement is attached stated ONCE, under the well.
+  const measured = profiles.some((p) => p.latest_cell);
+  const unjoined = profiles.find((p) => !p.latest_cell && p.latest_cell_unavailable);
+
   return `
     <div class="lacc">
-      <div class="pcols">
-        <span>PROFILE</span><span>PHASES</span><span>TURNS</span><span>TOKENS</span>
-        <span>TIME</span><span>GATES</span><span>CORPUS</span><span>VERDICT</span>
-        <span>Δ VS BASELINE</span><span></span>
+      <div class="pcols${measured ? "" : " lean"}">
+        ${measured
+          ? `<span>PROFILE</span><span>PHASES</span><span>TURNS</span><span>TOKENS</span>
+             <span>TIME</span><span>GATES</span><span>CORPUS</span><span>VERDICT</span>
+             <span>Δ VS BASELINE</span><span></span>`
+          : `<span>PROFILE</span><span>CELLS LAUNCHED</span><span>LAST LAUNCH</span><span></span>`}
       </div>
       <div class="pscroll" style="--clamp:${clamp}">
-        ${profiles.map((p) => profileRow(p, m)).join("")}
+        ${profiles.map((p) => profileRow(p, m, measured)).join("")}
       </div>
       ${over ? `<div class="note">${esc(`${profiles.length} profiles — scrolling; ten fit at a time`)}</div>` : ""}
+      ${measured || !unjoined
+        ? ""
+        : `<div class="note">${esc(`no measurement column is shown because none can be filled: ${unjoined.latest_cell_unavailable}`)}</div>`}
+      ${drawerFor(board, profiles)}
     </div>`;
 }
 
 /**
- * ONE PROFILE. The measurement columns are the CELL's, not the profile's — a
- * profile with no run has no numbers, and every column says `unobserved`
- * rather than 0. A zero here would assert a measured result of nothing.
+ * THE OPEN DRAWER SITS BELOW THE WELL, NOT INSIDE IT.
+ *
+ * `.pscroll` is height-clamped and scrolls; a drawer nested in it would open
+ * into a ten-row-tall box and immediately scroll its own contents away. Below
+ * the well the policy gets the full width of the accordion and the measurement
+ * rows above it stay where the operator left them.
  */
-function profileRow(p, m) {
+function drawerFor(board, profiles) {
+  const p = profiles.find((q) => q.id === expandedProfile);
+  return p ? profileDrawer(board, p) : "";
+}
+
+/**
+ * ONE PROFILE, in whichever of the two shapes the accordion resolved.
+ *
+ * MEASURED: the full cell table. Every column is the CELL's, not the profile's,
+ * and an absent value says `unobserved` rather than 0 — a zero would assert a
+ * measured result of nothing.
+ *
+ * LEAN: what is known without a cell — how many cells were launched under this
+ * profile and when the last one went out. No `unobserved` columns, because a
+ * column that can never be filled is not a pending measurement, it is a column
+ * that should not be drawn.
+ *
+ * THE ROW IS ALSO THE WAY IN TO THE FROZEN POLICY. It replaced a chip labelled
+ * OPEN INSPECTOR: the whole row is the target now, for the same reason the model
+ * row above it is, and the caret says so before the click rather than after.
+ */
+function profileRow(p, m, measured) {
   const runs = p.runs ?? [];
   const latest = runs.length ? runs[runs.length - 1] : null;
   const cell = p.latest_cell ?? null;
-  // The server states WHY there is no cell. That sentence is shown once under
-  // the row instead of letting eight `unobserved` columns imply a measurement
-  // is merely pending.
-  const why = !cell && p.latest_cell_unavailable ? p.latest_cell_unavailable : null;
+  const open = expandedProfile === p.id;
 
-  return `
-    <div class="prow">
-      <span class="pname" title="${esc(p.id)}">${esc(p.id)}${transferTag(p)}</span>
+  const head = `<span class="pname" title="${esc(p.id)}"><span class="pcaret">${open ? "▾" : "▸"}</span>${esc(p.id)}${transferTag(p)}</span>`;
+  const act = `<span class="pact">${gateBtn("data-run-profile", p.id, "+ run", p.can_run)}</span>`;
+  const attrs = `data-profile-expand="${esc(p.id)}" role="button" tabindex="0" aria-expanded="${open ? "true" : "false"}"`;
+
+  const body = measured
+    ? `${head}
       <span>${cell ? esc(phases(cell)) : nul("no run")}</span>
       <span>${num(cell?.turns, (v) => String(v))}</span>
       <span>${num(cell?.tokens, (v) => tok(v))}</span>
@@ -274,11 +395,25 @@ function profileRow(p, m) {
       <span>${corpusCell(cell)}</span>
       <span class="${cell?.verdict === "FAIL" ? "danger" : ""}">${cell?.verdict ? esc(cell.verdict) : nul("—")}</span>
       <span class="delta">${profileDelta(cell, m)}</span>
-      <span class="pact">${gateBtn("data-run-profile", p.id, "+ run", p.can_run)}</span>
-    </div>
-    ${p.can_run?.allowed === false && p.can_run?.reason ? `<div class="pwhy"><span class="null">${esc(p.can_run.reason)}</span></div>` : ""}
-    ${why ? `<div class="pwhy"><span class="null">${esc(why)}</span></div>` : ""}
-    ${latest && !cell ? `<div class="pwhy"><span class="null">${esc(`launched ${new Date(latest.started_at).toISOString().slice(0, 16).replace("T", " ")} — no measurement recorded yet`)}</span></div>` : ""}`;
+      ${act}`
+    : `${head}
+      <span>${runs.length ? esc(`${runs.length} cell${runs.length === 1 ? "" : "s"}`) : nul("none")}</span>
+      <span>${latest ? esc(launchedAt(latest)) : nul("never launched")}</span>
+      ${act}`;
+
+  return `
+    <div class="prow${open ? " open" : ""}${measured ? "" : " lean"}" ${attrs}>${body}</div>
+    ${p.can_run?.allowed === false && p.can_run?.reason ? `<div class="pwhy"><span class="null">${esc(p.can_run.reason)}</span></div>` : ""}`;
+}
+
+/** Launch time, to the minute. Seconds are noise on a cell that runs for hours. */
+function launchedAt(r) {
+  if (!r.started_at) return "time unobserved";
+  const d = new Date(r.started_at);
+  if (Number.isNaN(d.valueOf())) return "time unobserved";
+  return d.toLocaleString("en-GB", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
 }
 
 function transferTag(p) {
@@ -342,9 +477,198 @@ function sign(d) {
   return d > 0 ? "+" : d < 0 ? "−" : "±";
 }
 
+// ── THE FROZEN POLICY, IN PLACE ─────────────────────────────────────────────
+//
+// This is what the MEMORY PROFILE card and its inspector modal used to show,
+// rendered under the row it belongs to instead of in a separate surface that had
+// to guess which profile the operator meant.
+//
+// IT READS THE ROW'S OWN PROFILE — `p`, handed down from the accordion — and
+// never `board.profile`. That single global field is what made the old surfaces
+// wrong: with four profiles on disk it named one, and the operator could not
+// tell whether the policy on screen was the one whose row they had clicked.
+//
+// NOTHING HERE IS AN EDIT CONTROL. A frozen profile has no pencil, no "manage"
+// and no greyed-out button implying a later unlock — a disabled control is a
+// promise that it will one day be enabled. Frozen means the affordance is
+// absent. Changing an allowlist means freezing a new profile, which is what
+// [+ profile] on the model row above does.
+
+function profileDrawer(board, p) {
+  const frozen = p.created_at ? new Date(p.created_at).toLocaleString("en-GB") : null;
+
+  return `
+    <div class="pdrawer">
+      <div class="pd-head">
+        <span class="kick">FROZEN POLICY — READ-ONLY FOREVER</span>
+        <span class="note">${frozen ? esc(`frozen ${frozen}`) : nul("creation time unobserved")}</span>
+        <span class="spacer"></span>
+        ${activeTag(p)}
+        ${unfilteredBadge()}
+      </div>
+
+      <div class="pd-grid">
+        <div class="pd-col">
+          ${subjectSec(p)}
+          ${rosterSec(board, p)}
+        </div>
+        <div class="pd-col">
+          ${transferBlock(p.transfer)}
+          ${debtBlock()}
+          ${historySec(p)}
+        </div>
+      </div>
+
+      <div class="note">${esc(
+        "Freezing a profile writes the subject and the memory roster and does nothing else — it does not arm a cell, "
+        + "open a session, or attach a TUI. Runs start from + run on the row above, and only from there.",
+      )}</div>
+    </div>`;
+}
+
+/**
+ * ACTIVE vs SUPERSEDED, stated rather than left to the refusal.
+ *
+ * The launcher attributes every cell to the NEWEST profile and accepts no
+ * profile id (control/models-ledger.mjs), which is why `+ run` is dead on every
+ * older row. The row already carries that refusal; this says the same fact the
+ * positive way, because "superseded" is also the answer to "why does the curve
+ * not join these two series" — they were measured under different allowlists.
+ */
+function activeTag(p) {
+  return p.is_active
+    ? `<span class="tag on">ACTIVE — CELLS ATTRIBUTE HERE</span>`
+    : `<span class="tag" title="${esc("a newer profile is active; the launcher attributes every cell to it")}">SUPERSEDED</span>`;
+}
+
+/**
+ * THE SUBJECT — and the one enforcement fact that runs the OTHER way from the
+ * debt badge beside it. The roster is inert; the subject is not. Run start
+ * refuses a cell on any other model, so the OFF→ON pair cannot drift even while
+ * the allowlist does nothing.
+ */
+function subjectSec(p) {
+  return `
+    <div class="pd-sec">
+      <span class="kick">SUBJECT — THE MEASUREMENT</span>
+      <div class="pd-subject">
+        <span class="sval">${p.subject_model ? esc(p.subject_model) : nul("no subject frozen")}</span>
+        <span class="note">${esc(
+          "OFF and ON are both this model. Run start refuses a cell on any other — the subject is enforced, unlike the roster below.",
+        )}</span>
+      </div>
+    </div>`;
+}
+
+/**
+ * THE MEMORY ROSTER, IN FULL — picked models checked, the rest left visible and
+ * unchecked.
+ *
+ * Listing only the picks would hide the models that are excluded, and the
+ * excluded set is exactly what the debt block is about: every one of them still
+ * reaches recall today.
+ */
+function rosterSec(board, p) {
+  const roster = board.control?.roster ?? null;
+  const all = Array.isArray(roster?.models) ? roster.models : [];
+  const picked = new Set((p.memory_models ?? []).map((m) => (typeof m === "string" ? m : m?.id)));
+  const subj = p.subject_model ?? null;
+
+  // The roster can be unreachable while the profile is perfectly readable — the
+  // picks are frozen IN the profile, so they are drawn from it rather than
+  // showing nothing.
+  const rows = all.length
+    ? all.map((m) => {
+        const mid = typeof m === "string" ? m : m.id;
+        return rosterRow(mid, picked.has(mid), m, mid === subj);
+      })
+    : [...picked].map((mid) => rosterRow(mid, true, null, mid === subj));
+
+  return `
+    <div class="pd-sec">
+      <span class="kick">${esc(
+        all.length
+          ? `MEMORY ROSTER — ${picked.size} OF ${all.length} QUALIFIED`
+          : `MEMORY ROSTER — ${picked.size} QUALIFIED`,
+      )}</span>
+      <div class="pd-models">${rows.join("")}</div>
+      ${all.length
+        ? ""
+        : `<span class="note">${esc("roster unreachable — showing the allowlist frozen in the profile, which is authoritative regardless")}</span>`}
+    </div>`;
+}
+
+/**
+ * One roster row. A model with ZERO memories is marked: without it an operator
+ * sees a qualified model contribute nothing and concludes the filter is broken.
+ *
+ * A RETIRED ALIAS STILL APPEARS HERE, and that is deliberate. This is the
+ * PRODUCER roster, not the bench roster: a memory's producer is whichever model
+ * authored it, which may be a model the bench no longer runs. Dropping retired
+ * aliases would make a historical corpus unqualifiable. It is marked instead, so
+ * nobody reads its presence as the bench still offering to run it.
+ */
+function rosterRow(mid, on, m, isSubject) {
+  const n = m && typeof m === "object" && Number.isFinite(m.memories) ? m.memories : null;
+  const retired = m && typeof m === "object" ? (m.retired_reason ?? null) : null;
+  const note =
+    n === null
+      ? "memory count unobserved"
+      : n === 0
+        ? "0 memories — contributes nothing yet"
+        : `${n.toLocaleString()} memories in corpus`;
+
+  return `
+    <div class="mrow ${on ? "on" : "off"}${isSubject ? " subj" : ""}">
+      <span class="mcheck">${on ? "✓" : ""}</span>
+      <span class="mid">${esc(mid)}${retired ? ` <span class="muted" title="${esc(retired)}">· retired from the bench</span>` : ""}</span>
+      ${isSubject ? `<span class="subjtag">SUBJECT</span>` : ""}
+      <span class="mnote ${n === 0 ? "muted" : ""}">${esc(note)}</span>
+    </div>`;
+}
+
+/**
+ * RUNS UNDER THIS PROFILE.
+ *
+ * Attribution is what the control plane OBSERVED at launch. A cell started from
+ * the CLI is real and is deliberately absent, because it cannot be shown to have
+ * run under this allowlist — and that absence is STATED, since an empty list
+ * with no explanation reads as "no runs happened", which would be false.
+ */
+function historySec(p) {
+  const runs = Array.isArray(p.runs) ? [...p.runs].reverse() : [];
+
+  return `
+    <div class="pd-sec">
+      <div class="pd-secline">
+        <span class="kick">RUNS UNDER THIS PROFILE — ${runs.length}</span>
+        <span class="spacer"></span>
+        <span class="note">${esc("cells this control plane launched while this profile was active")}</span>
+      </div>
+      <div class="pd-cols"><span>ARM</span><span>MODEL</span><span>STARTED</span><span>LOG</span></div>
+      ${runs.length
+        ? runs.map(historyRow).join("")
+        : `<div class="pd-empty">${esc(
+            "no cell has been launched under this profile from this board. Cells started at the CLI are real but unattributed — "
+            + "they are not swept in here, because they cannot be shown to have run under this allowlist.",
+          )}</div>`}
+    </div>`;
+}
+
+function historyRow(r) {
+  const when = r.started_at ? new Date(r.started_at).toLocaleString("en-GB") : null;
+  return `
+    <div class="pd-row">
+      <span class="arm">${esc(String(r.arm ?? "—").toUpperCase())}</span>
+      <span class="model">${r.model ? esc(r.model) : nul("unobserved")}</span>
+      <span>${when ? esc(when) : nul("unobserved")}</span>
+      <span class="log">${r.log_name ? esc(r.log_name) : nul("unobserved")}</span>
+    </div>`;
+}
+
 // ── THE PINNED FLOOR + THE TWO-AXIS FOOTER ──────────────────────────────────
 
-function footer(s) {
+function footer(s, ledger) {
   const base = s.baseline;
   if (!base) {
     return `
@@ -353,6 +677,7 @@ function footer(s) {
           <span class="kick">PINNED — THE FLOOR</span>
           <span class="null">no OFF cell in this stack</span>
           <span class="note">Every Δ on this board is measured against one OFF cell. Without it nothing here can be compared.</span>
+          ${storedNote(ledger)}
         </div>
       </div>`;
   }
@@ -368,12 +693,28 @@ function footer(s) {
         <span class="note">n=1 by design. Not a distribution. Every Δ on this board is measured against this one cell.${
           s.baseline_scorable ? "" : " <span class='danger'>This cell is void-instrument — no Δ computed from it is valid.</span>"
         }</span>
+        ${storedNote(ledger)}
       </div>
       <div class="axes">
         ${effBox(base, latest, s)}
         ${corrBox(base, latest, s)}
       </div>
     </div>`;
+}
+
+/**
+ * WHERE THE FLOORS ARE RECORDED.
+ *
+ * THE PINNED CELL ABOVE IS THIS STACK'S FLOOR — one campaign, one OFF cell, and
+ * the two Δ boxes beside it are computed from that stack's own runs. It is NOT
+ * the same question as "which models have a floor", which is bench-wide and
+ * lives in the stored index. Naming the file keeps the two straight and tells a
+ * skeptic where to look without opening the control plane.
+ */
+function storedNote(ledger) {
+  const st = ledger?.baselines?.stored ?? null;
+  if (!st?.path) return "";
+  return `<span class="note">Per-model floors are recorded at <span class="bright">${esc(st.path)}</span> and served at /api/baselines — one derivation, read by every gate above.</span>`;
 }
 
 function effBox(base, latest, s) {

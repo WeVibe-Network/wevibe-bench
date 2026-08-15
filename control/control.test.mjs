@@ -31,7 +31,9 @@ import {
   emptyExtraction,
   refuse,
 } from "./contract.mjs";
-import { matchRuntime, DECLARED_CONTEXT, CONTEXT_CHOICES } from "./roster.mjs";
+import { matchRuntime, DECLARED_CONTEXT, CONTEXT_CHOICES, RETIRED_ALIASES, readRoster } from "./roster.mjs";
+import { readBaselines, BASELINES_FILE, isArchivedRun } from "./baselines.mjs";
+import { manifestArgFor, campaignDirName } from "./campaign.mjs";
 import { sessionIdFrom, terminalFrom, pidAlive, newestLog } from "./runstate.mjs";
 import { mapEvent, EventRing } from "./events.mjs";
 import { parseGateEvents, gradingStatus } from "./gate-events.mjs";
@@ -162,6 +164,67 @@ test("DRIFT: declared context matches WORKER_MODEL_REGISTRY in config.py", () =>
       block.includes(pretty) || block.includes(String(ctx)),
       `alias '${alias}' declares context ${ctx} here but config.py disagrees`,
     );
+  }
+});
+
+test("ROSTER: a retired alias is refused bench eligibility even when the proxy blesses it", async () => {
+  // `wevibe-bench-worker` maps upstream to `auto` — a cell run on it measures
+  // whichever model happened to be resident and records no identity. The design
+  // is retired, but the PROXY still advertises the alias with purpose
+  // 'wevibe-bench' (its roster lives in another service). Eligibility computed
+  // from purpose alone therefore kept offering it a [+ baseline] button.
+  const proxy = {
+    object: "list",
+    data: [
+      { id: "wevibe-bench-worker", upstream_model: "auto", purpose: "wevibe-bench" },
+      { id: "qwen3.6-35b-a3b-bench", upstream_model: "Qwen3.6-35B-A3B-MLX-8bit", purpose: "wevibe-bench" },
+    ],
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) =>
+    new Response(JSON.stringify(String(url).includes("/v1/models") ? proxy : { data: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  try {
+    const roster = await readRoster({ proxyUrl: "http://x", runtimeUrl: "http://y" });
+    const byId = Object.fromEntries(roster.models.map((m) => [m.id, m]));
+
+    assert.equal(byId["wevibe-bench-worker"].bench_eligible, false, "a retired alias is never bench-eligible");
+    assert.match(byId["wevibe-bench-worker"].retired_reason, /resident behind the proxy/);
+    // It is still LISTED — vanishing without explanation looks like the proxy
+    // lost it, which is a different and false diagnosis.
+    assert.equal(byId["wevibe-bench-worker"].purpose, "wevibe-bench");
+    assert.equal(byId["qwen3.6-35b-a3b-bench"].bench_eligible, true);
+    assert.equal(byId["qwen3.6-35b-a3b-bench"].retired_reason, null);
+    assert.deepEqual(roster.bench_models.map((m) => m.id), ["qwen3.6-35b-a3b-bench"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("DRIFT: retired aliases match RETIRED_MODEL_ALIASES in config.py", () => {
+  // The two sides cannot import each other (JS control plane, Python harness),
+  // so they are pinned. A retirement declared on ONE side only is the dangerous
+  // case: the CLI would refuse the alias while the board still offered it a
+  // [+ baseline] button, or the reverse.
+  const src = readFileSync(join(BENCH, "wevibe_bench", "config.py"), "utf8");
+  const block = /RETIRED_MODEL_ALIASES: dict\[str, str\] = \{([\s\S]*?)\n\}/.exec(src);
+  assert.ok(block, "RETIRED_MODEL_ALIASES not found in config.py");
+  const pythonIds = [...block[1].matchAll(/^\s{4}"([^"]+)":/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    Object.keys(RETIRED_ALIASES).sort(),
+    pythonIds.sort(),
+    "a retirement is declared on one side only — the bench and the board disagree about what may run",
+  );
+});
+
+test("ROSTER: a retired alias declares no bench context", () => {
+  // The two maps must not disagree: a declared context is a promise the bench
+  // will run the alias at that window.
+  for (const id of Object.keys(RETIRED_ALIASES)) {
+    assert.equal(DECLARED_CONTEXT[id], undefined, `${id} is retired but still declares a bench context`);
+    assert.match(RETIRED_ALIASES[id], /retired/i, "a retirement states its reason");
   }
 });
 
@@ -1709,6 +1772,130 @@ test("LEDGER: + run is closed on any profile that is not the active one", async 
   for (const p of profs.filter((p) => !p.can_run.allowed)) {
     assert.match(p.can_run.reason, /newest profile/);
   }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a profile on one model never blocks another model's + baseline", async () => {
+  // THE DEFECT THIS PINS. The subject rule was applied to OFF cells as well as
+  // ON, so freezing the first profile disabled [+ baseline] on every OTHER
+  // bench model — and since [+ profile] gates on a floor, no second model could
+  // ever be benchmarked. The whole bench silently locked to whichever model was
+  // profiled first, with four permanently disabled buttons to show for it.
+  //
+  // A baseline is measured against nothing. One floor per model, and no other
+  // model's profile has any bearing on it.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });           // m-a has a floor
+  const prof = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+  assert.equal(prof.ok, true);
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [
+      { id: "m-a", bench_eligible: true },
+      { id: "m-b", bench_eligible: true },
+      { id: "m-c", bench_eligible: true },
+    ],
+    runInFlight: false,
+  });
+
+  const byId = Object.fromEntries(led.models.map((m) => [m.id, m]));
+  // m-a is profiled AND floored: no second baseline, but profiles are open.
+  assert.equal(byId["m-a"].can_baseline.allowed, false);
+  assert.match(byId["m-a"].can_baseline.reason, /already has a valid baseline/);
+  // Every other model may still measure its own floor.
+  for (const id of ["m-b", "m-c"]) {
+    assert.equal(byId[id].can_baseline.allowed, true, `${id} must be able to measure its own floor`);
+    assert.equal(byId[id].can_baseline.reason, null, "an open gate states no refusal");
+    // …and cannot be profiled until it has one.
+    assert.equal(byId[id].can_profile.allowed, false);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("CAMPAIGN: a second model gets its own directory; the first keeps runs/cumulative", async () => {
+  // WHY THIS EXISTS. Every launch used to target runs/cumulative/manifest.json,
+  // whose roster hash is frozen to ONE model. A baseline for a second model died
+  // at startup with `roster hash drift detected` — so opening [+ baseline] for
+  // every un-floored model is only honest if each model has somewhere to write.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-camp-"));
+  mkdirSync(join(root, "cumulative"), { recursive: true });
+  writeFileSync(join(root, "cumulative", "manifest.json"), JSON.stringify({
+    roster: [{ model: "local-llm-proxy/m-a" }],
+    schedule: [{ sequence_index: 0, memory_mode: "off", provider_pin: "m-a" }],
+  }));
+
+  // The owner keeps the default path — null means "pass no --manifest", so the
+  // live campaign's invocation is byte-identical to what it has always been.
+  assert.equal(await manifestArgFor("m-a", root), null);
+  // Every other model is routed away from it.
+  assert.equal(await manifestArgFor("m-b", root), join(root, "cumulative-m-b", "manifest.json"));
+
+  // …and STABLY: a second call for the same model resolves to the same place,
+  // so cell 2 continues the campaign cell 1 started.
+  assert.equal(await manifestArgFor("m-b", root), join(root, "cumulative-m-b", "manifest.json"));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("CAMPAIGN: a dotted model alias never produces an archive-shaped directory", () => {
+  // `isArchivedRun()` reads ANY dot as the archive convention
+  // (runs/cumulative.<why>-<date>). A directory named for `qwen3.6-…` would
+  // therefore be treated as archived and its baseline would silently disappear
+  // from the floor index — a measured ~3h cell, invisible, with no error.
+  const name = campaignDirName("qwen3.6-35b-a3b-bench");
+  assert.equal(name, "cumulative-qwen3-6-35b-a3b-bench");
+  assert.equal(isArchivedRun(name), false, "the campaign directory must not read as archived");
+  assert.equal(isArchivedRun("cumulative.void-truncation-20260812"), true, "…while a real archive still does");
+});
+
+test("CAMPAIGN: an unreadable legacy manifest never relocates the live campaign", async () => {
+  // Corrupt manifest => the harness must fail loudly on the default path. Moving
+  // the campaign to a fresh directory instead would present as the entire run
+  // history having vanished.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-camp-"));
+  mkdirSync(join(root, "cumulative"), { recursive: true });
+  writeFileSync(join(root, "cumulative", "manifest.json"), "{ not json");
+  assert.equal(await manifestArgFor("m-a", root), null, "a broken campaign is faced, not routed around");
+
+  // Readable but model-less: also treated as "mine" rather than relocated.
+  writeFileSync(join(root, "cumulative", "manifest.json"), JSON.stringify({ schedule: [] }));
+  assert.equal(await manifestArgFor("m-a", root), null);
+
+  // ABSENT is the different answer: nothing has claimed the default directory,
+  // so this model names its own.
+  rmSync(join(root, "cumulative"), { recursive: true, force: true });
+  assert.equal(await manifestArgFor("m-a", root), join(root, "cumulative-m-a", "manifest.json"));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BASELINES: the index is the single export, and it is written to disk", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wevibe-base-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });           // m-a floored
+  const models = [{ id: "m-a", bench_eligible: true }, { id: "m-b", bench_eligible: true }];
+
+  const idx = await readBaselines({ runsRoot: root, models });
+  assert.equal(idx.ok, true);
+  assert.equal(idx.models["m-a"].scorable, true);
+  // A model with no OFF cell still gets an ENTRY carrying the reason — an
+  // absent key is indistinguishable from "not on the bench".
+  assert.equal(idx.models["m-b"].scorable, false);
+  assert.match(idx.models["m-b"].reason, /no OFF cell has ever been run/);
+
+  // STORED: the export lands on disk, and matches what was served.
+  assert.equal(idx.stored.written, true);
+  const onDisk = JSON.parse(readFileSync(join(root, BASELINES_FILE), "utf8"));
+  assert.deepEqual(onDisk.models, idx.models);
+
+  // Re-derived with nothing changed: same answer, and the file is NOT rewritten
+  // — the mtime stays meaningful as "when the floor last changed".
+  const again = await readBaselines({ runsRoot: root, models });
+  assert.deepEqual(again.models, idx.models);
+  assert.equal(again.stored.written, false);
+
+  // THE LEDGER READS THIS SAME INDEX rather than deriving its own.
+  const led = await readModelsLedger({ runsRoot: root, benchModels: models, runInFlight: false });
+  assert.deepEqual(led.baselines.models, idx.models);
+  for (const m of led.models) assert.deepEqual(m.baseline.scorable, idx.models[m.id].scorable);
   rmSync(root, { recursive: true, force: true });
 });
 

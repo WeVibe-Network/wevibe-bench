@@ -1,36 +1,46 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// PANEL: MEMORY PROFILE — the inspector, and the ONLY place a run starts
+// PANEL: MEMORY PROFILE — FREEZING one, and the words every surface reuses
 //
-// ── WHAT CHANGED AND WHY (WO-BOARD-PROFILE-1) ───────────────────────────────
+// ── WHAT THIS FILE IS, AFTER THE CONSOLIDATION ──────────────────────────────
 //
-// Two operator-reported defects are fixed here.
+// TWO THINGS, and nothing else:
 //
-// 1. "There is no means to click on the profile to understand how it is
-//    configured after it is configured." True: the frozen profile rendered as a
-//    flat card with no affordance, and the only interactive control on the
-//    surface was the CREATE button, which vanished once a profile existed. The
-//    profile is now openable — the ledger's PROFILE chip is a button — and the
-//    inspector carries the configuration, the baseline, the historical overlay,
-//    the run history, and run start.
+//   1. THE CREATION MODAL — the two questions asked when [+ profile] is clicked
+//      on a model row, and the POST that freezes the answers.
+//   2. THE SHARED VOCABULARY — the debt badge, the debt block and the transfer
+//      edge, exported so the ledger renders the SAME words rather than its own.
 //
-// 2. "I created a memory profile and nothing happened. I thought it would start
-//    a new session." Investigated: NO auto-start was ever coded. The old
-//    create handler mutated a browser-local object and returned; it posted
-//    nothing and spawned nothing, and the object was overwritten by the next
-//    2s poll because no source produced it. So there was no auto-start feature
-//    to remove — there was a missing start feature, and a silent surface.
+// READING a frozen profile now happens in ONE place: the RUN LEDGER's accordion
+// drawer (panels/ledger.js). This file used to carry two more surfaces — a
+// board-level MEMORY PROFILE card and the full-screen inspector it opened — and
+// both are deleted. They read `board.profile`, a single global "the profile"
+// from the era of one profile per machine, so with four profiles on disk they
+// showed one and gave no way to tell which. The ledger holds every profile keyed
+// to the model it measures, which is the shape the data actually has.
 //
-//    Both halves are answered: creation now persists through the control plane,
-//    and the inspector states CREATION SIDE EFFECTS — NONE in words, so the
-//    surface never again leaves the operator guessing what a click did.
+// Everything those surfaces said is preserved in the drawer: subject, the full
+// roster with corpus counts, transfer, the debt block, the run history, and
+// CREATION SIDE EFFECTS — NONE. What is gone is the duplication, not the facts.
+//
+// ── THE OPERATOR REPORT THAT STILL GOVERNS THIS FILE ────────────────────────
+//
+// "I created a memory profile and nothing happened. I thought it would start a
+// new session." Investigated: NO auto-start was ever coded. The old create
+// handler mutated a browser-local object and returned; it posted nothing and
+// spawned nothing, and the object was overwritten by the next 2s poll because no
+// source produced it. So there was no auto-start feature to remove — there was a
+// missing start feature, and a silent surface.
+//
+// Both halves stay answered: creation persists through the control plane, and
+// the modal states in words that freezing starts nothing.
 //
 // ── IMMUTABLE, AND THE CONTROL IS ABSENT RATHER THAN DISABLED ───────────────
-// One profile per ON stack, frozen at creation. Changing the allowlist means
-// starting a NEW stack. There is no pencil, no "manage", and no greyed-out
-// button implying a later unlock — a disabled control is a promise that it will
-// one day be enabled. Frozen means the affordance does not exist.
+// A profile is frozen at creation. Changing the allowlist means freezing a new
+// one. There is no pencil, no "manage", and no greyed-out button implying a
+// later unlock — a disabled control is a promise that it will one day be
+// enabled. Frozen means the affordance does not exist.
 //
-// Why it must be frozen: every run in the stack is measured under one policy.
+// Why it must be frozen: every run under a profile is measured under one policy.
 // A profile edited at run 4 would silently make runs 1–3 incomparable to 4–N,
 // and the curve would be a line through two different experiments.
 //
@@ -52,13 +62,15 @@
 // make every ON result unattributable — the operator would attribute a result
 // to a curated subset that was never curated. That is the exact failure this
 // benchmark exists to detect, so the badge is doubled (the WORDS plus a double
-// rule, legible in greyscale) and appears EVERYWHERE the profile appears.
+// rule, legible in greyscale) and appears EVERYWHERE the profile appears — which
+// is why `debtBlock` and `unfilteredBadge` are exported to the ledger rather
+// than re-worded there.
 //
 // The badge disappears the day the backend filter lands. It is the visible
 // debt, not decoration.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { esc, nul, dur } from "../board.js";
+import { esc } from "../board.js";
 
 export const DEBT_BADGE = "⚠ DECLARED — NOT YET ENFORCED";
 
@@ -113,9 +125,6 @@ export function isPending() {
 export function currentRefusal() {
   return refusal;
 }
-
-/** Inspector visibility. Separate from the creation modal — different jobs. */
-let inspector = false;
 
 /**
  * `subjectModel` is the model the operator clicked [+ profile] ON. Preselecting
@@ -180,9 +189,9 @@ export function profileSelection() {
  * roster.mjs mirrors the Python context registry rather than importing it).
  *
  * Blast radius is deliberately tiny: this drives the PRE-FREEZE preview only.
- * Once frozen, `board.profile.transfer` comes from the service and the
- * inspector renders that, so any drift between the two shows up immediately as
- * the preview disagreeing with the inspector for the same pair of choices.
+ * Once frozen, the transfer edge comes from the service and the ledger's drawer
+ * renders THAT, so any drift between the two shows up immediately as the
+ * preview disagreeing with the drawer for the same pair of choices.
  */
 function inferTransfer(subjectId, roster) {
   if (!subjectId || !roster.length) return null;
@@ -190,50 +199,6 @@ function inferTransfer(subjectId, roster) {
   const self = roster.includes(subjectId);
   if (!foreign.length) return { kind: "self", direction: "same", self: true, foreign: [] };
   return { kind: self ? "mixed" : "cross", direction: "unranked", self, foreign };
-}
-
-export function openInspector() {
-  inspector = true;
-}
-export function closeInspector() {
-  inspector = false;
-}
-export function isInspectorOpen() {
-  return inspector;
-}
-
-// ── THE FROZEN PROFILE, AS SHOWN ON THE BOARD ───────────────────────────────
-//
-// The board-level card is a SUMMARY that opens the inspector. It keeps the debt
-// badge, because the badge must ride every surface the profile appears on — an
-// operator who only ever sees the summary must still see the debt.
-
-export function renderProfile(board) {
-  const p = board.profile ?? {};
-  if (!p.exists) return "";
-
-  return `
-    <section class="panel profile-card">
-      <div class="phead">
-        <span class="kick">MEMORY PROFILE — READ-ONLY FOREVER</span>
-        <span class="sub">${p.created_at ? esc(`frozen ${new Date(p.created_at).toLocaleString("en-GB")}`) : nul("creation time unobserved")}</span>
-        <span class="spacer"></span>
-        <button class="btn sm" data-profile-inspect="1">OPEN INSPECTOR →</button>
-      </div>
-      <div class="profile-subject">
-        <span class="skick">SUBJECT — OFF→ON</span>
-        <span class="sval">${p.subject_model ? esc(p.subject_model) : nul("no subject frozen")}</span>
-      </div>
-      <div class="profile-models">
-        <span class="skick">MEMORY ROSTER</span>
-        ${(p.memory_models ?? []).length
-          ? p.memory_models.map((m) => `<span>✓ ${esc(typeof m === "string" ? m : m.id)}</span>`).join("")
-          : `<span class="null">${esc("no producer models in profile")}</span>`}
-      </div>
-      ${transferBlock(p.transfer, { compact: true })}
-      ${debt()}
-      <div class="note">No edit affordance exists on this surface. There is no pencil, no “manage”, no disabled button implying a later unlock. Frozen means the control is absent, not greyed.</div>
-    </section>`;
 }
 
 /** The doubled badge. Words + double rule, so greyscale still carries it. */
@@ -254,8 +219,13 @@ export function debt() {
  *
  * Same-model is not a special case bolted on. It is `self` — the degenerate
  * edge, and the base measurement being run today.
+ *
+ * EXPORTED, AND THE ONLY DEFINITION. The ledger's drawer draws the frozen edge
+ * with this same function; the modal draws the pre-freeze preview with it. A
+ * second copy in the ledger could word "direction UNRANKED" differently and turn
+ * one refusal to rank models into two claims that look unrelated.
  */
-function transferBlock(t, { compact = false } = {}) {
+export function transferBlock(t) {
   if (!t) {
     return `
       <div class="xfer unset">
@@ -281,13 +251,11 @@ function transferBlock(t, { compact = false } = {}) {
     <div class="xfer ${esc(t.kind)}">
       <span class="xfer-kind">TRANSFER — ${esc(word)}</span>
       <span class="xfer-dir ${t.direction === "same" ? "settled" : "unranked"}">${esc(dirWord)}</span>
-      ${compact
-        ? ""
-        : `<span class="note">${esc(
-            t.kind === "self"
-              ? "the subject recalls only memories it authored itself — the base measurement. Producer and consumer are one identity, so up/down does not apply rather than being unknown."
-              : `memories from ${t.foreign.length} model${t.foreign.length === 1 ? "" : "s"} other than the subject: ${t.foreign.join(", ")}${t.self ? ", plus the subject's own" : ""}. Whether this is a transfer up or down is not claimed — ranking two models requires a measured floor for each on this task, and none is asserted by declaration.`,
-          )}</span>`}
+      <span class="note">${esc(
+        t.kind === "self"
+          ? "the subject recalls only memories it authored itself — the base measurement. Producer and consumer are one identity, so up/down does not apply rather than being unknown."
+          : `memories from ${t.foreign.length} model${t.foreign.length === 1 ? "" : "s"} other than the subject: ${t.foreign.join(", ")}${t.self ? ", plus the subject's own" : ""}. Whether this is a transfer up or down is not claimed — ranking two models requires a measured floor for each on this task, and none is asserted by declaration.`,
+      )}</span>
     </div>`;
 }
 
@@ -296,298 +264,15 @@ export function unfilteredBadge() {
   return `<span class="debt sm">UNFILTERED RECALL</span>`;
 }
 
-// ── THE INSPECTOR ───────────────────────────────────────────────────────────
-//
-// Design 5a. Two columns: the frozen policy on the left, the evidence produced
-// under it on the right, with run start welded to the bottom of the evidence
-// column — you start the next run underneath the record of every previous one.
-
-export function renderInspector(board, runCtl) {
-  if (!inspector) return "";
-
-  const p = board.profile ?? {};
-  if (!p.exists) return "";
-
-  return `
-    <div class="modal-scrim" data-inspect-scrim="1">
-      <div class="modal inspector" role="dialog" aria-modal="true" aria-label="Memory profile inspector">
-        <div class="insp-head">
-          <span class="kick">MEMORY PROFILE — ${esc(p.id ?? "unidentified")}</span>
-          <span class="sub">${inspectorSub(p, board)}</span>
-          <span class="spacer"></span>
-          <span class="debt sm">UNFILTERED RECALL</span>
-          <button class="btn sm" data-inspect-close="1">ESC</button>
-        </div>
-
-        <div class="insp-body">
-          <div class="insp-left">
-            ${subjectBlock(board, p)}
-            ${qualifiedModels(board, p)}
-            ${transferBlock(p.transfer)}
-            ${debtBlock()}
-            ${baselineBlock(board)}
-            <div class="insp-spacer"></div>
-            ${sideEffectsBlock()}
-          </div>
-
-          <div class="insp-right">
-            ${overlayBlock(board)}
-            ${historyBlock(board, p)}
-            <div class="insp-spacer"></div>
-            ${runCtl}
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-function inspectorSub(p, board) {
-  const bits = [];
-  if (p.created_at) bits.push(`frozen ${new Date(p.created_at).toLocaleString("en-GB")}`);
-  if (p.stack_id) bits.push(`stack ${p.stack_id}`);
-  bits.push("read-only forever");
-  return esc(bits.join(" · "));
-}
-
 /**
- * THE SUBJECT MODEL — the OFF→ON pair.
- *
- * Stated FIRST and on its own, above the roster, because it is the measurement
- * and the roster is only the variable applied to it. It also carries the one
- * enforcement fact that runs the other way from the debt badge below: unlike
- * the roster, the subject IS enforced — run start refuses a cell on any other
- * model — so the operator can rely on the OFF→ON pair never drifting even
- * though the roster is inert.
+ * THE DEBT, IN FULL SENTENCES. Exported: the ledger's drawer draws this one,
+ * beside the roster it is talking about.
  */
-function subjectBlock(board, p) {
-  const s = board.stack ?? {};
-  const baselineModel = s.baseline?.model ?? null;
-
-  // A baseline belonging to a DIFFERENT model than the frozen subject makes
-  // every Δ on this board a model-vs-model comparison. It should be impossible
-  // now that start enforces the subject, but a stack predating this profile can
-  // carry one — so it is checked and named rather than assumed away.
-  const mismatch =
-    p.subject_model && baselineModel && baselineModel !== p.subject_model ? baselineModel : null;
-
+export function debtBlock() {
   return `
-    <div class="insp-sec">
-      <span class="kick">SUBJECT MODEL — THE MEASUREMENT</span>
-      <div class="insp-subject">
-        <span class="sval">${p.subject_model ? esc(p.subject_model) : nul("no subject frozen")}</span>
-        <span class="note">${esc("OFF and ON are both this model. Run start refuses a cell on any other — the subject is enforced, unlike the roster below.")}</span>
-      </div>
-      ${mismatch
-        ? `<div class="insp-mismatch">${esc(`BASELINE MODEL MISMATCH — the floor on this board was run on ${mismatch}, not ${p.subject_model}. A Δ against it compares two models' capabilities, not memory lift. Re-baseline on the subject before reading any delta here.`)}</div>`
-        : ""}
-    </div>`;
-}
-
-/**
- * MODELS QUALIFIED FOR INJECTED MEMORIES — the memory roster.
- *
- * The roster is shown in FULL, with the profile's picks checked and the rest
- * left visible and unchecked. Listing only the chosen three would hide the six
- * that are excluded, and the excluded set is exactly what the debt block below
- * is talking about — every one of them still reaches recall today.
- *
- * The subject is marked where it appears, ticked or not: "the subject's own
- * memories are/are not in scope" is the single fact that separates the base
- * measurement from a cross-model one, and it must be readable at a glance.
- */
-function qualifiedModels(board, p) {
-  const roster = board.control?.roster ?? null;
-  const all = Array.isArray(roster?.models) ? roster.models : [];
-  const picked = new Set((p.memory_models ?? []).map((m) => (typeof m === "string" ? m : m?.id)));
-
-  // The roster can be unreachable while the profile is perfectly readable. In
-  // that case the picks are still known — they are frozen in the profile — so
-  // they are rendered from the profile itself rather than showing nothing.
-  const subj = p.subject_model ?? null;
-  const rows = all.length
-    ? all.map((m) => {
-        const mid = typeof m === "string" ? m : m.id;
-        return modelRow(mid, picked.has(mid), m, mid === subj);
-      })
-    : [...picked].map((mid) => modelRow(mid, true, null, mid === subj));
-
-  const head = all.length
-    ? `MODELS QUALIFIED FOR INJECTED MEMORIES — ${picked.size} OF ${all.length}`
-    : `MODELS QUALIFIED FOR INJECTED MEMORIES — ${picked.size}`;
-
-  return `
-    <div class="insp-sec">
-      <span class="kick">${esc(head)}</span>
-      <div class="insp-models">${rows.join("")}</div>
-      ${all.length ? "" : `<span class="note">${esc("roster unreachable — showing the allowlist frozen in the profile, which is authoritative regardless")}</span>`}
-    </div>`;
-}
-
-function modelRow(mid, on, m, isSubject = false) {
-  // A model with zero memories is marked. Without this the operator sees a
-  // qualified model contribute nothing and concludes the filter is broken —
-  // the count is the whole point of the row.
-  const n = m && typeof m === "object" && Number.isFinite(m.memories) ? m.memories : null;
-  const note =
-    n === null
-      ? "memory count unobserved"
-      : n === 0
-        ? "0 memories — contributes nothing yet"
-        : `${n.toLocaleString()} memories in corpus`;
-
-  return `
-    <div class="mrow ${on ? "on" : "off"}${isSubject ? " subj" : ""}">
-      <span class="mcheck">${on ? "✓" : ""}</span>
-      <span class="mid">${esc(mid)}</span>
-      ${isSubject ? `<span class="subjtag">SUBJECT</span>` : ""}
-      <span class="mnote ${n === 0 ? "muted" : ""}">${esc(note)}</span>
-    </div>`;
-}
-
-function debtBlock() {
-  return `
-    <div class="insp-debt">
+    <div class="pd-debt">
       <span class="debt-kick">${esc(DEBT_BADGE)}</span>
-      <span class="debt-body">Recall cannot filter by producing model today. Every ON run under this profile retrieves from the whole corpus, including every model above that is unchecked. Freezing the allowlist to disk records the policy; it does not apply it.</span>
-    </div>`;
-}
-
-/**
- * BASELINE — the gate on starting an ON run.
- *
- * Three distinct answers, never collapsed: a scorable floor, a floor the
- * harness itself refuses to score (void-instrument), and no floor at all. The
- * middle case is the one that matters — a void baseline looks like a baseline
- * until you ask whether it can be measured against.
- */
-function baselineBlock(board) {
-  const s = board.stack ?? {};
-  const b = s.baseline ?? null;
-
-  if (!b) {
-    return `
-      <div class="insp-sec">
-        <span class="kick">BASELINE</span>
-        <div class="insp-baseline bad">
-          <span class="ttl danger">✕ NONE</span>
-          <span class="note">${esc("no OFF cell exists in this stack")}</span>
-        </div>
-        <span class="note">A stack with no complete baseline cannot start an ON run — there would be no floor to measure against.</span>
-      </div>`;
-  }
-
-  if (s.baseline_scorable === false) {
-    return `
-      <div class="insp-sec">
-        <span class="kick">BASELINE</span>
-        <div class="insp-baseline bad">
-          <span class="ttl danger">✕ VOID-INSTRUMENT</span>
-          <span class="note">${esc(b.terminal_reason ?? "the harness refuses to score this cell")}</span>
-        </div>
-        <span class="note">RUNBOOK 5.10: an instrument failure, not a capability result. It is not scored, so no delta against it would be valid. Re-run the baseline.</span>
-      </div>`;
-  }
-
-  const g = b.gates ?? {};
-  const gateTxt =
-    g.failed === null || g.failed === undefined
-      ? "gates not measured"
-      : `${(g.total ?? 0) - g.failed}/${g.total ?? "?"} obs`;
-
-  return `
-    <div class="insp-sec">
-      <span class="kick">BASELINE</span>
-      <div class="insp-baseline">
-        <span class="ttl">✓ COMPLETE</span>
-        <span class="note">${esc(`OFF cell · ${b.turns ?? "?"} turns · ${gateTxt} · n=${s.baseline_n ?? 1}`)}</span>
-      </div>
-      <span class="note">n=1 BY DESIGN — a single observation, not a distribution. This stack can start an ON run.</span>
-    </div>`;
-}
-
-/**
- * CREATION SIDE EFFECTS — NONE.
- *
- * This block is the direct answer to the operator's report. It is load-bearing
- * documentation on the surface itself: it states that creating a profile writes
- * an allowlist and does nothing else, so the next operator does not sit waiting
- * for a session that was never going to open.
- */
-function sideEffectsBlock() {
-  return `
-    <div class="insp-sec insp-sfx">
-      <span class="kick">CREATION SIDE EFFECTS — NONE</span>
-      <span class="note">Creating a profile freezes an allowlist and writes nothing else. It does not arm a cell, open a session, or attach a TUI. Runs start from the control below, and only from there.</span>
-    </div>`;
-}
-
-/**
- * THE HISTORICAL OVERLAY.
- *
- * Prior profiles are drawn as their own listed series and are NEVER joined to
- * the active one. They were measured under a DIFFERENT allowlist, so a line
- * across them would draw a trend spanning two different experiments — the same
- * reason the curve refuses a line at n=1.
- */
-function overlayBlock(board) {
-  const all = board.profiles ?? null;
-  const prior = Array.isArray(all?.prior) ? all.prior : [];
-  const active = all?.active ?? null;
-
-  return `
-    <div class="insp-sec">
-      <div class="insp-secline">
-        <span class="kick">TRANSFER CURVE — HISTORICAL OVERLAY</span>
-        <span class="spacer"></span>
-        <span class="note">${esc(prior.length ? `${prior.length} prior profile${prior.length === 1 ? "" : "s"}` : "no prior profile")}</span>
-      </div>
-      <div class="insp-overlay">
-        <span class="ov-row"><span class="ov-dot solid"></span>${esc(`${active?.id ?? "this profile"} — ${(active?.runs ?? []).length} cell${(active?.runs ?? []).length === 1 ? "" : "s"} attributed`)}</span>
-        ${prior.length
-          ? prior
-              .map(
-                (q) =>
-                  `<span class="ov-row"><span class="ov-dot hollow"></span>${esc(`${q.id} — ${(q.runs ?? []).length} cells, different allowlist, drawn hollow and never joined by a line`)}</span>`,
-              )
-              .join("")
-          : `<span class="note">${esc("nothing to overlay — this is the first profile on this machine")}</span>`}
-      </div>
-    </div>`;
-}
-
-/**
- * RUNS UNDER THIS PROFILE.
- *
- * Attribution is what this service OBSERVED at launch. A cell launched from the
- * CLI is real and is deliberately absent, because it cannot be shown to have
- * run under this allowlist. That absence is STATED — an empty list with no
- * explanation reads as "no runs happened", which would be false.
- */
-function historyBlock(board, p) {
-  const runs = Array.isArray(p.runs) ? [...p.runs].reverse() : [];
-
-  return `
-    <div class="insp-sec">
-      <div class="insp-secline">
-        <span class="kick">RUNS UNDER THIS PROFILE — ${runs.length}</span>
-        <span class="spacer"></span>
-        <span class="note">${esc("cells this control plane launched while this profile was active")}</span>
-      </div>
-      <div class="insp-cols"><span>ARM</span><span>MODEL</span><span>STARTED</span><span>LOG</span></div>
-      ${runs.length
-        ? runs.map(historyRow).join("")
-        : `<div class="insp-empty">${esc("no cell has been launched under this profile from this board. Cells started at the CLI are real but unattributed — they are not swept in here, because they cannot be shown to have run under this allowlist.")}</div>`}
-    </div>`;
-}
-
-function historyRow(r) {
-  const when = r.started_at ? new Date(r.started_at).toLocaleString("en-GB") : null;
-  return `
-    <div class="insp-row">
-      <span class="arm">${esc(String(r.arm ?? "—").toUpperCase())}</span>
-      <span class="model">${r.model ? esc(r.model) : nul("unobserved")}</span>
-      <span>${when ? esc(when) : nul("unobserved")}</span>
-      <span class="log">${r.log_name ? esc(r.log_name) : nul("unobserved")}</span>
+      <span class="debt-body">Recall cannot filter by producing model today. Every ON run under this profile retrieves from the whole corpus, including every model in the roster that is unchecked. Freezing the allowlist to disk records the policy; it does not apply it.</span>
     </div>`;
 }
 
@@ -668,7 +353,7 @@ export function renderProfileModal(board) {
           The recall path cannot filter by producing model today. <span class="bright">producer_model_id</span> is written to the payload and read back, but no recall request carries an allowlist. This profile is <span class="bright">recorded against the stack</span> and <span class="bright">not applied to retrieval</span>. Until the backend filter lands, every ON run in this stack recalls the whole corpus.
         </div>
 
-        <div class="note">Creating this profile freezes the subject and the memory roster and does nothing else — it does not arm a cell, open a session, or attach a TUI. Start a run from the inspector afterwards.</div>
+        <div class="note">Creating this profile freezes the subject and the memory roster and does nothing else — it does not arm a cell, open a session, or attach a TUI. It appears in the RUN LEDGER under its subject model; start a run from + run on that row.</div>
 
         <div class="modal-foot">
           ${refusalBlock()}

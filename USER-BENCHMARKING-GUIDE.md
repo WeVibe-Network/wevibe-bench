@@ -41,12 +41,20 @@ They are distinct from interactive aliases: bench aliases carry FULL native cont
 | `qwen3.6-35b-a3b-bench` | oMLX | `Qwen3.6-35B-A3B-MLX-8bit` | 262144 | 32768 |
 | `qwen3.6-40b-deckard-bench` | LM Studio | `qwen3.6-40b-claude-4.6-opus-deckard-heretic-uncensored-thinking-neo-code-di-imatrix-max` | 262144 | 32768 |
 | `qwen3.6-27b-fable-bench` | LM Studio | `qwen3.6-27b-fable-fusion-711-uncensored-heretic-nm-dau-neo-max-mtp` | 262144 | 32768 |
-| `wevibe-bench-worker` | oMLX | `auto` (whatever is resident) | 262144 | 32768 |
 
 Two more aliases exist but are NOT subject models:
 - `wevibe-bench-poller` — 32k, the poller's judge role only.
-- `wevibe-bench-worker` — the neutral "whatever is resident" slug. Use it only when you
-  deliberately do not want to pin a model.
+- `wevibe-bench-worker` — **RETIRED (2026-08-14).** The neutral "whatever is resident"
+  slug, from the original one-subject design: a cell run on it measured whichever model
+  happened to be loaded and recorded no identity. `--model wevibe-bench-worker` now exits
+  2, and the alias no longer appears as a bench model on the board. The proxy still
+  advertises it; the bench refuses it regardless (`RETIRED_MODEL_ALIASES` in
+  `wevibe_bench/config.py`, mirrored as `RETIRED_ALIASES` in `control/roster.mjs`).
+  Unrelated to the worker **image** `wevibe-bench-worker:v1`, which is current.
+
+**`--model` is REQUIRED.** It used to default to the retired auto-resident rung; a bare
+invocation now exits 2 and names the available aliases. (It already failed a step later
+with `roster hash drift detected` — this states the cause instead.)
 
 **You never run `lms load` yourself.** Passing `--model <alias>` makes the proxy load
 that exact model on the first request (exclusive load — other oMLX models unload, LM
@@ -55,7 +63,18 @@ auto-unloaded a model mid-campaign and voided a cell.
 
 **Switching models mid-campaign changes the roster hash** and the existing manifest
 will reject the run with "roster hash drift detected". That is by design — one manifest
-= one subject model. To switch, archive and start a new manifest:
+= one subject model.
+
+**From the board, you do not have to switch: each model gets its own campaign.**
+`[+ baseline]` routes a cell to `runs/cumulative-<model>/manifest.json`, so a second
+model's floor never collides with the first's frozen roster hash. The model that already
+owns `runs/cumulative` keeps launching there, unchanged. (Dots are stripped from the
+directory name — `cumulative-qwen3-6-35b-a3b-bench` — because a dot is the archive marker
+and an archived directory is excluded from the floor index.) One directory, one manifest,
+one status stream, per RC-5.
+
+From the CLI, pass `--manifest` yourself to do the same thing. To retire a campaign
+outright rather than run alongside it, archive it:
 
 ```bash
 mv runs/cumulative runs/cumulative.<why>-<date>

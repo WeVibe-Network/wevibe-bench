@@ -70,10 +70,17 @@ import { EventRing, subscribe } from "./events.mjs";
 import { readGateActivity } from "./gate-events.mjs";
 import { readWall, WALL_CONTRACT_VERSION } from "./wall.mjs";
 import { readFeedback, feedbackRows, FEEDBACK_CONTRACT_VERSION } from "./feedback.mjs";
-import { readModelsLedger, baselineFor, collectOffCells } from "./models-ledger.mjs";
+import { readModelsLedger } from "./models-ledger.mjs";
+// THE FLOOR'S ONE OWNER — the same module the ledger's gates read and
+// /api/baselines serves, so every refusal about a baseline on this server and
+// every button on the board are answering from one derivation.
+import { readBaselines, baselineFor, collectOffCells } from "./baselines.mjs";
 import { ExtractionTracker } from "./extraction.mjs";
 import { TuiMirror } from "./tui.mjs";
 import { readHold, releaseHold } from "./hold.mjs";
+// WHERE A CELL'S MEASUREMENT LANDS. One campaign directory per model — see the
+// module header. Split out so the rule is testable without binding a port.
+import { manifestArgFor } from "./campaign.mjs";
 import { readProfiles, createProfile, activeProfile, attachRun } from "./profiles.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -269,6 +276,13 @@ async function validateStart(
     );
   }
   if (!entry.bench_eligible) {
+    // TWO DIFFERENT INELIGIBILITIES, NAMED SEPARATELY. A retired alias carries
+    // the proxy's bench purpose and is refused anyway; saying "interactive slot"
+    // about it would be false and would send the operator looking at the proxy's
+    // labels for a cause that is not there.
+    if (entry.retired_reason) {
+      return refuse("model_retired", `'${model}' — ${entry.retired_reason}`);
+    }
     return refuse(
       "model_not_eligible",
       `'${model}' is an interactive slot (purpose=${entry.purpose ?? "unknown"}), not a bench ` +
@@ -277,26 +291,35 @@ async function validateStart(
     );
   }
 
-  // THE SUBJECT RULE. A profile freezes ONE subject model, and both arms of the
-  // measurement are that model: OFF is the floor for ON, so a stack that swaps
-  // model mid-flight produces a Δ measuring A-vs-B capability rather than memory
-  // lift. The harness catches this eventually and expensively — a model swap
-  // changes the roster hash, which invalidates the manifest (RUNBOOK §0,
+  // THE SUBJECT RULE — ON CELLS ONLY. A profile freezes ONE subject model, and
+  // an ON cell must be that model: it is scored against the OFF floor, so an ON
+  // cell on another model produces a Δ measuring A-vs-B capability rather than
+  // memory lift. The harness catches that eventually and expensively — a model
+  // swap changes the roster hash, which invalidates the manifest (RUNBOOK §0,
   // archive-and-rerun) — i.e. after the cell has already burned hours. Refusing
   // at launch turns that into a one-line refusal.
+  //
+  // AN OFF CELL IS NOT COVERED BY THIS RULE, and applying it to one was a
+  // defect. A baseline is not measured against anything — it IS the floor, one
+  // per model (control/models-ledger.mjs, "BASELINE OWNERSHIP: PER MODEL"). A
+  // profile on model A therefore has no bearing on whether model B may have a
+  // floor measured. Enforced here, the first frozen profile silently locked
+  // [+ baseline] on every OTHER bench model, so a four-model bench could never
+  // acquire its second baseline — and the ledger, which mirrors this rule,
+  // drew four permanently disabled buttons to match.
   //
   // Enforced ONLY when a profile exists. A cell with no profile is unattributed
   // but legitimate (the CLI case), and inventing a subject for it would be
   // worse than having none.
-  if (profile?.subject_model && model !== profile.subject_model) {
+  if (arm === "on" && profile?.subject_model && model !== profile.subject_model) {
     return refuse(
       "model_not_subject",
-      `profile ${profile.id} froze '${profile.subject_model}' as its subject model, and both ` +
-        `arms of the measurement must be that model — an ON cell on '${model}' measured against ` +
-        `an OFF floor on '${profile.subject_model}' yields a delta between two models' ` +
-        "capabilities, not the memory lift this stack exists to measure. To benchmark " +
-        `'${model}', freeze a new profile with it as the subject; the memory roster can be ` +
-        "the same.",
+      `profile ${profile.id} froze '${profile.subject_model}' as its subject model, and an ON ` +
+        `cell must be that model — an ON cell on '${model}' measured against an OFF floor on ` +
+        `'${profile.subject_model}' yields a delta between two models' capabilities, not the ` +
+        "memory lift this stack exists to measure. To benchmark " +
+        `'${model}', run its baseline (that is always allowed) and freeze a profile with it as ` +
+        "the subject; the memory roster can be the same.",
       { subject_model: profile.subject_model, profile_id: profile.id },
     );
   }
@@ -483,7 +506,10 @@ const server = createServer(async (req, res) => {
 
     // ── GET /api/profiles ────────────────────────────────────────────────
     // The frozen memory profiles. `active` is the newest; `prior` are the
-    // earlier ones the inspector draws as a hollow overlay on the curve.
+    // earlier ones, measured under a different allowlist. No board panel draws
+    // `prior` today — the RUN LEDGER lists every profile under its subject
+    // model — but the split is served because it is the fact a curve overlay
+    // would need, and it costs nothing to keep stated.
     if (path === "/api/profiles" && req.method === "GET") {
       sendJson(res, 200, await readProfiles(RUNS_ROOT));
       return;
@@ -626,6 +652,11 @@ const server = createServer(async (req, res) => {
       // documented RUNBOOK invocation, reproduced exactly.
       const argv = [RUN_SCRIPT, "--model", model];
       if (org) argv.push("--org", org);
+      // A cell writes to ITS MODEL'S campaign, not to whichever campaign the
+      // default path happens to hold. Omitted when the default is already this
+      // model's, so the live campaign's invocation is unchanged.
+      const manifestArg = await manifestArgFor(model, RUNS_ROOT);
+      if (manifestArg) argv.push("--manifest", manifestArg);
       argv.push("run", "--until-review", "--mode", arm);
 
       const stamp = new Date()
@@ -994,6 +1025,30 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+
+    // ── GET /api/baselines ───────────────────────────────────────────────
+    // THE FLOOR, ON ITS OWN. Every model's baseline, resolved by the single
+    // owner (baselines.mjs) and published to runs/baselines.json on the way
+    // out. The ledger carries the same index inline, so a board needs no extra
+    // call — this endpoint exists for everything that wants the floors WITHOUT
+    // the launch gates: a script, a report, a second surface, an operator with
+    // curl. One derivation, several readers, no second definition.
+    if (path === "/api/baselines" && req.method === "GET") {
+      const roster = await readRoster({ proxyUrl: args.proxyUrl, runtimeUrl: args.runtimeUrl });
+      const out = await readBaselines({
+        runsRoot: RUNS_ROOT,
+        models: roster.ok ? (roster.bench_models ?? []) : [],
+      });
+      // A roster that could not be read is stated rather than silently yielding
+      // an empty index — "no models answered" and "no model has a floor" are
+      // different facts.
+      sendJson(res, 200, {
+        ...out,
+        roster_ok: roster.ok,
+        roster_reason: roster.ok ? null : roster.reason,
+      });
+      return;
+    }
 
     // ── GET /api/models-ledger ───────────────────────────────────────────
     // One row per bench-eligible model with its profiles nested, and every

@@ -273,13 +273,12 @@ function connect() {
 import { renderTopbar, renderProvenance } from "./panels/chrome.js";
 import { renderCurve, setCurveMetric } from "./panels/curve.js";
 import { renderWall } from "./panels/wall.js";
-import { renderLedger, toggleModelRow } from "./panels/ledger.js";
+import { renderLedger, toggleModelRow, toggleProfileRow } from "./panels/ledger.js";
 import { renderLive, paintFeed, toggleKind, jumpToLive } from "./panels/live.js";
 import { renderHold } from "./panels/hold.js";
 import { renderRail } from "./panels/rail.js";
 import { renderRecall } from "./panels/recall.js";
 import {
-  renderProfile,
   openProfileModal,
   closeProfileModal,
   toggleModel,
@@ -287,9 +286,6 @@ import {
   toggleAck,
   profileSelection,
   profileSubject,
-  openInspector,
-  closeInspector,
-  isInspectorOpen,
   setRefusal,
   setPending,
 } from "./panels/profile.js";
@@ -334,7 +330,12 @@ function render() {
   // PANEL ORDER IS THE ARGUMENT THE BOARD MAKES:
   //   hold first  — a blocked run outranks everything, in the operator's face
   //   curve|wall  — the two axes, adjacent and equal, 50/50
-  //   ledger      — every cell, floor pinned, both axes restated
+  //   ledger      — every model, every profile, every cell; floor pinned, both
+  //                 axes restated. The frozen policy opens INSIDE it — the
+  //                 MEMORY PROFILE card that used to sit below `live` is gone,
+  //                 along with the inspector it opened: both drew the single
+  //                 global `board.profile`, so with several profiles on disk
+  //                 they showed one and could not say which.
   //   live        — the running cell's pulse
   //   recall      — proof retrieval fires, demoted
   //   rail        — the honesty that buys credibility for all of the above
@@ -356,7 +357,6 @@ function render() {
       </div>
       ${renderLedger(board)}
       ${renderLive(board)}
-      ${renderProfile(board)}
       ${renderRecall(board)}
       ${renderRail(board)}
       ${renderProvenance(board)}
@@ -404,7 +404,7 @@ function bindInteraction() {
 }
 
 function onClick(e) {
-  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-scrim],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-profile-inspect],[data-inspect-close],[data-inspect-scrim],[data-run-arm],[data-run-confirm],[data-model-expand],[data-run-baseline],[data-baseline-continue],[data-baseline-back],[data-run-dismiss],[data-run-scrim],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
+  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-scrim],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-run-arm],[data-run-confirm],[data-model-expand],[data-profile-expand],[data-run-baseline],[data-baseline-continue],[data-baseline-back],[data-run-dismiss],[data-run-scrim],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
   if (!t) return;
 
   if (t.dataset.metric) { setCurveMetric(t.dataset.metric); render(); return; }
@@ -421,10 +421,10 @@ function onClick(e) {
   if (t.hasAttribute("data-hold-release")) { void releaseHold(); return; }
   if (t.hasAttribute("data-profile-open")) { openProfileModal(); render(); return; }
   // The scrim closes the modal, but ONLY when the scrim ITSELF was clicked — a
-  // click that lands inside the dialog also bubbles through it. The two sibling
-  // modals (run, inspector) already close this way; this one silently did not,
-  // so an identical-looking scrim behaved differently depending on which modal
-  // was open.
+  // click that lands inside the dialog also bubbles through it. Its sibling (the
+  // run control) already closes this way; this one silently did not, so an
+  // identical-looking scrim behaved differently depending on which modal was
+  // open.
   if (
     t.hasAttribute("data-profile-cancel")
     || (t.hasAttribute("data-profile-scrim") && e.target === t)
@@ -436,11 +436,6 @@ function onClick(e) {
   if (t.dataset.subject) { setSubject(t.dataset.subject); render(); return; }
   if (t.dataset.model) { toggleModel(t.dataset.model); render(); return; }
   if (t.hasAttribute("data-profile-create")) { void freezeProfile(); return; }
-  if (t.hasAttribute("data-profile-inspect")) { openInspector(); render(); return; }
-  // The scrim closes the inspector, but ONLY when the scrim itself was clicked
-  // — a click that bubbled up from inside the dialog must not dismiss it.
-  if (t.hasAttribute("data-inspect-scrim") && e.target === t) { closeInspector(); render(); return; }
-  if (t.hasAttribute("data-inspect-close")) { closeInspector(); render(); return; }
   if (t.hasAttribute("data-run-arm")) { void doArmRun(); return; }
   if (t.hasAttribute("data-run-confirm")) { void doStartRun(); return; }
   // ── THE MODEL LEDGER ──────────────────────────────────────────────────────
@@ -486,6 +481,11 @@ function onClick(e) {
     return;
   }
   if (t.dataset.modelExpand) { toggleModelRow(t.dataset.modelExpand); render(); return; }
+  // A PROFILE ROW OPENS ITS FROZEN POLICY. Checked AFTER `data-run-profile`,
+  // which sits inside the row: [+ run] must start a run, never open a drawer.
+  // This is the surface that replaced the MEMORY PROFILE card's OPEN INSPECTOR
+  // button, and it opens the profile the operator actually clicked.
+  if (t.dataset.profileExpand) { toggleProfileRow(t.dataset.profileExpand); render(); return; }
   // POPOUTS. The view switch is checked BEFORE the toggle: a tab click must
   // change the view, never collapse the window out from under the operator.
   if (t.dataset.popView) {
@@ -509,7 +509,6 @@ function onKeydown(e) {
   // The baseline confirm is checked FIRST — it is rendered on top, so Escape
   // must dismiss what the operator is actually looking at.
   if (isBaselineModalOpen()) { closeBaselineModal(); render(); return; }
-  if (isInspectorOpen()) { closeInspector(); render(); return; }
   // Escape disarms the run control for the same reason DISMISS does: an armed
   // token behind a dismissed surface is an invisible state.
   const lc = runLifecycleState();
@@ -613,7 +612,8 @@ async function detachTui() {
  * defect being fixed.
  *
  * IT STARTS NOTHING. Freezing writes an allowlist; it does not arm a cell, open
- * a session, or attach a TUI. The modal and the inspector both say so in words,
+ * a session, or attach a TUI. The modal and the ledger's drawer both say so in
+ * words,
  * because the previous silence is what made "nothing happened" ambiguous
  * between "it worked and did nothing visible" and "it failed".
  *

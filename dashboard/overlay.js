@@ -6,18 +6,20 @@
 // destroys select focus, a half-typed org id, and a scroll position. So modals
 // mount here, as a sibling of #root, and survive the poll.
 //
-// ONE AT A TIME, AND THE ORDER IS DELIBERATE. The creation modal outranks the
-// inspector: you cannot inspect a profile you are still defining, and stacking
-// two scrims would leave the operator unsure which dialog a click belongs to.
+// ONE AT A TIME, AND THE ORDER IS DELIBERATE — the dialog that spends hours
+// outranks the one that writes a file, and stacking two scrims would leave the
+// operator unsure which dialog a click belongs to.
+//
+// THE PROFILE INSPECTOR IS NOT HERE ANY MORE. Reading a frozen profile is not a
+// dialog: it is a drawer in the RUN LEDGER, under the row it describes. As a
+// modal it had to answer "which profile?" on its own, and it answered with
+// `board.profile` — one global profile — while the ledger below it listed four.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
   renderProfileModal,
   isProfileModalOpen,
   closeProfileModal,
-  renderInspector,
-  isInspectorOpen,
-  closeInspector,
 } from "./panels/profile.js";
 import { renderRunControl, renderBaselineModal, isBaselineModalOpen, closeBaselineModal, runLifecycleState } from "./panels/runstart.js";
 import { patch } from "./dom.js";
@@ -48,21 +50,12 @@ export function renderOverlay(board) {
     return;
   }
 
-  if (isInspectorOpen()) {
-    // The run control is COMPOSED IN rather than imported by the inspector.
-    // The inspector describes a frozen policy; the run control changes the
-    // world. Keeping the write surface out of the read panel's imports means
-    // the panel cannot grow a way to start a run by accident.
-    patch(root, renderInspector(board, renderRunControl(board)));
-    return;
-  }
-
-  // ── THE RUN CONTROL'S OWN HOME ────────────────────────────────────────────
+  // ── THE RUN CONTROL'S ONLY HOME ───────────────────────────────────────────
   //
-  // THIS IS THE FIX FOR THE DEAD END. Until now `renderRunControl` had exactly
-  // ONE call site — the branch above — so the CONFIRM button, the server's
-  // restatement and every refusal were reachable only through the profile
-  // inspector, which only opens when a profile exists.
+  // THIS IS THE FIX FOR THE DEAD END. `renderRunControl` once had exactly ONE
+  // call site — inside the profile inspector — so the CONFIRM button, the
+  // server's restatement and every refusal were reachable only through a dialog
+  // that opened only when a profile existed.
   //
   // The consequence on the [+ baseline] path: CONTINUE armed the run, the
   // server minted a token and returned its restatement, and the surface that
@@ -70,10 +63,10 @@ export function renderOverlay(board) {
   // saw nothing, and the benchmark never started. A refused preview was worse —
   // the reason went to `ui.refusal`, which nothing painted.
   //
-  // So the run control gets a home that does NOT depend on a profile existing.
-  // It is raised only once there is something to say — armed, in flight, or
-  // refused — because an unconditional dialog would sit over the board
-  // permanently and make it unreadable.
+  // The run control now has ONE home and it does NOT depend on a profile
+  // existing. It is raised only once there is something to say — armed, in
+  // flight, or refused — because an unconditional dialog would sit over the
+  // board permanently and make it unreadable.
   //
   // THE ARM→CONFIRM PROTOCOL IS UNCHANGED. This renders the SAME control, whose
   // token is still server-minted, whose restatement is still the server's own
@@ -99,6 +92,5 @@ export function renderOverlay(board) {
 
 export function closeOverlays() {
   closeProfileModal();
-  closeInspector();
   closeBaselineModal();
 }

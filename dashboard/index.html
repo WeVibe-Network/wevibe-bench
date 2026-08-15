@@ -382,8 +382,8 @@ a:hover{color:var(--type)}
 /* THE PANEL. 12px radius + --border (not --hairline) is the artifact's own
    §8.1 measurement; the rewrite had flattened every panel to a 4px box with
    box-shadow:none, which read as a wireframe rather than a raised surface. */
-.curve,.wall,.ledger,.live,.hold,.profile-card,.rail{background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-xl);padding:var(--pad);display:flex;flex-direction:column;gap:12px;min-width:0}
-.curve-frame,.curve-foot,.hold-line,.hold-diag,.modal-title,.tui-head,.tui-foot,.ledger-head,.ledger-cols,.ledger-row,.axis,.big,.prov,.live-spine,.feed-head,.stages,.profile-models{font-family:var(--font)}
+.curve,.wall,.ledger,.live,.hold,.rail{background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-xl);padding:var(--pad);display:flex;flex-direction:column;gap:12px;min-width:0}
+.curve-frame,.curve-foot,.hold-line,.hold-diag,.modal-title,.tui-head,.tui-foot,.ledger-head,.ledger-cols,.ledger-row,.axis,.big,.prov,.live-spine,.feed-head,.stages{font-family:var(--font)}
 .curve-frame{padding:22px;border:1px solid var(--border);border-radius:var(--radius-md);background:linear-gradient(180deg,color-mix(in srgb,var(--bg-2) 85%, transparent),var(--bg-2))}
 .curve-svg{overflow:visible}
 .c-axis,.c-legend,.c-note,.c-base-lbl,.c-annot,.c-val,.c-delta,.c-gate,.c-corpus{fill:var(--dim);font-size:11px}
@@ -404,7 +404,7 @@ a:hover{color:var(--type)}
 .hold.lan,.hold.dead{border-color:var(--danger)}
 .hold-url,.hold-actions,.hold-diag{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .muted-box{padding:8px 10px;border:1px solid var(--danger);border-radius:var(--radius-sm)}
-.profile-card .debt,.profile-modal .debt{margin-top:2px}
+.profile-modal .debt{margin-top:2px}
 .mrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer}
 .mrow.on{border-color:var(--fg);background:color-mix(in srgb, var(--fg) 8%, transparent)}
 /* The subject row carries a fourth cell (the SUBJECT tag). The model id keeps
@@ -419,15 +419,13 @@ a:hover{color:var(--type)}
    Subject and memory roster are drawn as two separate blocks, never one list.
    They answer different questions (what is measured / what is varied) and the
    single flat list they replaced is exactly what made transfer direction
-   unrecordable. */
-.skick{font:700 10px var(--font);letter-spacing:.18em;color:var(--dim)}
+   unrecordable.
+
+   THE SUBJECT'S IDENTITY TYPE. Everything else that described a frozen profile
+   (.profile-card, .profile-subject, .profile-models, .skick, and the whole
+   .insp-* inspector) is gone with those two surfaces — the frozen policy is now
+   a drawer in the RUN LEDGER, styled under THE MODEL LEDGER below. */
 .sval{font:700 var(--fs-ident)/1.4 var(--font);color:var(--type)}
-.profile-subject{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
-.profile-models{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline}
-.insp-subject{display:flex;flex-direction:column;gap:4px;padding:9px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)}
-/* A baseline belonging to another model voids every Δ on the board, so it is
-   drawn at danger weight rather than as a note. */
-.insp-mismatch{padding:9px 11px;border:1px solid var(--danger);border-radius:var(--radius-sm);color:var(--fg);font:400 var(--fs-body)/1.5 var(--font)}
 
 /* ── THE INFERRED TRANSFER EDGE ──────────────────────────────────────────
    Never a control. `self` is the only edge that can be stated completely, so
@@ -494,62 +492,13 @@ a:hover{color:var(--type)}
 .rmodal{width:min(640px,calc(100vw - 48px))}
 .rmodal-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px;padding-top:10px;border-top:1px solid var(--hairline)}
 
-/* ── PROFILE INSPECTOR ─────────────────────────────────────────────────────
-   The read-only record of a frozen policy, and the ONLY surface that starts a
-   run. Two columns: the policy on the left, the evidence produced under it on
-   the right, with run start welded beneath the evidence.
-
-   WIDER THAN .modal ON PURPOSE. It carries a two-column layout with a run
-   table; at the shared 920px the history columns collapse into each other and
-   the log names — which are how an operator finds a cell on disk — ellipsize
-   to uselessness. It collapses to ONE column below 1100px rather than
-   compressing, because a squeezed two-column table is less legible than a
-   stacked one. */
-.inspector{width:min(1360px,calc(100vw - 48px));gap:0;padding:0}
-.insp-head{display:flex;align-items:baseline;gap:12px;padding:13px 16px;border-bottom:1px solid var(--hairline);flex-wrap:wrap}
-.insp-head .sub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.insp-body{display:grid;grid-template-columns:392px minmax(0,1fr);align-items:stretch;min-width:0}
-.insp-left{display:flex;flex-direction:column;border-right:1px solid var(--hairline);min-width:0}
-.insp-right{display:flex;flex-direction:column;min-width:0}
-.insp-sec{display:flex;flex-direction:column;gap:9px;padding:14px 16px;border-bottom:1px solid var(--hairline);min-width:0}
-.insp-secline{display:flex;align-items:baseline;gap:12px;min-width:0}
-/* Pushes the terminal block of each column to the bottom edge, so CREATION
-   SIDE EFFECTS and the run control align on one baseline regardless of how
-   many models or runs the columns above them carry. */
-.insp-spacer{flex:1 1 auto;min-height:0}
-.insp-sfx{border-bottom:0}
-.insp-models{display:flex;flex-direction:column;gap:5px;min-width:0}
-/* Rows here are NOT selectable — the profile is frozen. No pointer cursor and
-   no hover affordance, so nothing implies an edit that does not exist. */
-.insp-models .mrow{cursor:default;border-color:var(--hairline)}
-.insp-models .mrow.on{border-color:var(--fg);background:color-mix(in srgb, var(--fg) 8%, transparent)}
-.insp-models .mrow.off{color:var(--dim)}
-/* The doubled debt rule, inside the inspector. Same double border as .debt so
-   it survives greyscale, with room for the explanatory body. */
-.insp-debt{display:flex;flex-direction:column;gap:4px;margin:0 16px;padding:10px 0;border-top:2px solid var(--danger);border-bottom:2px solid var(--danger)}
-.debt-kick{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--danger)}
-.debt-body{font:400 12px/1.55 var(--font);color:var(--fg)}
-.insp-baseline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
-.insp-baseline.bad .note{color:var(--fg)}
-.insp-overlay{display:flex;flex-direction:column;gap:5px;font:400 11.5px/1.5 var(--font);color:var(--dim)}
-.ov-row{display:flex;align-items:baseline;gap:8px;min-width:0}
-/* Solid = this profile. Hollow = a prior profile under a DIFFERENT allowlist,
-   drawn as its own series and never joined by a line — connecting them would
-   draw a trend across two different experiments. */
-.ov-dot{width:8px;height:8px;border-radius:50%;flex:none;border:1px solid var(--fg)}
-.ov-dot.solid{background:var(--fg)}
-.ov-dot.hollow{background:transparent;border-color:var(--dim)}
-.insp-cols,.insp-row{display:grid;grid-template-columns:58px minmax(0,1fr) 168px minmax(0,1.1fr);gap:12px;align-items:baseline;min-width:0}
-.insp-cols{font:700 10px var(--font);letter-spacing:.14em;color:var(--dim);padding:0 16px 6px;border-bottom:1px solid var(--hairline)}
-.insp-row{padding:7px 16px;font:400 12.5px var(--font);border-bottom:1px solid var(--hairline)}
-.insp-row .model,.insp-row .log{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.insp-row .arm{color:var(--type)}
-.insp-row .log{color:var(--dim)}
-.insp-empty{padding:14px 16px;font:400 12px/1.6 var(--font);color:var(--dim)}
-/* The ledger's profile chip is a BUTTON — it is the entry point to all of the
-   above. It must read as the tag it replaced, not as a form control. */
-.chip-btn{background:transparent;cursor:pointer;font-family:var(--font)}
-.chip-btn:hover{color:var(--type);border-color:var(--fg)}
+/* ── THE PROFILE INSPECTOR IS GONE ─────────────────────────────────────────
+   It was a 1360px modal that described ONE profile — `board.profile`, the
+   single global field — while the ledger underneath it listed every profile on
+   disk. Reading a frozen policy is not a dialog: it is a drawer under the row
+   that names it, and its rules are `.pdrawer`/`.pd-*` in THE MODEL LEDGER
+   below. The `.debt-kick`/`.debt-body` type it defined survives there, which is
+   why those two rules moved rather than being deleted with the rest. */
 
 /* ── EVENT-KIND FILTER CHIPS (panels/live.js) ──────────────────────────────
    These are <button>s, and `.chip` alone sets only font and colour — so they
@@ -615,13 +564,6 @@ a:hover{color:var(--type)}
    reduced motion the dots hold still and the counter still proves liveness. */
 @keyframes dotsweep{0%,32%{opacity:1}33%,100%{opacity:.18}}
 @media (prefers-reduced-motion:reduce){.dots i{animation:none;opacity:1}}
-
-@media (max-width:1100px){
-  .insp-body{grid-template-columns:minmax(0,1fr)}
-  .insp-left{border-right:0;border-bottom:1px solid var(--hairline)}
-  .insp-cols,.insp-row{grid-template-columns:52px minmax(0,1fr) 128px}
-  .insp-cols span:nth-child(4),.insp-row .log{display:none}
-}
 
 .tui-dock{position:fixed;right:14px;bottom:14px;z-index:80;max-width:calc(100vw - 28px)}
 .tui-bar,.tui-win{background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--radius-md);box-shadow:var(--shadow-raise)}
@@ -744,16 +686,68 @@ a:hover{color:var(--type)}
 /* TEN COLUMNS, shared by the header and every row so they cannot drift.
    Δ VS BASELINE is widest after the name — it is the reason the row exists. */
 .pcols,.prow{display:grid;grid-template-columns:minmax(0,1.6fr) 62px 52px 68px 62px 62px 68px 66px minmax(84px,1fr) auto;gap:10px;align-items:center;min-width:0}
+/* LEAN — the shape used while no cell can be attributed to a profile. Four
+   columns instead of ten, so what IS known gets room to be read rather than
+   eight tracks of `unobserved` overflowing each other. */
+.pcols.lean,.prow.lean{grid-template-columns:minmax(0,2fr) 120px minmax(0,1fr) auto}
+/* NO CELL MAY BLEED INTO ITS NEIGHBOUR. `unobserved` is wider than the 52px
+   TURNS track that holds it; without this the text overran the next column and
+   the row read as one squashed sentence. Identity and prose truncate; they are
+   never the numbers, which have their own tracks and always fit. */
+.prow>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcols>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .pcols{font:600 9.5px/1 var(--font);letter-spacing:.09em;color:var(--dim);padding:0 8px 6px;border-bottom:1px solid var(--hairline)}
 /* CLAMPED, NOT PRE-ALLOCATED: the well is sized to the rows that exist, up to
    ten, and only then scrolls. A fixed height would reserve empty space on a
    ledger with one profile and imply nine more are missing. */
 .pscroll{display:flex;flex-direction:column;gap:2px;max-height:calc(var(--clamp) * 34px);overflow-y:auto;overscroll-behavior:contain}
-.prow{padding:7px 8px;border-radius:var(--radius-sm);font:400 11.5px/1.35 var(--font);color:var(--type)}
+/* THE ROW IS A CONTROL: it opens the frozen policy below. Pointer + hover, the
+   same grammar the model row above it uses. */
+.prow{padding:7px 8px;border-radius:var(--radius-sm);font:400 11.5px/1.35 var(--font);color:var(--type);cursor:pointer}
 .prow:hover{background:var(--bg-2)}
+.prow.open{background:var(--bg-2)}
 .pname{font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcaret{color:var(--dim);font-size:10px;margin-right:6px}
 .pact{display:flex;justify-content:flex-end}
 .pwhy{padding:0 8px 6px 8px;font:400 11px/1.5 var(--font)}
+/* ── THE FROZEN POLICY DRAWER ─────────────────────────────────────────────
+   What the MEMORY PROFILE card and its inspector modal used to show, opened
+   under the profile row it belongs to. It is INSET — a left rule and its own
+   ground — so it reads as detail belonging to the row above rather than as a
+   sibling panel that happens to be nearby.
+
+   TWO COLUMNS: the policy (what was frozen) beside the consequence (what it
+   implies, what it does not yet enforce, what has run under it). One column
+   below 1100px, because a squeezed two-column run table is less legible than a
+   stacked one. */
+.pdrawer{margin-top:2px;padding:12px 14px;background:var(--bg-2);border:1px solid var(--border);border-left:3px solid var(--fg);border-radius:var(--radius-md);display:flex;flex-direction:column;gap:12px;min-width:0}
+.pd-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-width:0}
+.pd-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start;min-width:0}
+.pd-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.pd-sec{display:flex;flex-direction:column;gap:8px;min-width:0}
+.pd-secline{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-width:0}
+.pd-subject{display:flex;flex-direction:column;gap:4px;padding:9px 11px;border:1px solid var(--border-strong);border-radius:var(--radius-sm)}
+.pd-models{display:flex;flex-direction:column;gap:5px;min-width:0}
+/* Rows here are NOT selectable — the profile is frozen. No pointer cursor and
+   no hover affordance, so nothing implies an edit that does not exist. */
+.pd-models .mrow{cursor:default;border-color:var(--hairline)}
+.pd-models .mrow.on{border-color:var(--fg);background:color-mix(in srgb, var(--fg) 8%, transparent)}
+.pd-models .mrow.off{color:var(--dim)}
+/* The doubled debt rule. Same double border as .debt so it survives greyscale,
+   with room for the explanatory body. */
+.pd-debt{display:flex;flex-direction:column;gap:4px;padding:10px 0;border-top:2px solid var(--danger);border-bottom:2px solid var(--danger)}
+.debt-kick{font:700 10.5px var(--font);letter-spacing:.16em;color:var(--danger)}
+.debt-body{font:400 12px/1.55 var(--font);color:var(--fg)}
+/* RUN HISTORY. The log name is how an operator finds a cell on disk, so it gets
+   a real share of the width and is the last thing allowed to collapse. */
+.pd-cols,.pd-row{display:grid;grid-template-columns:48px minmax(0,1fr) 150px minmax(0,1.1fr);gap:10px;align-items:baseline;min-width:0}
+.pd-cols{font:700 9.5px var(--font);letter-spacing:.14em;color:var(--dim);padding-bottom:5px;border-bottom:1px solid var(--hairline)}
+.pd-row{padding:6px 0;font:400 12px var(--font);border-bottom:1px solid var(--hairline)}
+.pd-row .model,.pd-row .log{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pd-row .arm{color:var(--type)}
+.pd-row .log{color:var(--dim)}
+.pd-empty{padding:10px 0;font:400 11.5px/1.6 var(--font);color:var(--dim)}
+
 /* ORPHANED PROFILES. Dashed + dim: present and accounted for, but not a live
    control surface — nothing can be launched under them. */
 .lorph{margin-top:10px;padding:10px 12px;border:1px dashed var(--border-strong);border-radius:var(--radius-md);display:flex;flex-direction:column;gap:5px}
@@ -1045,6 +1039,10 @@ a:hover{color:var(--type)}
   .rail{grid-template-columns:repeat(2,minmax(0,1fr))}
   .axes{grid-template-columns:1fr}
   .axis+.axis{border-left:0;border-top:1px solid var(--hairline);padding-top:10px}
+  /* The policy drawer stacks rather than compressing. Nothing is hidden: the
+     run table keeps its LOG column, which is how a cell is found on disk. */
+  .pd-grid{grid-template-columns:minmax(0,1fr)}
+  .pd-cols,.pd-row{grid-template-columns:44px minmax(0,1fr) 132px minmax(0,1fr)}
 }
 </style>
 </head>

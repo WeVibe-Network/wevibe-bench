@@ -124,9 +124,11 @@ export function isBaselineModalOpen() {
  *
  * `ui` is module-private on purpose, but its state WAS the operator's blind
  * spot: an armed-and-unconfirmed run and a refused preview both lived here and
- * were painted by exactly one surface (`renderRunControl`), which is only
- * reachable through the profile inspector. When that surface was not on screen
- * the failure existed and was invisible.
+ * were painted by exactly one surface (`renderRunControl`), which was reachable
+ * only through the profile inspector — a dialog that opened only when a profile
+ * existed. When it was not on screen the failure existed and was invisible. The
+ * inspector is gone; the run control is raised on its own (overlay.js) the
+ * moment there is something to confirm or a refusal to read.
  *
  * A READ-ONLY SNAPSHOT, NOT THE OBJECT. Handing out `ui` would let any consumer
  * mutate run-start state from outside the panel that owns it; the copy makes

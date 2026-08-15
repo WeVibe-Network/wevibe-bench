@@ -354,6 +354,26 @@ class LadderRung:
 # is loaded" — the worker→proxy opencode provider selector (already the
 # default) — NOT a specific model identity.
 #
+# ── RETIRED (2026-08-14), AND THE RUNG IS DELIBERATELY STILL HERE ────────────
+#
+# The auto-resident design above is RETIRED. Every cell now names its subject
+# (`--model <bench alias>`), which is required — see `_apply_model_override` in
+# scripts/run_cumulative.py. The rung below can no longer be RESOLVED: there is
+# no code path that turns it into a roster entry.
+#
+# IT IS NOT DELETED, AND THAT IS NOT AN OVERSIGHT.
+# `backgammon_ladder_roster_fingerprint()` hashes this tuple, and the hash is
+# frozen into every campaign manifest. `CumulativeSequencer.__init__` re-computes
+# it on EVERY launch (not only on `resume`) and refuses on drift. Editing this
+# tuple therefore invalidates runs/cumulative — the live campaign and the OFF
+# baseline inside it — and the only remedy is archive-and-rerun at ~3h a cell.
+# Note that the fingerprint covers THIS DEFAULT, not the roster that actually
+# ran (the resolved model is recorded separately, in the manifest's `roster` and
+# `roster_hash`), which is exactly why a rung nothing can reach still has teeth.
+#
+# So it stays until a natural archive point, when the campaign is being rebuilt
+# anyway. Deleting it then costs nothing; deleting it now costs a re-baseline.
+#
 # SUPERSEDED history: paid OrcaRouter era 2026-07-24 (kimi-k3 source /
 # kimi-k2.7-code BRACKET / tencent-hy3 measure; GLM-5.2 deselected 2026-07-27;
 # xiaomi/mimo-v2.5-pro dropped), the local-model pivot 2026-07-31 that
@@ -386,6 +406,10 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     # request shape on the wire as the daily driver that never stalls.
     # Context is 262144 (256K, 2026-08-10 directive) matching the proxy bench
     # alias's contextLength; output 16384 mirrors the daily block.
+    # RETIRED (2026-08-14) — see RETIRED_MODEL_ALIASES below. Kept as a block so
+    # `--model wevibe-bench-worker` is refused with the RETIREMENT reason rather
+    # than "unknown alias", which would send the operator looking for a typo.
+    # The proxy still advertises this alias; the bench refuses it regardless.
     "wevibe-bench-worker": {
         # Display name only — deliberately NOT a model identity (RC-7): the
         # alias serves whichever model is resident behind the proxy.
@@ -465,6 +489,28 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
             "output": 32_768,
         },
     },
+}
+
+# ── RETIRED BENCH ALIASES ────────────────────────────────────────────────────
+#
+# Aliases the proxy may still serve that the bench must REFUSE to measure, each
+# with the reason stated. `--model <retired alias>` exits 2 quoting it.
+#
+# `wevibe-bench-worker` resolves upstream to `auto` — whichever model happens to
+# be resident behind the proxy — so a cell run on it measures an unrecorded
+# subject. That was the original one-subject design (D4) and it is retired: every
+# cell now names its model.
+#
+# MIRRORED IN control/roster.mjs as RETIRED_ALIASES, because the control plane is
+# JS and cannot import this. The two are pinned against each other by a drift
+# test (control/control.test.mjs), so a retirement declared on one side and not
+# the other fails a test instead of silently offering the alias on the board.
+RETIRED_MODEL_ALIASES: dict[str, str] = {
+    "wevibe-bench-worker": (
+        "retired: this alias resolves to whatever model is resident behind the proxy, "
+        "so a cell run on it measures an unrecorded subject. "
+        "Benchmark a named bench alias instead."
+    ),
 }
 
 # Schema version for the frozen ladder run manifest. Bump whenever the manifest

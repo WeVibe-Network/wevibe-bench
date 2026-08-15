@@ -261,10 +261,18 @@ export function emptyBoard() {
       runs: [],
     },
 
-    // Every frozen profile — `active` plus `prior`. The inspector draws prior
-    // profiles as a hollow overlay that is NEVER joined by a line to the active
-    // series: they were measured under a different allowlist, so connecting
-    // them would draw a trend across two different experiments.
+    // Every frozen profile — `active` plus `prior`.
+    //
+    // NO PANEL DRAWS THIS TODAY. The profile inspector did (prior profiles as a
+    // hollow overlay, never joined by a line to the active series — they were
+    // measured under a different allowlist, so connecting them would draw a
+    // trend across two different experiments), and it is gone: the RUN LEDGER
+    // lists every profile under its subject model and marks the active one, so
+    // "which profiles exist" is answered there without a second list.
+    //
+    // The field is still SERVED. It is part of a versioned wire contract that
+    // other readers may hold, and dropping it silently would break them to save
+    // nothing. Whoever draws the overlay on the curve will find it already here.
     profiles: null,
 
     // ── THE UNIFIED EXTRACTION QUEUE ──────────────────────────────────────
