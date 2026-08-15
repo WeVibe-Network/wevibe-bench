@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node dist/src/chain-client.spec.js"
+    "test": "npm run build && node dist/src/chain-client.spec.js && node dist/src/wallet.spec.js"
   },
   "dependencies": {
     "@cosmjs/amino": "0.39.0",
