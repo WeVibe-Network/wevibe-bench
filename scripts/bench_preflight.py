@@ -35,13 +35,17 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The expected served identity. Source: workspace AGENTS.md §2.1 (SETTLED
-# 2026-08-11) + RUNBOOK §7. This is fp(ed_pubkey_bytes) — NOT fp(seed_bytes),
-# which is a DIFFERENT value for the same identity (leader seed fp = f534aa02).
-# Comparing a fingerprint without naming its hashed input is how a real
-# identity mismatch got wrongly dismissed once already. Identity is asserted AT
-# THE SEAM; liveness is not identity; :4450 (operator host MCP) is forbidden.
-EXPECTED_LEADER_FP = "f7733d6e"
+# The expected served identity is DERIVED at check time, never hardcoded: the
+# shared helper wevibe-meta/scripts/lib.sh (`leader-ed-fp`) is the single
+# source of derivation — it loads the bench leader root seed (env
+# WEVIBE_BENCH_MCP_SEED, else 0600 file ~/.wevibe/bench/leader-seed.txt) and
+# computes fp(ed_pubkey_bytes) via the canonical wevibe-mcp crypto build.
+# Both sides hash RAW ED PUBKEY BYTES — NOT fp(seed_bytes), which is a
+# DIFFERENT value for the same identity. Comparing a fingerprint without
+# naming its hashed input is how a real identity mismatch got wrongly
+# dismissed once already. Identity is asserted AT THE SEAM; liveness is not
+# identity; :4450 (operator host MCP) is forbidden.
+LIB_SH = REPO.parent / "wevibe-meta" / "scripts" / "lib.sh"
 
 # :4450 is the operator's REAL host wevibe-mcp (interactive keychain identity).
 # Pointing any bench component at it mints orgs under the operator's identity
@@ -83,6 +87,27 @@ def check_ports(c: Check) -> None:
         c.add(f"port {port} ({what})", ok, ("open" if ok else "CLOSED") + hint)
 
 
+def expected_leader_ed_fp() -> str:
+    """Expected leader fp from the shared helper — the ONLY derivation seam.
+
+    Never re-derive seed -> pubkey -> fp in this file: lib.sh owns the
+    derivation (seed -> wevibe-mcp dist/crypto.js -> fp). Raises RuntimeError
+    on ANY failure (missing seed, missing crypto build, empty output): an
+    underivable expected identity is a HARD failure, never a skip
+    (AGENTS.md §2.1).
+    """
+    proc = subprocess.run(
+        ["bash", str(LIB_SH), "leader-ed-fp"],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    out = proc.stdout.strip()
+    if proc.returncode != 0 or not out:
+        raise RuntimeError(
+            f"rc={proc.returncode} stderr={proc.stderr.strip() or '-'}"
+        )
+    return out
+
+
 def check_identity(c: Check) -> None:
     """Assert identity AT THE SEAM. Liveness is not identity (AGENTS.md §2.1).
 
@@ -102,9 +127,7 @@ def check_identity(c: Check) -> None:
     log = logging.getLogger("preflight")
     cfg = LifecycleConfig()
 
-    for label, url, expected in (
-        ("leader", cfg.leader_mcp_url, EXPECTED_LEADER_FP),
-    ):
+    for label, url in (("leader", cfg.leader_mcp_url),):
         if f":{FORBIDDEN_PORT}" in url:
             c.add(
                 f"identity {label}",
@@ -112,6 +135,17 @@ def check_identity(c: Check) -> None:
                 f"{url} TARGETS THE OPERATOR HOST MCP :{FORBIDDEN_PORT} — "
                 "this mints orgs under the operator's keychain identity. "
                 "See AGENTS.md §2.1.",
+            )
+            continue
+        try:
+            expected = expected_leader_ed_fp()
+        except Exception as exc:  # noqa: BLE001
+            c.add(
+                f"identity {label}",
+                False,
+                f"cannot derive expected fp via {LIB_SH}: {exc} — HARD failure; "
+                "make the leader seed available (env WEVIBE_BENCH_MCP_SEED or "
+                "0600 ~/.wevibe/bench/leader-seed.txt)",
             )
             continue
         try:
