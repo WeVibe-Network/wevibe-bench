@@ -152,7 +152,7 @@ def _patch_fake_docker(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         def __init__(self, base_url: str, **kwargs: Any) -> None:
             self.base_url = base_url
 
-        def create_session(self) -> str:
+        def create_session(self, title: str | None = None) -> str:
             raise backgammon_mod.ServeClientError(
                 f"serve unavailable (hermetic test stub): {self.base_url}"
             )

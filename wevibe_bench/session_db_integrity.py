@@ -1,7 +1,7 @@
 """Integrity verification for an exported opencode session database.
 
 WO-DBVOL-1 (2026-08-11). The session DB is the SOLE substrate for extraction:
-``backgammon_sxe.py`` reads memories out of it, and the ON arm's entire result
+the extraction stage reads memories out of it, and the ON arm's entire result
 is derived from what that read returns. Before this module the only check was
 ``session_db_path.is_file()``.
 

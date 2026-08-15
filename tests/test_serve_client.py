@@ -624,6 +624,18 @@ def test_create_session_parses_id(monkeypatch):
     assert body == {}
 
 
+def test_create_session_sends_title_in_body_when_provided(monkeypatch):
+    """WO-STRIP-2b: a titled create seeds session DB ``session.title``."""
+    calls = _fake_json(monkeypatch, [{"id": "ses_titled"}])
+    client = ServeClient("http://127.0.0.1:4096")
+    title = "wevibe-bench-wevibe-org-0-off-1786777435"
+    assert client.create_session(title=title) == "ses_titled"
+    method, url, body = calls[0]
+    assert method == "POST"
+    assert url == "http://127.0.0.1:4096/session"
+    assert body == {"title": title}
+
+
 def test_create_session_missing_id(monkeypatch):
     _fake_json(monkeypatch, [{}])
     with pytest.raises(ServeClientError):

@@ -14,9 +14,9 @@
 // kernel-enforced properties that make "the dashboard corrupted a run"
 // impossible rather than unlikely.
 //
-// Starting runs and triggering extraction cannot live there without destroying
-// that. They live here instead: a separate process, a separate port, a separate
-// trust level, and a deliberately small surface.
+// Starting runs cannot live there without destroying that. It lives here
+// instead: a separate process, a separate port, a separate trust level, and a
+// deliberately small surface.
 //
 // ── SAFETY PROPERTIES (deliberate, do not weaken) ────────────────────────────
 //
@@ -29,7 +29,7 @@
 //     entries, never shell words, so command injection is impossible by
 //     construction rather than by escaping.
 //
-//   - ONE RUN, ONE EXTRACTION. Enforced server-side and refused with a stated
+//   - ONE RUN AT A TIME. Enforced server-side and refused with a stated
 //     reason, never queued. The campaign is strictly serial (one resident local
 //     model, one slot); a queue would let the UI imply a capability the
 //     instrument does not have.
@@ -50,7 +50,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { open, readFile, writeFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,7 +58,6 @@ import {
   CONTROL_CONTRACT_VERSION,
   RESUME_UNSUPPORTED,
   STALL_THRESHOLD_S,
-  EXTRACT_STAGES,
   EVENT_RENDER_CAP,
   confirmationToken,
   restatement,
@@ -75,7 +74,6 @@ import { readModelsLedger } from "./models-ledger.mjs";
 // /api/baselines serves, so every refusal about a baseline on this server and
 // every button on the board are answering from one derivation.
 import { readBaselines, baselineFor, collectOffCells } from "./baselines.mjs";
-import { ExtractionTracker } from "./extraction.mjs";
 import { TuiMirror } from "./tui.mjs";
 import { readHold, releaseHold } from "./hold.mjs";
 // WHERE A CELL'S MEASUREMENT LANDS. One campaign directory per model — see the
@@ -129,7 +127,6 @@ const BENCH_ROOT = resolve(args.benchRoot);
 const RUNS_ROOT = join(BENCH_ROOT, "runs");
 const PYTHON = args.python ?? join(BENCH_ROOT, ".venv", "bin", "python");
 const RUN_SCRIPT = join(BENCH_ROOT, "scripts", "run_cumulative.py");
-const EXTRACT_SCRIPT = join(BENCH_ROOT, "scripts", "backgammon_sxe.py");
 
 // ── mutable state: the ONLY things this service owns ─────────────────────────
 
@@ -137,7 +134,6 @@ const EXTRACT_SCRIPT = join(BENCH_ROOT, "scripts", "backgammon_sxe.py");
 let launcher = null;
 
 const ring = new EventRing();
-const extraction = new ExtractionTracker();
 
 // The event subscription runs for the life of the process and reconnects
 // forever. A cell's serve dies and restarts across teardown; that is normal and
@@ -181,59 +177,6 @@ async function readBody(req, cap = 64 * 1024) {
     req.on("end", () => resolveBody(Buffer.concat(chunks).toString("utf8")));
     req.on("error", rejectBody);
   });
-}
-
-async function readJsonOrNull(path) {
-  try {
-    return JSON.parse(await readFile(path, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-async function extractionEligibility(runLabel, sourceMode) {
-  const manifest = await readJsonOrNull(join(RUNS_ROOT, String(runLabel), "manifest.json"));
-  if (!manifest) {
-    return { ok: false, code: "complete_gate_missing", reason: `manifest not found for run_label=${runLabel}` };
-  }
-  const records = Array.isArray(manifest.session_records) ? manifest.session_records : [];
-  const candidates = records.filter((r) => r?.memory_mode === sourceMode);
-  const record = candidates.length ? candidates[candidates.length - 1] : null;
-  if (!record) {
-    return { ok: false, code: "complete_gate_missing", reason: `no ${sourceMode} session record in manifest` };
-  }
-  if (record.complete_gate !== true) {
-    return {
-      ok: false,
-      code: "complete_gate_missing",
-      reason: "extraction requires a completed-cell gate stamped on the source cell",
-    };
-  }
-  if (record.extracted_from === true) {
-    return {
-      ok: false,
-      code: "already_extracted",
-      reason: "this completed cell has already been extracted from; changing the corpus requires a new cell",
-    };
-  }
-  return { ok: true };
-}
-
-async function markExtractedFrom(runLabel, sourceMode) {
-  const path = join(RUNS_ROOT, String(runLabel), "manifest.json");
-  const manifest = await readJsonOrNull(path);
-  if (!manifest || !Array.isArray(manifest.session_records)) {
-    throw new Error(`manifest not found or missing session_records for run_label=${runLabel}`);
-  }
-  for (let i = manifest.session_records.length - 1; i >= 0; i -= 1) {
-    const record = manifest.session_records[i];
-    if (record?.memory_mode !== sourceMode) continue;
-    record.extracted_from = true;
-    manifest.updated_at = new Date().toISOString();
-    await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-    return;
-  }
-  throw new Error(`no ${sourceMode} session record in manifest`);
 }
 
 /** Every precondition a start must satisfy, each with its own stated reason. */
@@ -324,13 +267,14 @@ async function validateStart(
     );
   }
 
-  // ON cells extract into an org; OFF cells must not carry one. This mirrors
-  // the harness's own argparse contract rather than inventing a new rule.
+  // ON cells write memories into an org, so a cell needs an org id; OFF cells
+  // must not carry one. This mirrors the harness's own argparse contract rather
+  // than inventing a new rule.
   if (arm === "on" && !org) {
-    return refuse("org_required", "an ON (memory) cell requires --org; extraction has no target without it");
+    return refuse("org_required", "an ON (memory) cell requires --org; it needs an org id to write into");
   }
   if (arm === "off" && org) {
-    return refuse("org_forbidden", "a CONTROL cell must not carry an org — it extracts nothing");
+    return refuse("org_forbidden", "a CONTROL cell must not carry an org — it writes no memories");
   }
 
   if (context !== null) {
@@ -421,7 +365,6 @@ const server = createServer(async (req, res) => {
         // Permanently false — the harness has no mid-cell checkpoint.
         resume_run: false,
         resume: RESUME_UNSUPPORTED,
-        extract: true,
         events: true,
         select_context: true,
         // The GATE WALL surface. Advertised so the board can tell "this control
@@ -441,7 +384,6 @@ const server = createServer(async (req, res) => {
         bench_root: BENCH_ROOT,
         python_present: existsSync(PYTHON),
         run_script_present: existsSync(RUN_SCRIPT),
-        extract_script_present: existsSync(EXTRACT_SCRIPT),
       });
       return;
     }
@@ -887,95 +829,6 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ── GET /api/extraction ──────────────────────────────────────────────
-    if (path === "/api/extraction" && req.method === "GET") {
-      sendJson(res, 200, extraction.view());
-      return;
-    }
-
-    // ── POST /api/extraction/start ───────────────────────────────────────
-    if (path === "/api/extraction/start" && req.method === "POST") {
-      const payload = JSON.parse((await readBody(req)) || "{}");
-      const run = await readRunState({ runsRoot: RUNS_ROOT, launcher });
-
-      // Extraction reads a COMPLETED cell's session DB. Running it against a
-      // live cell would read a DB the worker is still writing — the exact
-      // class of defect WO-DBVOL-1 closed.
-      if (run.state === "running" || run.state === "starting") {
-        sendJson(res, 409, refuse(
-          "run_in_flight",
-          "a cell is still running — extraction reads the completed session DB and " +
-            "must not run against a live worker",
-        ));
-        return;
-      }
-
-      const model = typeof payload.model === "string" && payload.model.trim()
-        ? payload.model.trim()
-        : launcher?.model ?? null;
-      if (!model) {
-        sendJson(res, 409, refuse("nothing_to_extract", "no model given and no prior run observed"));
-        return;
-      }
-
-      const runLabel = typeof payload.run_label === "string" ? payload.run_label : null;
-      if (!runLabel) {
-        sendJson(res, 409, refuse("nothing_to_extract", "run_label is required to locate the session directory"));
-        return;
-      }
-
-      // `source_mode` is the ARM, and backgammon_sxe.py accepts only off|on
-      // (verified: argparse rejects anything else with exit 2). It is NOT a
-      // free-form label — defaulting it to a run-directory name produced an
-      // immediate argparse failure.
-      const sourceMode = payload.source_mode === "on" || payload.source_mode === "off"
-        ? payload.source_mode
-        : launcher?.arm ?? null;
-      if (!sourceMode) {
-        sendJson(res, 409, refuse(
-          "nothing_to_extract",
-          "source_mode must be 'on' or 'off' (the arm of the cell being extracted) " +
-            "and no prior run was observed to infer it from",
-        ));
-        return;
-      }
-
-      const eligibility = await extractionEligibility(runLabel, sourceMode);
-      if (!eligibility.ok) {
-        sendJson(res, 409, refuse(eligibility.code, eligibility.reason));
-        return;
-      }
-
-      // An ON cell extracts into an org; the script itself refuses to run
-      // without one ("--org-id MUST be explicitly pinned ... no silent
-      // default"). Failing here with that reason is better than letting the
-      // subprocess die 200ms later with a traceback the UI cannot explain.
-      const orgId = typeof payload.org === "string" && payload.org.trim()
-        ? payload.org.trim()
-        : launcher?.org ?? null;
-      if (sourceMode === "on" && !orgId) {
-        sendJson(res, 409, refuse(
-          "org_required",
-          "extracting an ON cell requires an org id — backgammon_sxe.py refuses a silent default",
-        ));
-        return;
-      }
-
-      const started = extraction.start({
-        python: PYTHON,
-        script: EXTRACT_SCRIPT,
-        cwd: BENCH_ROOT,
-        runLabel,
-        sourceMode,
-        orgId,
-        model,
-        onComplete: () => markExtractedFrom(runLabel, sourceMode),
-      });
-
-      sendJson(res, started.ok ? 200 : 409, started.ok ? { ok: true, model } : started);
-      return;
-    }
-
     // ── GET /api/feedback ────────────────────────────────────────────────
     // The graded text, VERBATIM — exactly what the model was told a user sent.
     //
@@ -1086,7 +939,6 @@ const server = createServer(async (req, res) => {
         contract_version: CONTROL_CONTRACT_VERSION,
         bench_root: BENCH_ROOT,
         runs_root: RUNS_ROOT,
-        stages: EXTRACT_STAGES.map((s) => s.id),
         event_feed: { connected: ring.connected, reason: ring.reason, total: ring.total },
       });
       return;

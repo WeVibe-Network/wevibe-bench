@@ -214,7 +214,7 @@ const parseArgs = (argv: string[]): { outPath: string } => {
 
   const scriptDir = dirname(fileURLToPath(import.meta.url))
   const repoRoot = resolve(scriptDir, "..")
-  const defaultOut = "../wevibe-bench/scaffold/wevibe-mcp-clone/tests/fixtures/spool-v1.plugin-produced.jsonl"
+  const defaultOut = "../wevibe-bench/tests/fixtures/spool-v1.plugin-produced.jsonl"
   const requested = outFlag ?? defaultOut
   const outPath = resolve(repoRoot, requested)
   return { outPath }

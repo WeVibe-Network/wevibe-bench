@@ -6,7 +6,7 @@
 // WHAT THESE TESTS ARE FOR. Two of them are DRIFT tests that assert this JS
 // agrees with the Python harness it describes. Those are the ones that matter
 // most: every other property here is local to this directory and would be
-// caught by reading it, but a stage list or a context registry that silently
+// caught by reading it, but a context registry or an alias list that silently
 // stops matching the program it claims to describe produces a UI that lies
 // confidently. Drift fails loudly here or not at all.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,14 +21,11 @@ import { fileURLToPath } from "node:url";
 import {
   confirmationToken,
   restatement,
-  EXTRACT_STAGES,
-  STAGE_STATES,
   EVENT_MAP,
   RESUME_UNSUPPORTED,
   EVENT_RING_MAX,
   EVENT_RENDER_CAP,
   GATE_STALL_THRESHOLD_S,
-  emptyExtraction,
   refuse,
 } from "./contract.mjs";
 import { matchRuntime, DECLARED_CONTEXT, CONTEXT_CHOICES, RETIRED_ALIASES, readRoster } from "./roster.mjs";
@@ -37,7 +34,6 @@ import { manifestArgFor, campaignDirName } from "./campaign.mjs";
 import { sessionIdFrom, terminalFrom, pidAlive, newestLog } from "./runstate.mjs";
 import { mapEvent, EventRing } from "./events.mjs";
 import { parseGateEvents, gradingStatus } from "./gate-events.mjs";
-import { parseStageLines, foldStages, DECLARED_STAGE_IDS } from "./extraction.mjs";
 import { createProfile, transferOf } from "./profiles.mjs";
 import { readModelsLedger } from "./models-ledger.mjs";
 import {
@@ -68,57 +64,6 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BENCH = join(HERE, "..");
-
-test("DRIFT: the extraction panel's stage vocabulary covers every contract state", () => {
-  // A state the UI does not know falls through to the PENDING glyph rather than
-  // erroring, so this drift is invisible on screen: it shipped once with the UI
-  // keyed on `done` while the contract emits `complete`, which rendered every
-  // finished stage as unstarted and reported "0/10" for a clean extraction.
-  //
-  // RE-POINTED TWICE, and the trail is kept deliberately — this guard has
-  // outlived two of the files that rendered the invariant, which is the whole
-  // argument for not deleting a guard alongside the code it was written against:
-  //   1. drawer.js  — dead code, deleted (WO-BOARD-PROFILE-1)
-  //   2. live.js    — extraction column removed from the run panel
-  //   3. extraction.js (here) — the unified popout (WO-BOARD-EXTRACT-1)
-  // The invariant never changed; only its address did.
-  const src = readFileSync(join(BENCH, "dashboard", "panels", "extraction.js"), "utf8");
-  const m = /export const STAGE_STATES = \[([^\]]*)\]/.exec(src);
-  assert.ok(m, "STAGE_STATES not found in extraction.js — the stage vocabulary moved");
-  const keys = [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
-  for (const state of STAGE_STATES) {
-    assert.ok(
-      keys.includes(state),
-      `contract state '${state}' is absent from extraction.js STAGE_STATES — it would ` +
-        "render with the pending mark and read as a stage that never started",
-    );
-  }
-});
-
-test("DRIFT: the extraction panel counts completions using the contract's state name", () => {
-  const src = readFileSync(join(BENCH, "dashboard", "panels", "extraction.js"), "utf8");
-  assert.ok(
-    src.includes('s.state === "complete"'),
-    "the stage counter must compare against 'complete' — the contract emits no 'done' state",
-  );
-});
-
-test("DRIFT: the extraction panel declares the same stage list as the contract", () => {
-  // The queue's stage pips are drawn from the panel's OWN copy of the stage
-  // ids, because the browser cannot import control/contract.mjs. A copy that
-  // drifts would silently mis-draw progress — a pipeline that grew an 11th
-  // stage would render as permanently 10/10 with one stage invisible.
-  const src = readFileSync(join(BENCH, "dashboard", "panels", "extraction.js"), "utf8");
-  const m = /export const EXTRACT_STAGES = \[([\s\S]*?)\]/.exec(src);
-  assert.ok(m, "EXTRACT_STAGES not found in extraction.js");
-  const ids = [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
-  assert.deepEqual(
-    ids,
-    DECLARED_STAGE_IDS,
-    "the extraction panel's stage list has drifted from control/contract.mjs — " +
-      "the queue's pips would report progress against a pipeline that no longer exists",
-  );
-});
 
 test("DRIFT: declared context matches WORKER_MODEL_REGISTRY in config.py", () => {
   const src = readFileSync(join(BENCH, "wevibe_bench", "config.py"), "utf8");
@@ -510,57 +455,6 @@ test("events are filterable by kind", () => {
   assert.equal(files.events[0].file, "/one");
 });
 
-// ── EXTRACTION ───────────────────────────────────────────────────────────────
-
-test("every declared stage is present from the start, in order", () => {
-  const v = emptyExtraction();
-  assert.equal(v.stages.length, EXTRACT_STAGES.length);
-  assert.deepEqual(v.stages.map((s) => s.id), DECLARED_STAGE_IDS);
-  // The UI must be able to show what is COMING, so nothing starts absent.
-  assert.ok(v.stages.every((s) => s.state === "pending"));
-});
-
-test("stage lines are parsed and folded", () => {
-  const text = [
-    'BACKGAMMON_SXE_STAGE {"at":1,"stage":"init","state":"running"}',
-    "noise line that is not a stage",
-    'BACKGAMMON_SXE_STAGE {"at":2,"stage":"init","state":"complete"}',
-  ].join("\n");
-  const { stages } = parseStageLines(text);
-  assert.equal(stages.length, 2);
-  const v = foldStages(stages);
-  assert.equal(v.stages.find((s) => s.id === "init").state, "complete");
-});
-
-test("a GATED stage is never overwritten by a later failed", () => {
-  // This is the WO-DBVOL-1 distinction. A corrupt substrate gates, then the
-  // exception path fires; if `failed` won, the deliberate refusal would be
-  // rendered as a crash and the operator would misdiagnose it.
-  const v = foldStages([
-    { stage: "substrate", state: "running", at: 1 },
-    { stage: "substrate", state: "gated", at: 2, detail: "database disk image is malformed" },
-    { stage: "substrate", state: "failed", at: 3, detail: "raised" },
-  ]);
-  const s = v.stages.find((x) => x.id === "substrate");
-  assert.equal(s.state, "gated");
-  assert.match(s.detail, /malformed/);
-});
-
-test("a measured zero is preserved, not treated as absence", () => {
-  const v = foldStages([
-    { stage: "extract", state: "running", at: 1 },
-    { stage: "extract", state: "complete", at: 2, count: 0 },
-  ]);
-  const s = v.stages.find((x) => x.id === "extract");
-  assert.equal(s.count, 0);
-  assert.notEqual(s.count, null);
-});
-
-test("an unknown stage id is ignored rather than injected into the UI", () => {
-  const v = foldStages([{ stage: "not_a_real_stage", state: "running", at: 1 }]);
-  assert.equal(v.stages.length, EXTRACT_STAGES.length);
-});
-
 // ── RUN STATE ────────────────────────────────────────────────────────────────
 
 test("session id is read from what the runner already publishes", () => {
@@ -670,16 +564,6 @@ test("start still requires the confirmation token", () => {
     /requireConfirm:\s*false/,
     "start must NEVER skip confirmation — that is what makes the second click meaningful",
   );
-});
-
-test("extraction requires a stamped complete gate before it runs", () => {
-  const route = SERVER_SRC.slice(
-    SERVER_SRC.indexOf('path === "/api/extraction/start"'),
-    SERVER_SRC.indexOf('path === "/api/health"'),
-  );
-  assert.match(route, /extractionEligibility\(/, "extraction start must gate on source-cell eligibility");
-  assert.match(SERVER_SRC, /complete_gate_missing/, "missing complete_gate must refuse extraction");
-  assert.match(SERVER_SRC, /already_extracted/, "already-extracted cells must refuse re-extraction");
 });
 
 test("completed sessions stamp complete_gate and never extracted_from", () => {

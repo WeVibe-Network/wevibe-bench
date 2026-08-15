@@ -14,7 +14,7 @@
 // answer. A restart of the control plane erased the entire history.
 //
 // So the harness now persists every job/stage/candidate to
-// `data/extract/extraction-telemetry.db` (wevibe_bench/extraction_telemetry.py)
+// `data/extract/extraction-telemetry.db`
 // and this module reads it. The live tracker is still authoritative for the
 // RUNNING job — see the merge note in panels/extraction.js — because a row is
 // only written at a stage transition and the tracker is fresher between them.

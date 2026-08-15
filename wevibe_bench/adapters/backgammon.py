@@ -648,6 +648,10 @@ class BackgammonCellResult:
     unmetered_turn_wall_s: float = 0.0
     contention: ContentionCovariates | None = None
     worker_image_fingerprint: ImageFingerprint | None = None
+    # WO-STRIP-2b: deterministic title the cell gave its OpenCode session(s),
+    # surfaced to the run-manifest status stream so the prod dashboard can
+    # join exported session-DB rows to bench cells.
+    session_title: str | None = None
 
 
 def _resolve_hold_ui_entrypoint(worktree: Path) -> Path:
@@ -1088,6 +1092,23 @@ def build_worker_opencode_config(
     return config
 
 
+def _safe_title_org_component(org_id: str | None) -> str:
+    """Fold ``org_id`` to ``[A-Za-z0-9-]`` for embedding in a session title."""
+    folded = re.sub(r"[^A-Za-z0-9-]+", "-", str(org_id or "")).strip("-")
+    return folded or "org"
+
+
+def bench_session_title(org_id: str | None, memory_mode: str, cell_ts: int) -> str:
+    """Deterministic, identifiable OpenCode session title for a bench cell.
+
+    Format: ``wevibe-bench-<org_id>-<arm on|off>-<cell_ts>``. ``cell_ts`` is
+    the epoch second captured ONCE at cell start, so the title is stable
+    across every attempt and resume of that cell and lands verbatim in the
+    exported session DB (``session.title``) for the prod dashboard.
+    """
+    return f"wevibe-bench-{_safe_title_org_component(org_id)}-{memory_mode}-{int(cell_ts)}"
+
+
 class BackgammonRunner(AgentRunner):
     def __init__(
         self,
@@ -1096,6 +1117,7 @@ class BackgammonRunner(AgentRunner):
         work_root: Path,
         model: str,
         memory_mode: str = "off",
+        org_id: str = "",
         mock: str | None = None,
         max_attempts: int = DEFAULT_ATTEMPT_HARD_CEILING,
         resume_budget: int = 2,
@@ -1132,6 +1154,13 @@ class BackgammonRunner(AgentRunner):
 
         self.model = str(model)
         self.memory_mode = str(memory_mode)
+        # Bench identity for session titling (WO-STRIP-2b). Empty is legitimate
+        # (mock/unit callers); the title then uses the "org" fallback component.
+        self.org_id = str(org_id or "")
+        # Set once at cell start in _run_cell_impl (stable across attempts and
+        # resumes); read by the serve-session create call and the first-run argv.
+        self._cell_ts: int | None = None
+        self._session_title: str | None = None
         self.mock = mock
         requested_max_attempts = int(max_attempts)
         if requested_max_attempts < 1:
@@ -1309,6 +1338,13 @@ class BackgammonRunner(AgentRunner):
         injected_memory: list[RecalledMemory],
     ) -> BackgammonCellResult:
         started = time.monotonic()
+        # WO-STRIP-2b: capture the cell epoch ONCE so every surface of this
+        # cell (serve session, first-run argv, result, status stream) carries
+        # the identical deterministic title, stable across attempts/resumes.
+        self._cell_ts = int(time.time())
+        self._session_title = bench_session_title(
+            self.org_id, self.memory_mode, self._cell_ts
+        )
         cell_cost_usd = 0.0
         run_dir = Path(run_dir).expanduser().resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1446,7 +1482,9 @@ class BackgammonRunner(AgentRunner):
                 self._serve_client = ServeClient(serve_base)
                 cell_session_id: str | None = None
                 try:
-                    cell_session_id = self._serve_client.create_session()
+                    cell_session_id = self._serve_client.create_session(
+                        title=self._session_title
+                    )
                 except ServeClientError as exc:
                     self._progress(
                         f"PROGRESS step=live-view session_create_failed detail={exc}"
@@ -1495,6 +1533,10 @@ class BackgammonRunner(AgentRunner):
                     "--format",
                     "json",
                 ]
+                # WO-STRIP-2b: title the stdout-fallback session the same way
+                # the serve session is titled. Resume invocations deliberately
+                # omit --title (--session preserves the existing title).
+                initial_inner += ["--title", self._session_title or ""]
                 if pure:
                     initial_inner.append("--pure")
 
@@ -2222,6 +2264,7 @@ class BackgammonRunner(AgentRunner):
             attempt_reports=attempt_reports,
             worktree=str(worktree),
             session_id=session_id,
+            session_title=self._session_title,
             memory_mode=self.memory_mode,
             model=self.model,
             wall_cost_usd=cell_cost_usd,

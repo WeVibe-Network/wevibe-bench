@@ -456,10 +456,16 @@ class ServeClient:
     def _url(self, path: str) -> str:
         return self.base_url + path
 
-    def create_session(self) -> str:
-        """POST /session {} -> return the created session id."""
+    def create_session(self, title: str | None = None) -> str:
+        """POST /session -> return the created session id.
+
+        ``title`` (when given) seeds the opencode session DB ``session.title``
+        so the prod dashboard can identify bench sessions; omitted, the body
+        stays ``{}`` and opencode assigns its default title.
+        """
+        body: dict[str, Any] = {"title": title} if title is not None else {}
         payload = _http_json(
-            "POST", self._url("/session"), body={}, timeout=self.timeout
+            "POST", self._url("/session"), body=body, timeout=self.timeout
         )
         if not isinstance(payload, dict) or not payload.get("id"):
             raise ServeClientError(f"create_session: no 'id' in response: {payload!r}")

@@ -12,8 +12,8 @@
 // docker socket. Those are kernel-enforced facts, not policy, and they are what
 // make "the dashboard corrupted a run" impossible rather than merely unlikely.
 //
-// Features that START runs and TRIGGER extraction cannot live there without
-// destroying that property. So they live HERE, host-side, as a distinct process
+// Features that START runs cannot live there without destroying that property.
+// So they live HERE, host-side, as a distinct process
 // on a distinct port with a distinct trust level. The dashboard consumes this
 // service as one more source module — and if this service is down, the board
 // reports `unwired` and loses control affordances while keeping every
@@ -53,7 +53,6 @@ export const CONTROL_CONTRACT_VERSION = "1.0";
  * @typedef {Object} Capabilities
  * @property {boolean} start_run        — can launch a new cell
  * @property {boolean} resume_run       — ALWAYS FALSE. See RESUME_UNSUPPORTED.
- * @property {boolean} extract          — can trigger extraction
  * @property {boolean} events           — can proxy the live event stream
  * @property {boolean} select_context   — can set context length per run
  */
@@ -139,7 +138,7 @@ export const RUN_STATES = /** @type {const} */ ([
   "starting",   // launch issued, not yet confirmed alive
   "running",    // a cell is in flight
   "stalled",    // running but the progress log has gone silent past threshold
-  "complete",   // terminal, extraction may be available
+  "complete",   // terminal, the cell finished cleanly
   "failed",     // terminal, carries reason
 ]);
 
@@ -412,87 +411,6 @@ export const EVENT_RING_MAX = 2000;
 /** The design's render cap — how many rows the feed draws at once. */
 export const EVENT_RENDER_CAP = 400;
 
-// ── EXTRACTION ───────────────────────────────────────────────────────────────
-//
-// The pipeline is a FIXED, ORDERED stage list. All stages are declared up front
-// so the UI can render what is COMING, not just what has happened — an operator
-// must be able to see the shape of the work before it runs.
-//
-// Stage names mirror the `stage` variable in scripts/backgammon_sxe.py exactly.
-// If that machine changes, this list must change with it; the emitter test
-// pins the correspondence so drift fails loudly rather than rendering a stage
-// list that no longer describes the program.
-
-export const EXTRACT_STAGES = /** @type {const} */ ([
-  { id: "init", title: "initialise", note: "resolve run dir + logger" },
-  { id: "substrate", title: "substrate integrity", note: "PRAGMA quick_check + full table scan" },
-  { id: "identity", title: "identity", note: "leader + contributor seeds" },
-  { id: "preflight", title: "preflight", note: "stack reachability" },
-  { id: "orchestrator", title: "orchestrator bring-up", note: "leader + contributor MCP" },
-  { id: "org_resolve", title: "org resolve", note: "m1 — resolve target org" },
-  { id: "extract", title: "extract", note: "the model call that produces memories" },
-  { id: "submit", title: "submit", note: "per-memory submission" },
-  { id: "approve", title: "approve", note: "per-memory approval" },
-  { id: "prove_delivery", title: "prove delivery", note: "on-chain delivery proof" },
-]);
-
-/**
- * FIVE STAGE STATES, AND THE FIFTH IS THE POINT.
- *
- * `gated` is NOT a failure and NOT a success — it is the integrity gate
- * refusing to proceed. WO-DBVOL-1 added a fail-closed check because SQLite
- * corruption is PARTIAL: the corrupt DB answered `count(*)` fine (492 rows)
- * while `PRAGMA quick_check` reported a malformed image. An unverified
- * substrate therefore did not fail extraction — it silently returned FEWER
- * memories, and the ON arm published a real-looking number that was simply too
- * low. For a benchmark others plug into, that is the most damaging failure mode
- * available: no number is recoverable, a wrong number is not.
- *
- * So `gated` must render as DELIBERATE — the instrument correctly refusing —
- * and must never be stylable as either a crash or a pass.
- */
-export const STAGE_STATES = /** @type {const} */ ([
-  "pending",
-  "running",
-  "complete",
-  "failed",
-  "gated",
-]);
-
-/**
- * @typedef {Object} StageState
- * @property {string}      id
- * @property {string}      title
- * @property {string}      state     — one of STAGE_STATES
- * @property {number|null} started_at
- * @property {number|null} elapsed_s
- * @property {number|null} count     — measured output count; 0 is a REAL result
- * @property {string|null} detail    — verbatim reason on failed/gated
- */
-
-/** The empty extraction view — every stage pending, nothing observed. */
-export function emptyExtraction() {
-  return {
-    state: "idle",
-    model: null,
-    started_at: null,
-    finished_at: null,
-    status: null,
-    reason: null,
-    n_memories: null,
-    stages: EXTRACT_STAGES.map((s) => ({
-      id: s.id,
-      title: s.title,
-      note: s.note,
-      state: "pending",
-      started_at: null,
-      elapsed_s: null,
-      count: null,
-      detail: null,
-    })),
-  };
-}
-
 // ── REFUSAL SHAPE ────────────────────────────────────────────────────────────
 
 /**
@@ -512,7 +430,6 @@ export const REFUSAL_CODES = /** @type {const} */ ([
   "bad_confirmation",    // token did not match the parameters
   "context_unavailable", // requested ctx exceeds the runtime ceiling
   "resume_unsupported",  // see RESUME_UNSUPPORTED
-  "nothing_to_extract",  // no completed cell
   "launcher_failed",     // the process did not start
   "upstream_unwired",    // proxy/runtime/serve unreachable
 ]);

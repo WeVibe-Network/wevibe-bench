@@ -32,7 +32,6 @@ scorecards/
 *.scorecard.json
 
 # --- bench consolidation: scaffold hygiene (Walter-approved) ---
-scaffold/wevibe-mcp-clone/
 scaffold/wevibe-sdk
 scaffold/**/node_modules
 .wevibe/org.json

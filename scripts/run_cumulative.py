@@ -781,6 +781,10 @@ class RealSessionRunner:
             "unmetered_turn_wall_s": float(getattr(result, "unmetered_turn_wall_s", 0.0) or 0.0),
             "session_fp": session_fp,
             "session_id": session_id,
+            # WO-STRIP-2b: the deterministic title the cell gave its OpenCode
+            # session(s) (wevibe-bench-<org>-<arm>-<cell_ts>); joins exported
+            # session-DB rows to bench cells on the prod dashboard.
+            "session_title": str(getattr(result, "session_title", None) or ""),
         }
 
         stream = StatusStream(
@@ -1007,6 +1011,11 @@ class RealSessionRunner:
             "work_root": state.run_dir,
             "model": session.model,
             "memory_mode": session.memory_mode,
+            # WO-STRIP-2b: titles the cell's OpenCode session
+            # (wevibe-bench-<org>-<arm>-<cell_ts>) for prod-dashboard
+            # identification. self._org_id is the authoritative source here —
+            # same seam the per-cell status record's org_id uses.
+            "org_id": str(getattr(self, "_org_id", None) or ""),
             "max_attempts": self._max_attempts,
             "proxy_base_url": self._proxy_base_url,
             "proxy_token": self._proxy_token,

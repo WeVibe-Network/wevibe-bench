@@ -6,7 +6,7 @@ WHY THIS EXISTS
 Starting a cell requires ~6 checks that were previously scattered across
 RUNBOOK §0/§2.1/§7 and the workspace AGENTS.md. Doing them by hand costs an
 operator (or an agent) a long, error-prone discovery pass every single time,
-and the most important check — asserting the clone identities at the seam —
+and the most important check — asserting the bench MCP identity at the seam —
 was effectively undiscoverable because `/v1/identity/pubkeys` is bearer-gated
 and returns `{"status":"error","error":"unauthorized"}` to a plain curl.
 
@@ -76,7 +76,7 @@ def port_open(port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:
 
 
 def check_ports(c: Check) -> None:
-    for port, what in ((4545, "local relay"), (4550, "leader clone MCP"),
+    for port, what in ((4545, "local relay"), (4550, "bench MCP"),
                        (4440, "hub")):
         ok = port_open(port)
         hint = "" if ok else "  -> see RUNBOOK §7 for bring-up"

@@ -54,6 +54,10 @@ def _default_served_memories_container_path() -> str:
     return str(RunConfig().served_memories_container_path)
 
 
+def _default_recall_url() -> str:
+    return os.environ.get("WEVIBE_BENCH_MCP_RECALL_URL") or "http://host.docker.internal:4550"
+
+
 def docker_available() -> tuple[bool, str]:
     """Return Docker daemon availability and detail, never raising."""
     cmd = ["docker", "version", "--format", "{{.Server.Version}}"]
@@ -170,7 +174,8 @@ class DockerCellConfig:
     container_name: str
     image: str = WORKER_IMAGE
     network: str = WORKER_NETWORK
-    recall_url: str = "http://host.docker.internal:4550"
+    # Must be container-reachable (host.docker.internal form) when workers are used; defaults to the bench MCP port :4550.
+    recall_url: str = field(default_factory=_default_recall_url)
     hub_url: str = "http://host.docker.internal:4440"
     # Primary scored path defaults to RunConfig.primary_recall_mode (prod).
     # Diagnostic/non-primary paths can still override this field (for example, test mode).
@@ -556,7 +561,7 @@ class DockerCell:
 
         WO-DBVOL-1: the DB now LIVES in a Docker volume (SQLite-safe ext4), so
         it must be exported before the container is removed. Everything
-        downstream — extraction (``backgammon_sxe.py`` ``session_db_path``),
+        downstream — extraction (via the exported ``session_db_path``),
         forensics, the dashboard — keeps reading the same host path as before.
 
         Ordering matters: ``teardown`` calls ``stop_serve`` FIRST, so opencode
@@ -1008,7 +1013,7 @@ def _build_run_argv(
         if not host_token.is_file():
             raise FileNotFoundError(
                 "memory_mode='on' requires host token ~/.wevibe/mcp-session-token; "
-                "start the wevibe-mcp clone or run bench preflight to mint it"
+                "start the bench MCP or run bench preflight to mint it"
             )
 
         recall_mode = str(config.recall_mode).strip().lower()
@@ -1042,7 +1047,7 @@ def _build_run_argv(
                 "-e",
                 f"WEVIBE_SERVED_MEMORIES_PATH={config.served_memories_container_path}",
                 # Vendored wevibe plugin hardcodes ~/.wevibe/mcp-session-token and
-                # the clone API is bearer-gated; mount that token only, read-only.
+                # the bench MCP API is bearer-gated; mount that token only, read-only.
                 "-v",
                 f"{host_token}:{token_dest}:ro",
                 # The plugin reads ~/.wevibe/plugin-config.json from homedir(); mount

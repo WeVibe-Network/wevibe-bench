@@ -2,15 +2,15 @@
 
 WHY THIS EXISTS: the bench talks to a TWO-TIER recall topology and agents have
 repeatedly confused the tiers — concluding "the hub is down" (and drifting into
-building their own hub) when in fact the MCP recall client or its Option-C clone
-was down. This guard checks BOTH tiers with the CORRECT, DISTINCT health paths and
-raises a loud, actionable, one-path error that names the exact remediation and
-forbids improvising infrastructure.
+building their own hub) when in fact the MCP recall client was down. This guard
+checks BOTH tiers with the CORRECT, DISTINCT health paths and raises a loud,
+actionable, one-path error that names the exact remediation and forbids
+improvising infrastructure.
 
   TIER 1  hub  = Docker container `wevibe-hub`, http://127.0.0.1:4440,
                  health GET /health  (public, no auth) -> 200 {"status":"ok","db":"connected",...}
-  TIER 2  mcp  = wevibe-mcp recall client, http://127.0.0.1:4450 (default) or
-                 http://127.0.0.1:4550 (Option-C bench clone),
+  TIER 2  mcp  = commissioned wevibe-mcp recall client, http://127.0.0.1:4450
+                 (default) or http://127.0.0.1:4550 (bench),
                  health GET /v1/health (bearer-gated) -> 200 with token / 401 without
 
 No silent operation (R-37): every check logs its outcome to the provided logger.
@@ -36,20 +36,6 @@ from wevibe_bench.adapters.backgammon import build_worker_opencode_config
 from wevibe_bench.adapters.docker_worker import WORKER_IMAGE, docker_available, image_exists
 
 LOGGER = logging.getLogger("wevibe_bench.preflight")
-_REPO = pathlib.Path(__file__).resolve().parents[1]
-
-# The exact command to start the Option-C bench clone on :4550 (mirrors how
-# wevibe_bench.lifecycle.orchestrator launches it: bench endpoints + env seed
-# backend + leader identity seed + hub url + port). The identity seed MUST be the
-# same bench leader seed the corpus was seeded with, or recall cannot decrypt.
-CLONE_START_CMD = (
-    f"cd {_REPO / 'scaffold' / 'wevibe-mcp-clone'} && "
-    "WEVIBE_MCP_HTTP_PORT=4550 WEVIBE_HTTP_HOST=127.0.0.1 "
-    "WEVIBE_BENCH_ENDPOINTS=1 WEVIBE_SEED_BACKEND=env "
-    'WEVIBE_IDENTITY_SEED_HEX="$WEVIBE_BENCH_LEADER_SEED_HEX" '
-    "WEVIBE_HUB_URL=http://127.0.0.1:4440 "
-    "node dist/server.js"
-)
 
 # Appended to EVERY preflight failure so the reader can never mistake the tiers
 # or drift into standing up their own infrastructure.
@@ -58,12 +44,11 @@ REMEDIATION = (
     "TOPOLOGY (do not confuse the two tiers):\n"
     "  * The hub is the Docker container `wevibe-hub` at 127.0.0.1:4440 "
     "(health GET /health, public). It is the ONE hub and is normally ALREADY RUNNING.\n"
-    "  * The recall client is the wevibe-mcp process/clone at 127.0.0.1:4450 "
-    "(default) or :4550 (Option-C bench clone) (health GET /v1/health, bearer-gated).\n"
+    "  * The recall client is the commissioned wevibe-mcp process at 127.0.0.1:4450 "
+    "(default) or :4550 (bench) (health GET /v1/health, bearer-gated).\n"
     "\nDO NOT build, compile, or start your own hub or mcp. They already exist.\n"
     "  * To bring the HUB up:   `make redeploy`  (run from wevibe-meta, Walter-run; "
     "the `backend-restart` error it prints is EXPECTED/harmless).\n"
-    "  * To bring the CLONE (:4550) up:\n      " + CLONE_START_CMD + "\n"
     "\nIf you cannot bring it up, STOP and report — do NOT improvise infrastructure.\n"
     "---------------------------------------------------------------------------"
 )
@@ -557,8 +542,6 @@ def preflight(
         log.info("preflight.mcp SKIPPED (mcp_recall_url=None; caller brings up its own mcp)")
         return
 
-    is_clone = ":4550" in mcp_recall_url
-    tier_name = "Option-C bench clone (:4550)" if is_clone else "wevibe-mcp recall client"
     mcp_health = f"{mcp_recall_url.rstrip('/')}/v1/health"
     token = _read_token(session_token_path)
     status, body, reachable = _http_get(mcp_health, token=token)
@@ -571,16 +554,12 @@ def preflight(
     )
 
     if not reachable:
-        clone_hint = (
-            f"If this is :4550, the {tier_name} is NOT running; start it with the command below."
-            if is_clone
-            else f"The {tier_name} at {mcp_recall_url} is not listening; start it (see below)."
-        )
         raise PreflightError(
             f"PREFLIGHT FAILED: the MCP RECALL CLIENT at {mcp_recall_url} is DOWN "
             f"(connection refused at GET {mcp_health}). The HUB is a SEPARATE service and is "
-            f"NOT the problem — this is the mcp/clone tier. {clone_hint} "
-            f"DO NOT build or start your own hub or mcp beyond the documented command." + REMEDIATION
+            f"NOT the problem — this is the mcp tier. The mcp recall client is not listening; "
+            f"bring it up or STOP and report. "
+            f"DO NOT build or start your own hub or mcp." + REMEDIATION
         )
     if status == 401:
         raise PreflightError(
@@ -593,6 +572,6 @@ def preflight(
         raise PreflightError(
             f"PREFLIGHT FAILED: the mcp recall client at {mcp_recall_url} returned an unexpected "
             f"GET {mcp_health} -> http_status={status}. Expected 200 (token) or 401 (no token). "
-            f"This is the mcp/clone tier, NOT the hub." + REMEDIATION
+            f"This is the mcp tier, NOT the hub." + REMEDIATION
         )
     log.info("preflight.mcp OK (%s reachable and healthy)", mcp_recall_url)

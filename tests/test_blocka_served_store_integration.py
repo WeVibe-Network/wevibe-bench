@@ -19,12 +19,12 @@ def test_real_blocka_reader_returns_only_texts_served_for_session(tmp_path: Path
 
     reader_path = (
         Path(__file__).resolve().parents[1]
-        / "scaffold/wevibe-mcp-clone/dist/served-memory-store.js"
+        / "tests/fixtures/served-memory-store.js"
     )
-    if not reader_path.is_file():
-        pytest.skip(
-            f"clone dist reader missing at {reader_path}; cannot run real Block A served-store reader"
-        )
+    assert reader_path.is_file(), (
+        f"rehomed served-store reader missing at {reader_path}; "
+        "the Block A cross-language tripwire requires it (rehome from the commissioned prod wevibe-mcp dist)"
+    )
 
     session_id = "sid-blocka-cross-lang"
     served_store_path = tmp_path / "served-memories.json"

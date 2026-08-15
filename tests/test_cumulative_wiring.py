@@ -37,6 +37,7 @@ def test_real_session_runner_forwards_proxy_creds_to_backgammon_runner(tmp_path:
     runner._runs_dir = tmp_path / "runs"
     runner._task_dir = tmp_path / "task"
     runner._task = "backgammon"
+    runner._org_id = "wevibe-org-0"
     runner._max_attempts = 3
     runner._proxy_base_url = "http://127.0.0.1:11434/v1"
     runner._proxy_token = "proxy-token-value"
@@ -57,6 +58,9 @@ def test_real_session_runner_forwards_proxy_creds_to_backgammon_runner(tmp_path:
     assert captured["proxy_base_url"] == "http://127.0.0.1:11434/v1"
     assert captured["proxy_token"] == "proxy-token-value"
     assert captured["model"] == "openrouter/tencent/hy3"
+    # WO-STRIP-2b: org_id is plumbed through so the runner can title the
+    # cell's OpenCode session deterministically.
+    assert captured["org_id"] == "wevibe-org-0"
     assert result.session_id == "sid-1"
 
 

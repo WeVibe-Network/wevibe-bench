@@ -826,7 +826,7 @@ a:hover{color:var(--type)}
 /* ── EXTRACTION STAGES ────────────────────────────────────────────────────
    The state word is `complete`, NEVER `done`. A prior drift bug keyed the
    CSS on `done`; every finished stage rendered blank and the counter read
-   0/10. The vocabulary here must match scripts/backgammon_sxe.py.
+   0/10.
    GATED is a double rule PLUS the word, so it survives greyscale. */
 .stages{display:flex;flex-direction:column;gap:4px;min-width:0}
 .stage{display:grid;grid-template-columns:14px minmax(0,1fr) auto;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font:400 12.5px var(--font);color:var(--fg);min-width:0}

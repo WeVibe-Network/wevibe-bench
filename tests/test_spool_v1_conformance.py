@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "ledger" / "spool-v1.schema.json"
-FIXTURE_PATH = REPO_ROOT / "scaffold" / "wevibe-mcp-clone" / "tests" / "fixtures" / "spool-v1.plugin-produced.jsonl"
+FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "spool-v1.plugin-produced.jsonl"
 
 SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 VALIDATOR = Draft202012Validator(SCHEMA)

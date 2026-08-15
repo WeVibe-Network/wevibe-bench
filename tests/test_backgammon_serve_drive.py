@@ -24,6 +24,7 @@ from wevibe_bench.adapters.backgammon import (
     TURN_TERMINAL_OBSERVATION_LOST,
     TURN_TERMINAL_TRANSPORT_ERROR,
     TURN_TERMINAL_TRUNCATED,
+    bench_session_title,
 )
 from wevibe_bench.serve_client import ServeClientError, extract_transcript_metrics
 
@@ -1744,3 +1745,21 @@ def test_serve_drive_finalize_timeout_exhaustion_never_kills_the_phase(
     assert stats.output_tokens == 90
     assert stats.turns == 8
     assert stats.finalize_timeout_turns == 1
+
+
+def test_bench_session_title_format_is_deterministic(tmp_path: Path) -> None:
+    """WO-STRIP-2b: ``wevibe-bench-<org>-<arm>-<cell_ts>``, identifiably."""
+    title = bench_session_title("wevibe-org-0", "off", 1786777435)
+    assert title == "wevibe-bench-wevibe-org-0-off-1786777435"
+    assert bench_session_title("wevibe-org-0", "on", 1786777435) == (
+        "wevibe-bench-wevibe-org-0-on-1786777435"
+    )
+
+
+def test_bench_session_title_sanitizes_and_falls_back(tmp_path: Path) -> None:
+    """org_id is folded to [A-Za-z0-9-]; empty/none -> literal ``org``."""
+    assert bench_session_title("wevibe/org_0", "off", 1786777435) == (
+        "wevibe-bench-wevibe-org-0-off-1786777435"
+    )
+    assert bench_session_title("", "on", 7) == "wevibe-bench-org-on-7"
+    assert bench_session_title(None, "off", 7) == "wevibe-bench-org-off-7"
