@@ -678,7 +678,7 @@ known failure mode:
 
 | Requirement | What breaks without it |
 |---|---|
-| `WEVIBE_UMBRAL_SIDECAR_BIN` + `WEVIBE_GUARD_BIN`, derived from the workspace root | `register-org` 500s demanding the sidecar binary. The plugin normally injects these; a manual start does not. This caused the 2026-07-13 cell-1 abort |
+| `WEVIBE_GUARD_BIN`, derived from the workspace root | Guard scanning fails. The plugin normally injects it; a manual start does not. **Umbral no longer belongs in this row** — it ships as WASM inside `wevibe-mcp` and needs no variable. The 2026-07-13 cell-1 abort and the 2026-08-14 recurrence were both caused by the old `WEVIBE_UMBRAL_SIDECAR_BIN` requirement, which no longer exists |
 | `WEVIBE_MCP_HTTP_ONLY=1` | The clone also runs the stdio server, which treats a backgrounded stdin-EOF as shutdown. Required for any backgrounded start |
 | `< /dev/null` on the launch | Belt-and-braces so the stdio path never sees an open-then-closed stdin |
 | `WEVIBE_RECALL_MODE=test` | Recall is prod-governed (floor 0.55, budget 3) and a fresh low-trust memory is filtered out — **prove-delivery and the ON recall arm both return nothing.** Test mode also **auto-approves** recalled memories; prod or unset **headless injects NOTHING**, because it waits on a human approval popup that no headless run can answer |
