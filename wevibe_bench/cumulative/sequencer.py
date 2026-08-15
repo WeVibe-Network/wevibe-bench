@@ -1,29 +1,29 @@
 """Cumulative phase-machine sequencer for benchmark session orchestration.
 
+Sequences the measurement-only campaign: every scheduled session (OFF
+baseline cells, then ON cells) walks PREPARE_FIXTURE -> RUN_SESSION, then
+the sequencer advances to the next session until all sessions are done.
+Recall during ON cells is auto-injected by the worker plugin; there are no
+extract, coordinator-review, or leader-commit stages.
+
 This module owns *only* deterministic sequencing + checkpointing.
-All side effects are injected through ``SessionRunner`` and ``LeaderClient``.
+All side effects are injected through ``SessionRunner``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
-import json
 import logging
 import os
-import time
 from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
-from .catalog import PrivateReviewCard, redacted_candidate_ref
 from .convergence import build_convergence_trend
-from .decision import DENY_FINAL, DecisionManifest
-from .leader_client import ApplyResult, LeaderClient
 from .manifest import atomic_write, resume_or_create, roster_hash
 from .ordering import build_schedule
 from .progress import progress_from_cell_result
-from .run_artifacts import StatusStream, build_scorecard, default_status_stream_path
+from .run_artifacts import build_scorecard
 from .types import (
-    PhaseGroup,
     RosterEntry,
     SessionPhase,
     SessionRecord,
@@ -32,38 +32,6 @@ from .types import (
 )
 
 _LOG = logging.getLogger(__name__)
-
-# Bounds the delivery-wait poll in the COMMIT_INDEX_READY phase. Each poll
-# sleeps 0.25s, so this is ~20s of waiting for committed memories to become
-# visible/indexed. Fail-closed: a delivery that never arrives ends the wait
-# instead of polling forever, and the cell is recorded as unverified rather
-# than left hanging (or wrongly scored).
-INDEX_READY_MAX_POLLS = 80
-
-
-class AwaitingCoordinatorReview(TypedDict):
-    status: Literal["awaiting_coordinator_review"]
-    sequence_index: int
-    org_id: str
-    extraction_job_id: str
-    session_fp: str
-    candidate_count: int
-
-
-class SessionCommitted(TypedDict):
-    status: Literal["session_committed"]
-    sequence_index: int
-    committed_ids: list[str]
-    denied_refs: list[str]
-    all_denied: bool
-    next_index: int
-
-
-class AwaitingExtract(TypedDict):
-    status: Literal["awaiting_extract"]
-    sequence_index: int
-    session_fp: str
-    memory_mode: str
 
 
 class DoneState(TypedDict):
@@ -84,8 +52,7 @@ class HaltedOnGate(TypedDict):
     observed_producer_model_ids: list[str]
 
 
-StepUntilReviewResult = AwaitingExtract | AwaitingCoordinatorReview | HaltedOnGate | DoneState
-ResumeWithDecisionResult = SessionCommitted | DoneState
+StepUntilDoneResult = HaltedOnGate | DoneState
 
 
 @runtime_checkable
@@ -98,12 +65,6 @@ class SessionRunner(Protocol):
     def run_session(self, session: SessionRecord) -> object:
         """Execute one coding session and return telemetry (BackgammonCellResult-shaped)."""
 
-    def extract(self, session: SessionRecord) -> dict[str, Any]:
-        """Run the normal extraction pipeline and return candidate + job/session metadata."""
-
-    def index_ready(self, session: SessionRecord) -> bool:
-        """Return True once committed memories are visible/indexed for this session."""
-
 
 class CumulativeSequencer:
     def __init__(
@@ -111,8 +72,6 @@ class CumulativeSequencer:
         manifest_path: str | os.PathLike[str],
         *,
         runner: SessionRunner,
-        leader_client: LeaderClient,
-        review_card: PrivateReviewCard,
         roster: list[RosterEntry],
         seed: int,
         task: str,
@@ -121,15 +80,9 @@ class CumulativeSequencer:
         on_budget: int,
         run_context: Mapping[str, Any] | None = None,
         chunk_plan_hash: str = "",
-        index_ready_max_polls: int = INDEX_READY_MAX_POLLS,
-        require_delivery_verification: bool = True,
     ) -> None:
         if not isinstance(runner, SessionRunner):
             raise ValueError("runner must implement SessionRunner")
-        if not isinstance(leader_client, LeaderClient):
-            raise ValueError("leader_client must be a LeaderClient")
-        if review_card is None or not isinstance(review_card, PrivateReviewCard):
-            raise ValueError("review_card must be a PrivateReviewCard")
 
         normalized_manifest_path = os.path.abspath(os.fspath(manifest_path))
         if not normalized_manifest_path:
@@ -175,11 +128,7 @@ class CumulativeSequencer:
 
         self._manifest_path = normalized_manifest_path
         self._runner = runner
-        self._leader_client = leader_client
-        self._review_card = review_card
         self._manifest = manifest
-        self._index_ready_max_polls = index_ready_max_polls
-        self._require_delivery_verification = require_delivery_verification
 
         if not self._manifest.session_records:
             self._manifest.session_records = [
@@ -227,25 +176,35 @@ class CumulativeSequencer:
                 "sessions": total_sessions,
                 "completed": completed,
                 "remaining": remaining,
-                "decision_applied": sum(
-                    1 for record in self._manifest.session_records if record.decision_applied
-                ),
             },
         }
 
-    def step_until_review(self) -> StepUntilReviewResult:
-        session = self.current_session()
-        if session is None:
-            return self._done_state()
+    def step_until_done(self) -> StepUntilDoneResult:
+        """Run every scheduled session and return the done state.
 
+        Each session (OFF baseline cell, then ON cell) walks
+        PREPARE_FIXTURE -> RUN_SESSION; the worker plugin auto-injects
+        recall during ON cells. After RUN_SESSION completes, the sequencer
+        advances to the next session. A failing walk gate that stops the
+        walk checkpoints the session in the HALTED_ON_GATE side-state and
+        returns its halted descriptor instead of continuing.
+        """
         while True:
-            phase = self._phase_of(session)
+            session = self.current_session()
+            if session is None:
+                return self._done_state()
 
-            if phase == SessionPhase.AWAIT_COORDINATOR_REVIEW:
-                return self._paused_descriptor(session)
+            phase = self._phase_of(session)
 
             if phase == SessionPhase.HALTED_ON_GATE:
                 return self._halted_descriptor(session)
+
+            if phase == SessionPhase.DONE:
+                # Resume-safe: this session already ran to completion; a
+                # crash between its DONE checkpoint and the index advance
+                # lands here.
+                self._advance_to_next_session(session)
+                continue
 
             if phase == SessionPhase.PREPARE_FIXTURE:
                 _LOG.info(
@@ -272,13 +231,6 @@ class CumulativeSequencer:
                 session.progress = progress_from_cell_result(telemetry).to_dict()
                 halt_gate = self._first_stopping_walk_gate(session)
                 if halt_gate is not None:
-                    # Extraction never ran because the session halted on gate.
-                    self._append_extraction_status(
-                        session,
-                        invoked=False,
-                        cut_off=False,
-                        candidate_count=None,
-                    )
                     session.set_phase(SessionPhase.HALTED_ON_GATE)
                     self._checkpoint()
                     halted = self._halted_descriptor(session)
@@ -293,315 +245,28 @@ class CumulativeSequencer:
                     )
                     return halted
                 session.complete_gate = True
-                return self._extract_pending_descriptor(session)
-
-            if phase == SessionPhase.EXTRACT_NORMAL_PIPELINE:
-                # Extraction is a separate invocation. step_until_review never
-                # runs extraction itself; a session checkpointed at this phase
-                # (e.g. from an interrupted prior run) surfaces as awaiting_extract
-                # so the operator drives the separate extract invocation.
-                return self._extract_pending_descriptor(session)
-
-            if phase in {
-                SessionPhase.LEADER_DECISION_APPLY,
-                SessionPhase.COMMIT_INDEX_READY,
-                SessionPhase.NEXT_SESSION,
-            }:
-                raise ValueError(
-                    "current session already passed coordinator review; "
-                    "use resume_with_decision to continue"
-                )
-
-            if phase == SessionPhase.DONE:
-                return self._done_state()
-
-            raise ValueError(f"unsupported session phase for step_until_review: {phase.value!r}")
-
-    def extract_current(self) -> AwaitingCoordinatorReview | HaltedOnGate | DoneState:
-        """Run the normal extraction pipeline for the current session.
-
-        Extraction is a separate invocation per the card contract
-        ("EXTRACT — a separate invocation", "One cell per invocation"). This
-        method picks up where ``step_until_review`` left off:
-        - a session in RUN_SESSION (or already checkpointed at
-          EXTRACT_NORMAL_PIPELINE) runs extraction and moves to
-          AWAIT_COORDINATOR_REVIEW;
-        - a session already at AWAIT_COORDINATOR_REVIEW is idempotent;
-        - post-review states raise (extraction already done).
-        """
-        session = self.current_session()
-        if session is None:
-            return self._done_state()
-
-        phase = self._phase_of(session)
-
-        if phase == SessionPhase.AWAIT_COORDINATOR_REVIEW:
-            return self._paused_descriptor(session)
-
-        if phase == SessionPhase.HALTED_ON_GATE:
-            return self._halted_descriptor(session)
-
-        if phase == SessionPhase.RUN_SESSION:
-            session.set_phase(SessionPhase.EXTRACT_NORMAL_PIPELINE)
-            self._checkpoint()
-            phase = SessionPhase.EXTRACT_NORMAL_PIPELINE
-
-        if phase == SessionPhase.EXTRACT_NORMAL_PIPELINE:
-            _LOG.info(
-                "cumulative.sequencer.extract_start sequence_index=%d memory_mode=%s",
-                session.sequence_index,
-                session.memory_mode,
-            )
-            try:
-                extraction_payload = self._runner.extract(session)
-            except Exception as exc:
-                # Observability-only: record that extraction was invoked but
-                # cut off (e.g. timeout), then re-raise. Behaviour is
-                # preserved exactly — the run still aborts as before; only
-                # an append-only extraction record is left behind.
-                self._append_extraction_status(
-                    session,
-                    invoked=True,
-                    cut_off=True,
-                    candidate_count=session.extraction_candidate_count,
-                    error=str(exc),
-                )
-                raise
-            if not isinstance(extraction_payload, Mapping):
-                raise ValueError("runner.extract must return a mapping payload")
-
-            self._populate_extraction_result(session, extraction_payload)
-            self._append_extraction_status(
-                session,
-                invoked=True,
-                cut_off=False,
-                candidate_count=session.extraction_candidate_count,
-            )
-            session.extracted_from = True
-            session.set_phase(SessionPhase.AWAIT_COORDINATOR_REVIEW)
-            self._checkpoint()
-
-            paused = self._paused_descriptor(session)
-            _LOG.info(
-                "cumulative.sequencer.awaiting_review sequence_index=%d org_id=%s job_id=%s session_fp=%s candidate_count=%d",
-                session.sequence_index,
-                paused["org_id"],
-                paused["extraction_job_id"],
-                paused["session_fp"],
-                paused["candidate_count"],
-            )
-            return paused
-
-        if phase == SessionPhase.DONE:
-            return self._done_state()
-
-        if phase in {
-            SessionPhase.LEADER_DECISION_APPLY,
-            SessionPhase.COMMIT_INDEX_READY,
-            SessionPhase.NEXT_SESSION,
-        }:
-            raise ValueError(
-                "current session already passed coordinator review; "
-                "use resume_with_decision to continue"
-            )
-
-        raise ValueError(f"unsupported session phase for extract_current: {phase.value!r}")
-
-    def _extract_pending_descriptor(self, session: SessionRecord) -> AwaitingExtract:
-        session_fp = str(session.session_fp or "").strip()
-        return {
-            "status": "awaiting_extract",
-            "sequence_index": int(session.sequence_index),
-            "session_fp": session_fp,
-            "memory_mode": str(session.memory_mode),
-        }
-
-    def resume_with_decision(
-        self,
-        decision_manifest_path: str | os.PathLike[str],
-    ) -> ResumeWithDecisionResult:
-        session = self.current_session()
-        if session is None:
-            return self._done_state()
-
-        decision_manifest = self._load_decision_manifest(decision_manifest_path)
-        phase = self._phase_of(session)
-        if phase not in {
-            SessionPhase.AWAIT_COORDINATOR_REVIEW,
-            SessionPhase.LEADER_DECISION_APPLY,
-            SessionPhase.COMMIT_INDEX_READY,
-            SessionPhase.NEXT_SESSION,
-        }:
-            raise ValueError(
-                "resume_with_decision requires current session phase "
-                f"{SessionPhase.AWAIT_COORDINATOR_REVIEW.value!r} (or a crash-resume apply phase); "
-                f"got {phase.value!r}"
-            )
-
-        applied_result: ApplyResult | None = None
-
-        if phase == SessionPhase.AWAIT_COORDINATOR_REVIEW:
-            session.set_phase(SessionPhase.LEADER_DECISION_APPLY)
-            self._checkpoint()
-            phase = SessionPhase.LEADER_DECISION_APPLY
-
-        if phase == SessionPhase.LEADER_DECISION_APPLY:
-            self._leader_client.validate(decision_manifest, session)
-            applied_result = self._leader_client.apply(decision_manifest, session)
-
-            session.committed_ids = list(applied_result.committed_ids)
-            session.decision_applied = True
-            session.corpus_delta = len(applied_result.committed_ids)
-
-            if isinstance(session.progress, Mapping):
-                progress = dict(session.progress)
-                progress["accepted_count"] = len(applied_result.committed_ids)
-                progress["rejected_count"] = len(applied_result.denied_refs)
-                progress["rejected_reasons"] = [
-                    str(outcome.get("reason", ""))
-                    for outcome in applied_result.candidate_outcomes
-                    if str(outcome.get("verdict", "")) == DENY_FINAL
-                ]
-                session.progress = progress
-
-            leader_fp = str(getattr(self._leader_client, "_leader_fp", "unknown") or "unknown")
-            session_fp = session.session_fp or "none"
-            for denied_ref in applied_result.denied_refs:
-                _LOG.info(
-                    "cumulative.sequencer.deny_nonfatal sequence_index=%d session_fp=%s submission_hash=%s leader_fp=%s",
-                    session.sequence_index,
-                    session_fp,
-                    denied_ref,
-                    leader_fp,
-                )
-
-            session.set_phase(SessionPhase.COMMIT_INDEX_READY)
-            self._checkpoint()
-            phase = SessionPhase.COMMIT_INDEX_READY
-
-        if applied_result is None:
-            applied: dict[str, str] = {}
-            denied_refs: list[str] = []
-            seen_denied: set[str] = set()
-            for candidate in decision_manifest.candidates:
-                candidate_ref = str(candidate.candidate_ref)
-                verdict = str(candidate.verdict)
-                prior = applied.get(candidate_ref)
-                if prior is None:
-                    applied[candidate_ref] = verdict
-                if verdict == DENY_FINAL and candidate_ref not in seen_denied:
-                    seen_denied.add(candidate_ref)
-                    denied_refs.append(candidate_ref)
-            applied_result = ApplyResult(
-                committed_ids=list(session.committed_ids),
-                denied_refs=denied_refs,
-                applied=applied,
-                all_denied=bool(applied) and all(value == DENY_FINAL for value in applied.values()),
-                candidate_outcomes=[],
-            )
-
-        if phase == SessionPhase.COMMIT_INDEX_READY:
-            delivery_verified = False
-            for poll_count in range(1, self._index_ready_max_polls + 1):
-                if self._runner.index_ready(session):
-                    _LOG.info(
-                        "cumulative.sequencer.index_ready sequence_index=%d session_fp=%s job_id=%s polls=%d committed_count=%d",
-                        session.sequence_index,
-                        session.session_fp or "none",
-                        session.extraction_job_id or "none",
-                        poll_count,
-                        len(session.committed_ids),
-                    )
-                    delivery_verified = True
-                    session.extracted_from = True
-                    break
-
-                if poll_count == 1 or poll_count % 10 == 0:
-                    _LOG.info(
-                        "cumulative.sequencer.index_wait sequence_index=%d session_fp=%s job_id=%s polls=%d committed_count=%d",
-                        session.sequence_index,
-                        session.session_fp or "none",
-                        session.extraction_job_id or "none",
-                        poll_count,
-                        len(session.committed_ids),
-                    )
-                time.sleep(0.25)
-
-            if not delivery_verified:
-                # Fail-closed: a delivery that never arrives within the bounded
-                # wait is recorded as unverified (never scored as a silent pass)
-                # and the run proceeds to the next session. If the operator has
-                # disabled the integrity gate, the poll is STILL bounded so it
-                # never hangs, but no disposition is recorded (cell scored
-                # normally).
-                if self._require_delivery_verification:
-                    delivery_record: dict[str, Any] = {
-                        "type": "delivery",
-                        "schema_version": 1,
-                        "sequence_index": session.sequence_index,
-                        "memory_mode": str(session.memory_mode),
-                        "org_id": str(session.org_id or self._manifest.org_id),
-                        "delivery_state": "unverified",
-                        "not_scored_reason": (
-                            f"delivery_unverified_after_{self._index_ready_max_polls}_polls"
-                        ),
-                    }
-                    StatusStream(
-                        default_status_stream_path(self._manifest_path)
-                    ).append(delivery_record)
-                    _LOG.warning(
-                        "cumulative.sequencer.delivery_unverified sequence_index=%d memory_mode=%s polls=%d",
-                        session.sequence_index,
-                        session.memory_mode,
-                        self._index_ready_max_polls,
-                    )
-
-            session.set_phase(SessionPhase.NEXT_SESSION)
-            self._checkpoint()
-            phase = SessionPhase.NEXT_SESSION
-
-        if phase == SessionPhase.NEXT_SESSION:
-            if self._manifest.current_index == session.sequence_index:
-                self._manifest.current_index += 1
-                if self._manifest.current_index < len(self._manifest.session_records):
-                    next_session = self._manifest.session_records[self._manifest.current_index]
-                    next_session.org_id = self._manifest.org_id
-                    if self._phase_of(next_session) != SessionPhase.PREPARE_FIXTURE:
-                        next_session.set_phase(SessionPhase.PREPARE_FIXTURE)
+                session.set_phase(SessionPhase.DONE)
                 self._checkpoint()
-            elif self._manifest.current_index != session.sequence_index + 1:
-                raise ValueError(
-                    "manifest.current_index drift detected during NEXT_SESSION "
-                    f"(current_index={self._manifest.current_index}, session.sequence_index={session.sequence_index})"
-                )
+                self._advance_to_next_session(session)
+                continue
 
-            if self._manifest.current_index >= len(self._manifest.session_records):
-                return self._done_state()
+            raise ValueError(f"unsupported session phase for step_until_done: {phase.value!r}")
 
-            return self._session_committed_result(
-                session=session,
-                applied_result=applied_result,
-            )
-
-        raise ValueError(f"unsupported session phase for resume_with_decision: {phase.value!r}")
-
-    def resume_after_gate_halt(self) -> HaltedOnGate | AwaitingExtract | AwaitingCoordinatorReview | DoneState:
-        session = self.current_session()
-        if session is None:
-            return self._done_state()
-
-        phase = self._phase_of(session)
-        if phase != SessionPhase.HALTED_ON_GATE:
+    def _advance_to_next_session(self, session: SessionRecord) -> None:
+        """Advance the manifest past a completed session and prime the next one."""
+        if self._manifest.current_index == session.sequence_index:
+            self._manifest.current_index += 1
+            if self._manifest.current_index < len(self._manifest.session_records):
+                next_session = self._manifest.session_records[self._manifest.current_index]
+                next_session.org_id = self._manifest.org_id
+                if self._phase_of(next_session) != SessionPhase.PREPARE_FIXTURE:
+                    next_session.set_phase(SessionPhase.PREPARE_FIXTURE)
+            self._checkpoint()
+        elif self._manifest.current_index != session.sequence_index + 1:
             raise ValueError(
-                "resume_after_gate_halt requires current session phase "
-                f"{SessionPhase.HALTED_ON_GATE.value!r}; got {phase.value!r}"
+                "manifest.current_index drift detected during session advance "
+                f"(current_index={self._manifest.current_index}, session.sequence_index={session.sequence_index})"
             )
-
-        session.walk_gates = []
-        session.resume_marker = f"gate-halt-resume:{self._utc_now_iso()}"
-        session.set_phase(SessionPhase.RUN_SESSION)
-        self._checkpoint()
-        return self.step_until_review()
 
     def _checkpoint(self) -> None:
         self._manifest.updated_at = self._utc_now_iso()
@@ -642,220 +307,6 @@ class CumulativeSequencer:
             "evidence": dict(halt_gate.evidence),
             "expected_producer_model_ids": list(halt_gate.expected_producer_model_ids),
             "observed_producer_model_ids": list(halt_gate.observed_producer_model_ids),
-        }
-
-    def _paused_descriptor(self, session: SessionRecord) -> AwaitingCoordinatorReview:
-        extraction_job_id = str(session.extraction_job_id or "").strip()
-        if not extraction_job_id:
-            raise ValueError(
-                "cannot pause for review: session extraction_job_id is missing"
-            )
-
-        session_fp = str(session.session_fp or "").strip()
-        if not session_fp:
-            raise ValueError("cannot pause for review: session_fp is missing")
-
-        org_id = str(session.org_id or self._manifest.org_id).strip()
-        if not org_id:
-            raise ValueError("cannot pause for review: org_id is missing")
-
-        if session.extraction_candidate_count is None:
-            candidate_count = len(session.candidate_refs)
-        else:
-            candidate_count = int(session.extraction_candidate_count)
-        if candidate_count < 0:
-            raise ValueError("extraction candidate_count must be non-negative")
-
-        return {
-            "status": "awaiting_coordinator_review",
-            "sequence_index": session.sequence_index,
-            "org_id": org_id,
-            "extraction_job_id": extraction_job_id,
-            "session_fp": session_fp,
-            "candidate_count": candidate_count,
-        }
-
-    def _load_decision_manifest(
-        self,
-        decision_manifest_path: str | os.PathLike[str],
-    ) -> DecisionManifest:
-        normalized_path = os.path.abspath(os.fspath(decision_manifest_path))
-        with open(normalized_path, "r", encoding="utf-8") as handle:
-            decoded = json.load(handle)
-
-        if not isinstance(decoded, Mapping):
-            raise ValueError("decision manifest file must decode to a JSON object")
-
-        manifest = DecisionManifest.from_dict(decoded)
-        _LOG.info(
-            "cumulative.sequencer.decision_loaded sequence_index=%d org_id=%s manifest_id=%s candidate_count=%d",
-            manifest.sequence_index,
-            manifest.org_id,
-            manifest.manifest_id,
-            len(manifest.candidates),
-        )
-        return manifest
-
-    def _append_extraction_status(
-        self,
-        session: SessionRecord,
-        *,
-        invoked: bool,
-        cut_off: bool,
-        candidate_count: int | None,
-        error: str | None = None,
-    ) -> None:
-        """Append one extraction-attempt observability record to the status stream.
-
-        Instrumentation-only: must never alter run behaviour or abort the run.
-        An explicit ``extraction_state`` is ALWAYS set (never a defaulted pass),
-        honouring the absent-flag-must-NOT-read-as-pass principle.
-        """
-        if invoked:
-            state = "invoked_cut_off" if cut_off else "invoked_completed"
-        else:
-            state = "never_invoked"
-
-        record: dict[str, Any] = {
-            "type": "extraction",
-            "schema_version": 1,
-            "sequence_index": session.sequence_index,
-            "memory_mode": str(session.memory_mode),
-            "org_id": str(session.org_id or self._manifest.org_id),
-            "extraction_state": state,
-            "extraction_candidate_count": candidate_count,
-            "extraction_error": error,
-            "session_fp": str(session.session_fp or ""),
-            "session_id": session.session_id,
-        }
-
-        StatusStream(default_status_stream_path(self._manifest_path)).append(record)
-        _LOG.info(
-            "cumulative.sequencer.extraction_status sequence_index=%d extraction_state=%s candidate_count=%s",
-            session.sequence_index,
-            state,
-            candidate_count,
-        )
-
-    def _populate_extraction_result(
-        self,
-        session: SessionRecord,
-        extraction_payload: Mapping[str, Any],
-    ) -> None:
-        raw_candidates = extraction_payload.get("candidate_refs")
-        if not isinstance(raw_candidates, list):
-            raise ValueError("extract payload field 'candidate_refs' must be a list")
-
-        candidate_refs: list[dict[str, Any]] = []
-        for index, raw_candidate in enumerate(raw_candidates):
-            if not isinstance(raw_candidate, Mapping):
-                raise ValueError(
-                    f"extract payload candidate_refs[{index}] must be an object"
-                )
-            candidate = dict(raw_candidate)
-
-            submission_hash = candidate.get("submission_hash")
-            if not isinstance(submission_hash, str) or not submission_hash.strip():
-                raise ValueError(
-                    f"extract payload candidate_refs[{index}].submission_hash is required"
-                )
-
-            candidate_text = candidate.get("text")
-            if not isinstance(candidate_text, str) or not candidate_text.strip():
-                raise ValueError(
-                    f"extract payload candidate_refs[{index}].text is required"
-                )
-
-            keywords = candidate.get("keywords")
-            if not isinstance(keywords, list):
-                raise ValueError(
-                    f"extract payload candidate_refs[{index}].keywords must be a list"
-                )
-
-            memory_type = candidate.get("memory_type")
-            if not isinstance(memory_type, str) or not memory_type.strip():
-                raise ValueError(
-                    f"extract payload candidate_refs[{index}].memory_type is required"
-                )
-
-            candidate_refs.append(candidate)
-
-        extraction_job_id_raw = extraction_payload.get("extraction_job_id")
-        if not isinstance(extraction_job_id_raw, str) or not extraction_job_id_raw.strip():
-            raise ValueError("extract payload field 'extraction_job_id' is required")
-        extraction_job_id = extraction_job_id_raw.strip()
-
-        session_id_raw = extraction_payload.get("session_id")
-        if not isinstance(session_id_raw, str) or not session_id_raw.strip():
-            raise ValueError("extract payload field 'session_id' is required")
-        session_id = session_id_raw.strip()
-
-        extraction_candidate_count_raw = extraction_payload.get("extraction_candidate_count")
-        if isinstance(extraction_candidate_count_raw, bool) or not isinstance(
-            extraction_candidate_count_raw, int
-        ):
-            raise ValueError(
-                "extract payload field 'extraction_candidate_count' must be an integer"
-            )
-        if extraction_candidate_count_raw < 0:
-            raise ValueError(
-                "extract payload field 'extraction_candidate_count' must be non-negative"
-            )
-
-        extraction_candidate_count = int(extraction_candidate_count_raw)
-        if extraction_candidate_count != len(candidate_refs):
-            raise ValueError(
-                "extract payload candidate count mismatch: "
-                f"extraction_candidate_count={extraction_candidate_count} "
-                f"candidate_refs={len(candidate_refs)}"
-            )
-
-        session.org_id = session.org_id or self._manifest.org_id
-        session.extraction_job_id = extraction_job_id
-        session.session_id = session_id
-        session.session_fp = SessionRecord.session_fp_of(session_id)
-        session.candidate_refs = candidate_refs
-        session.extraction_candidate_count = extraction_candidate_count
-
-        self._review_card.write_session(session)
-        session.candidate_refs = [
-            redacted_candidate_ref(ref) for ref in session.candidate_refs
-        ]
-
-        _LOG.info(
-            "cumulative.sequencer.review_card_written sequence_index=%d session_fp=%s candidate_count=%d",
-            session.sequence_index,
-            session.session_fp,
-            extraction_candidate_count,
-        )
-
-        if isinstance(session.progress, Mapping):
-            progress = dict(session.progress)
-            progress["extraction_candidate_count"] = extraction_candidate_count
-            session.progress = progress
-
-        _LOG.info(
-            "cumulative.sequencer.extract_end sequence_index=%d org_id=%s job_id=%s session_fp=%s candidate_count=%d",
-            session.sequence_index,
-            session.org_id,
-            extraction_job_id,
-            session.session_fp,
-            extraction_candidate_count,
-        )
-
-    def _session_committed_result(
-        self,
-        *,
-        session: SessionRecord,
-        applied_result: ApplyResult,
-    ) -> SessionCommitted:
-        return {
-            "status": "session_committed",
-            "sequence_index": session.sequence_index,
-            "committed_ids": list(applied_result.committed_ids),
-            "denied_refs": list(applied_result.denied_refs),
-            "all_denied": bool(applied_result.all_denied),
-            "next_index": self._manifest.current_index,
         }
 
     def _done_state(self) -> DoneState:

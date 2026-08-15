@@ -1,4 +1,4 @@
-"""Backgammon ladder driver: session -> extraction with retry/resume/escalation."""
+"""Backgammon ladder driver: session with retry/resume/escalation."""
 
 from __future__ import annotations
 
@@ -17,14 +17,9 @@ from typing import Any
 from wevibe_bench.lifecycle.logging_util import new_trace_id, run_logger
 
 
-# D5a: no silent default org. Pinned explicitly by the scored_ladder driver for phase all/extraction;
-# wevibe-org-0 is never a valid arm target.
-DEFAULT_ORG_ID = ""
-DEFAULT_EXTRACT_TIMEOUT = 900
 DEFAULT_MAX_RETRIES = 5
-_PHASE_ORDER = ("session", "extraction")
+_PHASE_ORDER = ("session",)
 _SESSION_RESULT_PREFIX = "BACKGAMMON_RESULT_JSON "
-_EXTRACT_RESULT_PREFIX = "BACKGAMMON_SXE_RESULT_JSON "
 _LADDER_RESULT_PREFIX = "BACKGAMMON_LADDER_RESULT_JSON "
 
 
@@ -82,8 +77,6 @@ def _split_extra_flags(raw: str) -> list[str]:
 def _result_prefix(phase: str) -> str:
     if phase == "session":
         return _SESSION_RESULT_PREFIX
-    if phase == "extraction":
-        return _EXTRACT_RESULT_PREFIX
     raise ValueError(f"unknown phase {phase!r}")
 
 
@@ -133,44 +126,6 @@ def build_session_cmd(
     return cmd
 
 
-def build_extract_cmd(
-    python_exe: str,
-    scripts_dir: Path,
-    args: argparse.Namespace,
-    run_label: str,
-) -> list[str]:
-    raw_memory_modes = str(args.memory_modes or "")
-    memory_modes = [part.strip().lower() for part in raw_memory_modes.split(",") if part.strip()]
-    if len(memory_modes) != 1 or memory_modes[0] not in {"off", "on"}:
-        raise RuntimeError(
-            "--memory-modes must contain exactly one mode ('off' or 'on') for extraction; "
-            f"got {raw_memory_modes!r}"
-        )
-    source_mode = memory_modes[0]
-
-    cmd = [
-        python_exe,
-        str(scripts_dir / "backgammon_sxe.py"),
-        "--run-label",
-        run_label,
-        "--source-mode",
-        source_mode,
-        "--session-model",
-        str(args.model),
-        "--extract-timeout",
-        str(args.extract_timeout),
-        "--org-id",
-        str(args.org_id),
-        "--runs-dir",
-        str(args.runs_dir),
-    ]
-    extract_override = str(args.extract_model or "").strip()
-    if extract_override:
-        cmd.extend(["--extract-model", extract_override])
-    cmd.extend(_split_extra_flags(str(args.extra_extract_flags)))
-    return cmd
-
-
 def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool) -> tuple[bool, dict[str, Any]]:
     phase_norm = phase.strip().lower()
     if phase_norm not in _PHASE_ORDER:
@@ -182,8 +137,6 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
 
     if dry_run:
         payload: dict[str, Any] = {"status": "ok"}
-        if phase_norm == "extraction":
-            payload["delivery"] = "YES"
         prefix = _result_prefix(phase_norm)
         lines = [
             f"DRY_RUN cmd={json.dumps(cmd)}",
@@ -195,7 +148,6 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
             "phase": phase_norm,
             "exit_code": 0,
             "status": "ok",
-            "delivery": payload.get("delivery"),
             "result_payload": payload,
             "error_text": "",
             "stdout": "",
@@ -237,14 +189,10 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
 
     payload, parse_error = _parse_result_payload(phase_norm, stdout, stderr)
     status = ""
-    delivery = ""
     if payload is not None:
         status = str(payload.get("status") or "").strip()
-        delivery = str(payload.get("delivery") or "").strip().upper()
 
     ok = returncode == 0 and status == "ok"
-    if phase_norm == "extraction":
-        ok = ok and delivery == "YES"
 
     error_parts: list[str] = []
     if returncode != 0:
@@ -253,8 +201,6 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
         error_parts.append(parse_error)
     if status and status != "ok":
         error_parts.append(f"status={status}")
-    if phase_norm == "extraction" and status == "ok" and delivery != "YES":
-        error_parts.append(f"delivery={delivery or '<missing>'}")
     if payload is not None and payload.get("error"):
         error_parts.append(f"error={payload.get('error')}")
     if not ok and output_tail:
@@ -267,7 +213,6 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
         "phase": phase_norm,
         "exit_code": returncode,
         "status": status,
-        "delivery": delivery,
         "result_payload": payload,
         "error_text": "; ".join(error_parts),
         "stdout": stdout,
@@ -280,15 +225,12 @@ def run_unit(phase: str, cmd: list[str], logfile_path: str | Path, dry_run: bool
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Backgammon ladder driver (session + extraction).")
-    parser.add_argument("--model", required=True, help="Session model slug; default extraction model when not overridden.")
+    parser = argparse.ArgumentParser(description="Backgammon ladder driver (session-only).")
+    parser.add_argument("--model", required=True, help="Session model slug.")
     parser.add_argument("--run-number", required=True, type=int)
     parser.add_argument("--run-label", help="Default: run{run_number}-{slug(model)}")
-    parser.add_argument("--phase", choices=("session", "extraction", "all"), default="all")
+    parser.add_argument("--phase", choices=("session",), default="session")
     parser.add_argument("--memory-modes", default="off")
-    parser.add_argument("--extract-timeout", type=int, default=DEFAULT_EXTRACT_TIMEOUT)
-    parser.add_argument("--extract-model", default=None)
-    parser.add_argument("--org-id", default=DEFAULT_ORG_ID, help='Org for extraction (phase all/extraction). MUST be pinned explicitly; "wevibe-org-0" is never a valid arm target.')
     parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES)
     parser.add_argument("--mock", choices=("none", "golden", "scaffold"), default="none")
     parser.add_argument("--session-id", default="")
@@ -296,7 +238,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--runs-dir", default=str(_default_runs_dir()))
     parser.add_argument("--extra-session-flags", default="")
-    parser.add_argument("--extra-extract-flags", default="")
     return parser
 
 
@@ -358,11 +299,7 @@ def _upsert_unit_entry(checkpoint: dict[str, Any], unit_entry: dict[str, Any]) -
 
 
 def _requested_units(phase_arg: str) -> list[str]:
-    if phase_arg == "extraction":
-        return ["extraction"]
-    if phase_arg == "session":
-        return ["session"]
-    return ["session", "extraction"]
+    return ["session"]
 
 
 def _cleanup_success_logs(
@@ -431,24 +368,10 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--run-number must be >= 0")
     if args.max_retries < 1:
         parser.error("--max-retries must be >= 1")
-    if args.extract_timeout < 1:
-        parser.error("--extract-timeout must be >= 1")
     try:
         _split_extra_flags(str(args.extra_session_flags))
     except ValueError as exc:
         parser.error(f"invalid --extra-session-flags: {exc}")
-    try:
-        _split_extra_flags(str(args.extra_extract_flags))
-    except ValueError as exc:
-        parser.error(f"invalid --extra-extract-flags: {exc}")
-    # D5a: fail loudly when the run needs an org (extraction / all) but none is pinned.
-    phase_needs_org = str(args.phase).strip().lower() in ("all", "extraction")
-    if phase_needs_org:
-        resolved = str(args.org_id or "").strip()
-        if resolved == "":
-            parser.error("--org-id MUST be explicitly pinned for this run (no silent default); e.g. --org-id wevibe-org-2")
-        if resolved == "wevibe-org-0":
-            parser.error('--org-id="wevibe-org-0" is NEVER a valid arm target; pin an explicit org (e.g. wevibe-org-2)')
 
 
 def main() -> int:
@@ -501,11 +424,7 @@ def main() -> int:
             )
             continue
 
-        cmd = (
-            build_session_cmd(python_exe, scripts_dir, args, run_label)
-            if phase == "session"
-            else build_extract_cmd(python_exe, scripts_dir, args, run_label)
-        )
+        cmd = build_session_cmd(python_exe, scripts_dir, args, run_label)
 
         attempt_logfiles: list[str] = []
         last_error = ""
@@ -518,7 +437,7 @@ def main() -> int:
             logger.info(
                 (
                     "trace=%s op=ladder.attempt.start run_number=%s model=%s phase=%s attempt=%s "
-                    "run_label=%s memory_modes=%s extract_timeout=%s cmd=%s logfile=%s"
+                    "run_label=%s memory_modes=%s cmd=%s logfile=%s"
                 ),
                 trace,
                 args.run_number,
@@ -527,7 +446,6 @@ def main() -> int:
                 attempt,
                 run_label,
                 args.memory_modes,
-                args.extract_timeout,
                 cmd,
                 step_log,
             )
@@ -544,7 +462,7 @@ def main() -> int:
             logger.info(
                 (
                     "trace=%s op=ladder.attempt.end run_number=%s model=%s phase=%s attempt=%s "
-                    "exit=%s status=%s delivery=%s dur_seconds=%.3f ok=%s"
+                    "exit=%s status=%s dur_seconds=%.3f ok=%s"
                 ),
                 trace,
                 args.run_number,
@@ -553,7 +471,6 @@ def main() -> int:
                 attempt,
                 detail.get("exit_code"),
                 detail.get("status"),
-                detail.get("delivery"),
                 float(detail.get("dur_seconds") or 0.0),
                 ok,
             )
@@ -588,7 +505,7 @@ def main() -> int:
             logger.error(
                 (
                     "trace=%s op=ladder.attempt.fail run_number=%s model=%s phase=%s attempt=%s "
-                    "exit=%s status=%s delivery=%s last_error=%s full_stderr=%s"
+                    "exit=%s status=%s last_error=%s full_stderr=%s"
                 ),
                 trace,
                 args.run_number,
@@ -597,7 +514,6 @@ def main() -> int:
                 attempt,
                 detail.get("exit_code"),
                 detail.get("status"),
-                detail.get("delivery"),
                 last_error,
                 detail.get("stderr") or detail.get("stdout") or "",
             )

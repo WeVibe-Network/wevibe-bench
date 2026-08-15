@@ -12,7 +12,6 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 DEFAULT_LEADER_KEYSTORE_PATH = str(Path.home() / ".wevibe" / "bench" / "leader-keystore")
-DEFAULT_CONTRIB_KEYSTORE_PATH = str(Path.home() / ".wevibe" / "bench" / "contrib-keystore")
 
 
 @dataclass(frozen=True)
@@ -34,25 +33,13 @@ class LifecycleConfig:
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_MCP_URL")
         or "http://127.0.0.1:4550"
     )
-    contributor_mcp_url: str = field(
-        default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_MCP_URL")
-        or "http://127.0.0.1:4451"
-    )
     leader_keystore_path: str = field(
         default_factory=lambda: os.environ.get(
             "WEVIBE_BENCH_LEADER_KEYSTORE", DEFAULT_LEADER_KEYSTORE_PATH
         )
     )
-    contributor_keystore_path: str = field(
-        default_factory=lambda: os.environ.get(
-            "WEVIBE_BENCH_CONTRIB_KEYSTORE", DEFAULT_CONTRIB_KEYSTORE_PATH
-        )
-    )
     leader_identity_seed_hex: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_SEED_HEX", "")
-    )
-    contributor_identity_seed_hex: str = field(
-        default_factory=lambda: os.environ.get("WEVIBE_BENCH_CONTRIB_SEED_HEX", "")
     )
     session_token_path: str = "~/.wevibe/mcp-session-token"
     # Org SELECTOR pin (WEVIBE_BENCH_ORG_ID): identifies the PRE-PROVISIONED org
@@ -81,11 +68,8 @@ class LifecycleConfig:
         return {
             "hub_url": self.hub_url,
             "leader_mcp_url": self.leader_mcp_url,
-            "contributor_mcp_url": self.contributor_mcp_url,
             "leader_keystore_path": self.leader_keystore_path,
-            "contributor_keystore_path": self.contributor_keystore_path,
             "leader_identity_seed_hex": self.leader_identity_seed_hex,
-            "contributor_identity_seed_hex": self.contributor_identity_seed_hex,
             "session_token_path": self.session_token_path,
             "org_id": self.org_id,
             "leader_signer_dir": self.leader_signer_dir,

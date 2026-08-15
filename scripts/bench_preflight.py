@@ -35,13 +35,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The expected served identities. Source: workspace AGENTS.md §2.1 (SETTLED
-# 2026-08-11) + RUNBOOK §7. These are fp(ed_pubkey_bytes) — NOT fp(seed_bytes),
+# The expected served identity. Source: workspace AGENTS.md §2.1 (SETTLED
+# 2026-08-11) + RUNBOOK §7. This is fp(ed_pubkey_bytes) — NOT fp(seed_bytes),
 # which is a DIFFERENT value for the same identity (leader seed fp = f534aa02).
 # Comparing a fingerprint without naming its hashed input is how a real
-# identity mismatch got wrongly dismissed once already.
+# identity mismatch got wrongly dismissed once already. Identity is asserted AT
+# THE SEAM; liveness is not identity; :4450 (operator host MCP) is forbidden.
 EXPECTED_LEADER_FP = "f7733d6e"
-EXPECTED_CONTRIB_FP = "5292550d"
 
 # :4450 is the operator's REAL host wevibe-mcp (interactive keychain identity).
 # Pointing any bench component at it mints orgs under the operator's identity
@@ -77,7 +77,7 @@ def port_open(port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:
 
 def check_ports(c: Check) -> None:
     for port, what in ((4545, "local relay"), (4550, "leader clone MCP"),
-                       (4451, "contributor clone MCP"), (4440, "hub")):
+                       (4440, "hub")):
         ok = port_open(port)
         hint = "" if ok else "  -> see RUNBOOK §7 for bring-up"
         c.add(f"port {port} ({what})", ok, ("open" if ok else "CLOSED") + hint)
@@ -104,7 +104,6 @@ def check_identity(c: Check) -> None:
 
     for label, url, expected in (
         ("leader", cfg.leader_mcp_url, EXPECTED_LEADER_FP),
-        ("contributor", cfg.contributor_mcp_url, EXPECTED_CONTRIB_FP),
     ):
         if f":{FORBIDDEN_PORT}" in url:
             c.add(

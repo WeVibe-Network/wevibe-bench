@@ -144,12 +144,7 @@ def _normalize_missing_telemetry_seams(
 class SessionPhase(str, enum.Enum):
     PREPARE_FIXTURE = "PREPARE_FIXTURE"
     RUN_SESSION = "RUN_SESSION"
-    EXTRACT_NORMAL_PIPELINE = "EXTRACT_NORMAL_PIPELINE"
-    AWAIT_COORDINATOR_REVIEW = "AWAIT_COORDINATOR_REVIEW"
     HALTED_ON_GATE = "HALTED_ON_GATE"
-    LEADER_DECISION_APPLY = "LEADER_DECISION_APPLY"
-    COMMIT_INDEX_READY = "COMMIT_INDEX_READY"
-    NEXT_SESSION = "NEXT_SESSION"
     DONE = "DONE"
 
 
@@ -173,11 +168,7 @@ class WalkGateVerdict(str, enum.Enum):
 PHASE_ORDER: tuple[SessionPhase, ...] = (
     SessionPhase.PREPARE_FIXTURE,
     SessionPhase.RUN_SESSION,
-    SessionPhase.EXTRACT_NORMAL_PIPELINE,
-    SessionPhase.AWAIT_COORDINATOR_REVIEW,
-    SessionPhase.LEADER_DECISION_APPLY,
-    SessionPhase.COMMIT_INDEX_READY,
-    SessionPhase.NEXT_SESSION,
+    SessionPhase.DONE,
 )
 
 
@@ -640,7 +631,6 @@ class SessionRecord:
     progress: dict[str, Any] | None = None
     walk_gates: list[WalkGateVerdictRecord] = field(default_factory=list)
     decision_applied: bool = False
-    committed_ids: list[str] = field(default_factory=list)
     corpus_delta: int | None = None
     complete_gate: bool = False
     extracted_from: bool = False
@@ -669,7 +659,6 @@ class SessionRecord:
             "progress": dict(self.progress) if isinstance(self.progress, Mapping) else self.progress,
             "walk_gates": [gate.to_dict() for gate in self.walk_gates],
             "decision_applied": self.decision_applied,
-            "committed_ids": list(self.committed_ids),
             "corpus_delta": self.corpus_delta,
             "complete_gate": self.complete_gate,
             "extracted_from": self.extracted_from,
@@ -707,7 +696,6 @@ class SessionRecord:
             progress=progress_dict,
             walk_gates=walk_gates,
             decision_applied=bool(d.get("decision_applied", False)),
-            committed_ids=_string_list(d.get("committed_ids")),
             corpus_delta=_optional_int(d.get("corpus_delta")),
             complete_gate=bool(d.get("complete_gate", False)),
             extracted_from=bool(d.get("extracted_from", False)),

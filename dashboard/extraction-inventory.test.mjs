@@ -37,14 +37,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { read, NEAR_DUP_THRESHOLD } from "./sources/extraction-inventory.mjs";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** The schema the Python writer creates. Kept byte-compatible on purpose. */
 const SCHEMA = `
@@ -110,49 +107,6 @@ test("journal_mode=DELETE is readable from a read-only handle", () => {
   const n = db.prepare("SELECT count(*) AS n FROM extraction_jobs").get();
   db.close();
   assert.equal(Number(n.n), 2);
-});
-
-test("the WRITER pins journal_mode=DELETE and refuses anything else", () => {
-  // ── WHY THIS IS A SOURCE ASSERTION AND NOT A BEHAVIOURAL ONE ──────────────
-  //
-  // The real constraint is a READ-ONLY BIND MOUNT, not sqlite's `readOnly`
-  // flag. Opening WAL with `{readOnly:true}` inside a WRITABLE directory
-  // succeeds — sqlite can still create the `-shm` sidecar — so a test written
-  // that way asserts nothing. The failure only appears when the FILESYSTEM
-  // refuses the sidecar, which needs a genuinely read-only mount.
-  //
-  // That was verified directly, out of band, against the real container:
-  //
-  //   docker run --rm -v "$PWD/sq2:/d:ro" node:22-alpine node -e '...'
-  //     WAL    + :ro → "unable to open database file"          FATAL
-  //     DELETE + :ro → reads fine
-  //     DELETE + :ro + writer holding an open write txn → committed rows only
-  //
-  // Reproducing a read-only mount inside `node --test` would need root or a
-  // disk image, so what is pinned here is the INVARIANT THAT PREVENTS IT: the
-  // writer must demand DELETE and refuse to proceed otherwise. If someone
-  // "optimises" the writer to WAL, this fails immediately — on the host, where
-  // it is cheap — instead of silently on the deployed artifact.
-  const writer = readFileSync(
-    join(HERE, "..", "wevibe_bench", "extraction_telemetry.py"),
-    "utf8",
-  );
-  assert.match(
-    writer,
-    /PRAGMA journal_mode=DELETE/,
-    "the telemetry writer must pin journal_mode=DELETE — WAL cannot be opened " +
-      "from the dashboard's read-only bench mount",
-  );
-  assert.match(
-    writer,
-    /adopted != "delete"/,
-    "the writer must ASSERT the adopted journal mode and disable itself otherwise — " +
-      "requesting DELETE without checking it was granted is not a guarantee",
-  );
-  assert.ok(
-    !/journal_mode\s*=\s*WAL/i.test(writer),
-    "the telemetry writer must never request WAL",
-  );
 });
 
 test("a missing DB is a designed state, not a broken source", async () => {

@@ -8,7 +8,6 @@ import re
 import socket
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
@@ -134,112 +133,6 @@ class McpRest:
         self._log("info", op, trace, "ok", int(dur_ms), url=path, http_status=http_status)
         return payload
 
-    def extract(
-        self,
-        model: str,
-        session_db_path: str,
-        project_context: dict[str, Any] | None = None,
-        org_id: str | None = None,
-        provider: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        num_ctx: int | None = None,
-        prompt: str | None = None,
-        session_id: str | None = None,
-    ) -> str:
-        """Start an extraction job against a session database.
-
-        The bench NEVER builds the substrate itself: it hands WeVibe the path to
-        the session DB and WeVibe projects it (D-SESSION-SUBSTRATE — one builder,
-        shared by the dashboard Extract path and the benchmark). A bench-side
-        projection is product logic in the benchmark repo and is exactly the
-        divergence that silently broke extraction.
-        """
-        path = str(session_db_path or "").strip()
-        if not path:
-            raise RuntimeError("extract requires a non-empty session_db_path")
-
-        body: dict[str, Any] = {
-            "session_db_path": path,
-            "model": model,
-        }
-        if project_context is not None:
-            body["project_context"] = project_context
-        if org_id:
-            body["org_id"] = org_id
-        if provider is not None:
-            body["provider"] = provider
-        if api_key is not None:
-            body["api_key"] = api_key
-        if base_url is not None:
-            body["base_url"] = base_url
-        if num_ctx is not None:
-            body["num_ctx"] = num_ctx
-        if prompt is not None:
-            body["prompt"] = prompt
-        if session_id:
-            body["session_id"] = session_id
-
-        payload = self._request("lifecycle.mcp.extract", "/v1/extract", body, expected_statuses=(200, 202))
-        if not isinstance(payload, dict) or not isinstance(payload.get("job_id"), str) or not payload["job_id"]:
-            raise RuntimeError(f"extract response missing job_id: {payload}")
-        return payload["job_id"]
-
-    def extract_status(self, job_id: str) -> dict[str, Any]:
-        path = f"/v1/extract/status/{urllib.parse.quote(job_id, safe='')}"
-        payload = self._request("lifecycle.mcp.extract_status", path, None, expected_statuses=(200,))
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"extract status expected object, got: {payload}")
-        return payload
-
-    def wait_extract(self, job_id: str, timeout_s: float = 900, interval_s: float = 0.5) -> dict[str, Any]:
-        deadline = time.time() + timeout_s
-        terminal = {"done", "completed", "error", "awaiting_decision"}
-        while time.time() < deadline:
-            status = self.extract_status(job_id)
-            if str(status.get("status", "")).lower() in terminal:
-                return status
-            time.sleep(interval_s)
-        raise TimeoutError(f"extract job did not reach terminal state within {timeout_s}s: {job_id}")
-
-    def mod_queue(self, org_id: str | None = None) -> list[dict[str, Any]]:
-        body: dict[str, Any] = {}
-        if org_id:
-            body["org_id"] = org_id
-        payload = self._request("lifecycle.mcp.mod_queue", "/v1/mod/queue", body, expected_statuses=(200,))
-        if not isinstance(payload, list):
-            raise RuntimeError(f"mod queue expected list, got: {payload}")
-        return [item for item in payload if isinstance(item, dict)]
-
-    def mod_decrypt_batch(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        payload = self._request(
-            "lifecycle.mcp.mod_decrypt_batch",
-            "/v1/mod/decrypt-batch",
-            {"items": items},
-            expected_statuses=(200,),
-        )
-        if not isinstance(payload, list):
-            raise RuntimeError(f"mod decrypt batch expected list, got: {payload}")
-        return [item for item in payload if isinstance(item, dict)]
-
-    def mod_embed_retrieval_card(
-        self,
-        items: list[dict[str, Any]],
-        org_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        body: dict[str, Any] = {"items": items}
-        if org_id:
-            body["org_id"] = org_id
-        payload = self._request(
-            "lifecycle.mcp.mod_embed_retrieval_card",
-            "/v1/mod/embed-retrieval-card",
-            body,
-            expected_statuses=(200,),
-        )
-        if not isinstance(payload, list):
-            raise RuntimeError(f"mod embed retrieval card expected list, got: {payload}")
-        return [item for item in payload if isinstance(item, dict)]
-
     def recall(self, query: str, org_id: str, **kw: Any) -> dict[str, Any]:
         body: dict[str, Any] = {
             "query": query,
@@ -260,37 +153,4 @@ class McpRest:
         )
         if not isinstance(payload, dict):
             raise RuntimeError(f"identity pubkeys expected object, got: {payload}")
-        return payload
-
-    def submit(
-        self,
-        org_id: str,
-        plaintext: str,
-        memory_type: str = "memory",
-        epoch_id: int | None = None,
-        stack_hint: list[str] | None = None,
-        keywords: list[str] | None = None,
-        mc_version: int = 1,
-    ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "org_id": org_id,
-            "plaintext": plaintext,
-            "memory_type": memory_type,
-            "mc_version": mc_version,
-        }
-        if epoch_id is not None:
-            body["epoch_id"] = epoch_id
-        if stack_hint:
-            body["stack_hint"] = stack_hint
-        if keywords is not None:
-            body["keywords"] = keywords
-
-        payload = self._request(
-            "lifecycle.mcp.submit",
-            "/v1/submit",
-            body,
-            expected_statuses=(200,),
-        )
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"submit expected object, got: {payload}")
         return payload

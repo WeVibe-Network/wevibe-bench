@@ -263,7 +263,6 @@ class RunConfig:
     primary_recall_max_injected: int = 1000
     served_memories_host_path: str = field(default_factory=_default_served_memories_host_path)
     served_memories_container_path: str = "/home/worker/.wevibe/served-memories.json"
-    require_delivery_verification: bool = True  # BENCHMARK INTEGRITY: refuse to score an ON cell whose delivery != YES
     org_id: str = ""  # D5a: org MUST be pinned explicitly by the run driver; wevibe-org-0 is never a valid arm target.
     # orchestrator._resolve_owned_org handles empty/None gracefully; do NOT make this required (tests build RunConfig() bare).
     mc_version: int = 1  # MC-1
@@ -308,7 +307,6 @@ class RunConfig:
             "primary_recall_max_injected": self.primary_recall_max_injected,
             "served_memories_host_path": self.served_memories_host_path,
             "served_memories_container_path": self.served_memories_container_path,
-            "require_delivery_verification": self.require_delivery_verification,
             "org_id": self.org_id,
             "mc_version": self.mc_version,
             "hub_url": self.hub_url,

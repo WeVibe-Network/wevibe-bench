@@ -45,10 +45,6 @@ def _patch_driver_logging(monkeypatch: Any, runs_dir: pathlib.Path) -> None:
 
 
 def _invoke_main(monkeypatch: Any, argv: list[str]) -> int:
-    # D5a: org must be explicitly pinned (no silent default). Inject a valid arm
-    # org unless the test already supplies its own.
-    if "--org-id" not in argv:
-        argv = [*argv, "--org-id", "wevibe-org-2"]
     monkeypatch.setattr(sys, "argv", ["backgammon_ladder.py", *argv])
     return bl.main()
 
@@ -61,12 +57,12 @@ def _extract_prefixed_json(stdout: str, prefix: str) -> dict[str, Any]:
     raise AssertionError(f"missing line prefixed by {prefix!r}")
 
 
-def _unit_entry(*, run_number: int, model: str, phase: str, attempts: int = 1) -> dict[str, Any]:
+def _unit_entry(*, run_number: int, model: str, phase: str, attempts: int = 1, status: str = "ok") -> dict[str, Any]:
     return {
         "run_number": run_number,
         "model": model,
         "phase": phase,
-        "status": "ok",
+        "status": status,
         "attempts": attempts,
         "completed_at": "2026-07-13T00:00:00Z",
         "logfiles": [],
@@ -86,10 +82,9 @@ def test_retry_abort_escalate_fires(tmp_path: pathlib.Path, monkeypatch: Any, ca
             False,
             {
                 "status": "error",
-                "error_text": "injected extract failure",
+                "error_text": "injected session failure",
                 "exit_code": 1,
-                "delivery": "NO",
-                "stderr": "injected extract failure",
+                "stderr": "injected session failure",
                 "stdout": "",
                 "dur_seconds": 0.001,
                 "logfile": str(logfile_path),
@@ -146,7 +141,6 @@ def test_resume_skips_completed_units(tmp_path: pathlib.Path, monkeypatch: Any, 
         {
             "units": [
                 _unit_entry(run_number=3, model=model, phase="session", attempts=2),
-                _unit_entry(run_number=3, model=model, phase="extraction", attempts=1),
             ],
         },
     )
@@ -179,10 +173,11 @@ def test_resume_skips_completed_units(tmp_path: pathlib.Path, monkeypatch: Any, 
 
     stdout = capsys.readouterr().out
     assert "resume-skip run_number=3 model=model-m phase=session" in stdout
-    assert "resume-skip run_number=3 model=model-m phase=extraction" in stdout
 
 
-def test_resume_partial_runs_only_remaining_unit(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+def test_resume_reruns_session_unit_not_ok(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    """Resume only skips units already ok: a session unit whose prior attempt
+    failed is re-run, and its checkpoint entry is upserted to ok."""
     _patch_driver_logging(monkeypatch, tmp_path)
 
     model = "model-n"
@@ -191,7 +186,9 @@ def test_resume_partial_runs_only_remaining_unit(tmp_path: pathlib.Path, monkeyp
         checkpoint_path,
         {
             "units": [
-                _unit_entry(run_number=4, model=model, phase="session", attempts=1),
+                _unit_entry(
+                    run_number=4, model=model, phase="session", attempts=5, status="error"
+                ),
             ],
         },
     )
@@ -206,7 +203,6 @@ def test_resume_partial_runs_only_remaining_unit(tmp_path: pathlib.Path, monkeyp
             True,
             {
                 "status": "ok",
-                "delivery": "YES",
                 "exit_code": 0,
                 "stderr": "",
                 "stdout": "",
@@ -231,7 +227,9 @@ def test_resume_partial_runs_only_remaining_unit(tmp_path: pathlib.Path, monkeyp
     )
 
     assert exit_code == 0
-    assert phases == ["extraction"]
+    # The session-only ladder has exactly one unit; the failed prior entry is
+    # re-run exactly once.
+    assert phases == ["session"]
 
     checkpoint = _read_json(checkpoint_path)
     units = [
@@ -239,7 +237,7 @@ def test_resume_partial_runs_only_remaining_unit(tmp_path: pathlib.Path, monkeyp
         for unit in checkpoint.get("units", [])
         if unit.get("run_number") == 4 and unit.get("model") == model
     ]
-    assert {unit.get("phase") for unit in units} == {"session", "extraction"}
+    assert {unit.get("phase") for unit in units} == {"session"}
     assert all(unit.get("status") == "ok" for unit in units)
 
 
@@ -273,7 +271,6 @@ def test_logging_and_cleanup_on_success(tmp_path: pathlib.Path, monkeypatch: Any
             True,
             {
                 "status": "ok",
-                "delivery": "YES",
                 "exit_code": 0,
                 "stderr": "",
                 "stdout": "",
@@ -297,7 +294,9 @@ def test_logging_and_cleanup_on_success(tmp_path: pathlib.Path, monkeypatch: Any
     )
 
     assert exit_code == 0
-    assert len(created_logs) == 2
+    # Session-only ladder: exactly ONE unit runs, so one step logfile is
+    # created and then cleaned up on success.
+    assert len(created_logs) == 1
     assert all(not path.exists() for path in created_logs)
 
     assert (tmp_path / f"{run_label}-scorecard.json").is_file()

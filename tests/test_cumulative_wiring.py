@@ -63,7 +63,6 @@ def test_real_session_runner_forwards_proxy_creds_to_backgammon_runner(tmp_path:
 def test_lifecycle_config_env_hooks_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WEVIBE_BENCH_HUB_URL", raising=False)
     monkeypatch.delenv("WEVIBE_BENCH_LEADER_MCP_URL", raising=False)
-    monkeypatch.delenv("WEVIBE_BENCH_CONTRIB_MCP_URL", raising=False)
 
     default_cfg = LifecycleConfig()
     assert default_cfg.hub_url == "http://127.0.0.1:4440"
@@ -71,16 +70,13 @@ def test_lifecycle_config_env_hooks_default_and_override(monkeypatch: pytest.Mon
     # real host wevibe-mcp, keychain identity, no seed support), so a run
     # without the env override minted its org under the wrong leader.
     assert default_cfg.leader_mcp_url == "http://127.0.0.1:4550"
-    assert default_cfg.contributor_mcp_url == "http://127.0.0.1:4451"
 
     monkeypatch.setenv("WEVIBE_BENCH_HUB_URL", "http://127.0.0.1:4449")
     monkeypatch.setenv("WEVIBE_BENCH_LEADER_MCP_URL", "http://127.0.0.1:4550")
-    monkeypatch.setenv("WEVIBE_BENCH_CONTRIB_MCP_URL", "http://127.0.0.1:4451")
 
     overridden_cfg = LifecycleConfig()
     assert overridden_cfg.hub_url == "http://127.0.0.1:4449"
     assert overridden_cfg.leader_mcp_url == "http://127.0.0.1:4550"
-    assert overridden_cfg.contributor_mcp_url == "http://127.0.0.1:4451"
 
 
 def test_run_config_env_hooks_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:

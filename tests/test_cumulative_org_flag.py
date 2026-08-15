@@ -36,7 +36,7 @@ def _preserve_environ():
 def test_on_without_org_errors_before_runtime_build() -> None:
     """ON cells REQUIRE --org: the validation fires in _handle_run BEFORE
     _build_context is reached, so no runtime construction happens."""
-    args = SimpleNamespace(until_review=True, mode="on", org="")
+    args = SimpleNamespace(mode="on", org="")
 
     def _forbidden_build_context(*_: Any, **__: Any) -> Any:  # noqa: ANN401
         raise AssertionError("_build_context must not run for ON-without-org")
@@ -57,9 +57,9 @@ def test_on_without_org_errors_before_runtime_build() -> None:
 def test_on_with_org_and_off_without_org_do_not_raise() -> None:
     """ON with --org present and OFF without --org both pass the validation."""
     for args in (
-        SimpleNamespace(until_review=True, mode="on", org="wevibe-org-0"),
-        SimpleNamespace(until_review=True, mode="off", org=""),
-        SimpleNamespace(until_review=True, mode="", org=""),
+        SimpleNamespace(mode="on", org="wevibe-org-0"),
+        SimpleNamespace(mode="off", org=""),
+        SimpleNamespace(mode="", org=""),
     ):
         # Validation passes; reaching _build_context (which is stubbed to a no-op
         # returning a fake context) proves no RuntimeError was raised here.
@@ -69,7 +69,7 @@ def test_on_with_org_and_off_without_org_do_not_raise() -> None:
             def memory_mode(self) -> str:  # pragma: no cover - not reached for off
                 return "off"
 
-            def step_until_review(self) -> dict[str, Any]:
+            def step_until_done(self) -> dict[str, Any]:
                 return {"status": "done"}
 
         def _stub_build_context(_a: Any, *, require_runtime: bool) -> Any:  # noqa: ANN401

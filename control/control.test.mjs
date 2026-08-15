@@ -69,38 +69,6 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BENCH = join(HERE, "..");
 
-// ── DRIFT: the stage list must describe the actual Python program ────────────
-
-test("DRIFT: every declared stage exists in backgammon_sxe.py", () => {
-  const src = readFileSync(join(BENCH, "scripts", "backgammon_sxe.py"), "utf8");
-  // Collect every stage id the emitter is actually called with.
-  const emitted = new Set(
-    [...src.matchAll(/emit_stage\(\s*"([a-z_]+)"/g)].map((m) => m[1]),
-  );
-  for (const id of DECLARED_STAGE_IDS) {
-    assert.ok(
-      emitted.has(id),
-      `stage '${id}' is declared in contract.mjs but never emitted by backgammon_sxe.py — ` +
-        "the UI would render a stage that can never leave 'pending'",
-    );
-  }
-});
-
-test("DRIFT: the emitter never emits a stage the contract does not declare", () => {
-  const src = readFileSync(join(BENCH, "scripts", "backgammon_sxe.py"), "utf8");
-  const emitted = new Set(
-    [...src.matchAll(/emit_stage\(\s*"([a-z_]+)"/g)].map((m) => m[1]),
-  );
-  const declared = new Set(DECLARED_STAGE_IDS);
-  for (const id of emitted) {
-    assert.ok(
-      declared.has(id),
-      `backgammon_sxe.py emits stage '${id}' which contract.mjs does not declare — ` +
-        "it would be silently dropped by foldStages and never shown",
-    );
-  }
-});
-
 test("DRIFT: the extraction panel's stage vocabulary covers every contract state", () => {
   // A state the UI does not know falls through to the PENDING glyph rather than
   // erroring, so this drift is invisible on screen: it shipped once with the UI
@@ -714,10 +682,10 @@ test("extraction requires a stamped complete gate before it runs", () => {
   assert.match(SERVER_SRC, /already_extracted/, "already-extracted cells must refuse re-extraction");
 });
 
-test("completed sessions stamp both complete_gate and extracted_from", () => {
+test("completed sessions stamp complete_gate and never extracted_from", () => {
   const src = readFileSync(join(BENCH, "wevibe_bench", "cumulative", "sequencer.py"), "utf8");
   assert.match(src, /session\.complete_gate = True/);
-  assert.match(src, /session\.extracted_from = True/);
+  assert.doesNotMatch(src, /session\.extracted_from/);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
