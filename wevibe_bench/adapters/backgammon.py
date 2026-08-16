@@ -36,7 +36,7 @@ from wevibe_bench.adapters.cheat_detector import (
     build_oracle_markers,
     scan_events_for_oracle_access,
 )
-from wevibe_bench.config import WORKER_MODEL_REGISTRY
+from wevibe_bench.config import CLOUD_ORCAROUTER_PROVIDER, WORKER_MODEL_REGISTRY
 from wevibe_bench.contention import ContentionCovariates
 from .docker_worker import (
     DockerCell,
@@ -1058,6 +1058,22 @@ def build_worker_opencode_config(
     if not provider_id or not model_id:
         return config
 
+    if provider_id != "local-llm-proxy":
+        # Cloud (OrcaRouter) branch: write the full provider block from the contract.
+        # The ONLY deviation from the operator's daily block is apiKey = {env:ORCAROUTER_API_KEY}.
+        options = dict(CLOUD_ORCAROUTER_PROVIDER["options"])
+        if proxy_base_url is not None:
+            options["baseURL"] = proxy_base_url
+        config["provider"] = {
+            provider_id: {
+                "npm": CLOUD_ORCAROUTER_PROVIDER["npm"],
+                "name": CLOUD_ORCAROUTER_PROVIDER["name"],
+                "options": options,
+                "models": CLOUD_ORCAROUTER_PROVIDER["models"],
+            }
+        }
+        return config
+
     model_registry = WORKER_MODEL_REGISTRY.get(model_id)
     if model_registry is None:
         raise ValueError(f"unsupported worker model_id for opencode config: {model_id!r}")
@@ -1153,6 +1169,10 @@ class BackgammonRunner(AgentRunner):
         self.work_root.mkdir(parents=True, exist_ok=True)
 
         self.model = str(model)
+        # Cloud mode is DERIVED from the model slug's provider id (no separate
+        # flag to drift): local slugs are `local-llm-proxy/<alias>`, cloud slugs
+        # are `<router>/<provider>/<model>` (e.g. orcarouter/deepseek/...).
+        self.cloud = self.model.partition("/")[0] != "local-llm-proxy"
         self.memory_mode = str(memory_mode)
         # Bench identity for session titling (WO-STRIP-2b). Empty is legitimate
         # (mock/unit callers); the title then uses the "org" fallback component.
@@ -2570,6 +2590,7 @@ class BackgammonRunner(AgentRunner):
         cell_config.output_token_max = self.max_output_tokens
         cell_config.proxy_base_url = self.proxy_base_url
         cell_config.proxy_token = self.proxy_token
+        cell_config.cloud = self.cloud
         cell_config.worker_logs_dir = worktree.parent / "worker-logs"
         cell_config.serve_host_port = self.serve_host_port
         cell_config.serve_container_port = self.serve_container_port

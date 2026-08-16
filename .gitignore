@@ -68,3 +68,6 @@ AGENTS.md
 
 # Local bench env
 .env
+
+# Cloud (OrcaRouter) API key — NEVER commit
+config/cloud.env

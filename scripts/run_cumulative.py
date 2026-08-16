@@ -260,10 +260,34 @@ def _provider_pin_from_model(model: str) -> str:
     return parts[0]
 
 
+def _compose_cloud_slug(args) -> str | None:
+    """Compose the full cloud model slug {router}/{provider}/{model}, or None if not cloud mode."""
+    if not getattr(args, "cloud", False):
+        return None
+    router = str(getattr(args, "router", None) or config.DEFAULT_CLOUD_ROUTER).strip()
+    provider = str(getattr(args, "provider", "") or "").strip()
+    model = str(getattr(args, "model", "") or "").strip()
+    if not provider or not model:
+        print("error: --cloud requires --provider <vendor> and --model <model>", file=sys.stderr)
+        raise SystemExit(2)
+    model_key = f"{provider}/{model}"
+    cloud_models = config.CLOUD_ORCAROUTER_PROVIDER.get("models", {})
+    if model_key not in cloud_models:
+        available = ", ".join(sorted(cloud_models))
+        print(
+            f"error: --cloud model {model_key!r} is not in the OrcaRouter provider block. "
+            f"available: {available}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return f"{router}/{model_key}"
+
+
 def _apply_model_override(
     slugs: list[str],
     *,
     model_override: str | None,
+    cloud_slug: str | None = None,
 ) -> list[str]:
     """Apply the operator's --model selection to the roster slug list.
 
@@ -292,6 +316,15 @@ def _apply_model_override(
     stated one. The rung itself stays in config.py; deleting it would change the
     ladder fingerprint and invalidate the live campaign (see the note there).
     """
+    if cloud_slug is not None:
+        if len(slugs) != 1:
+            print(
+                "error: --cloud override requires a single-subject roster "
+                f"(resolved {len(slugs)} slugs: {', '.join(slugs)})",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        return [cloud_slug]
     override = str(model_override or "").strip()
     registry = getattr(config, "WORKER_MODEL_REGISTRY", {})
     retired = getattr(config, "RETIRED_MODEL_ALIASES", {})
@@ -339,6 +372,7 @@ def _build_roster(
     *,
     roster_model: str | None = None,
     model_override: str | None = None,
+    cloud_slug: str | None = None,
 ) -> tuple[list[RosterEntry], str]:
     roster: list[RosterEntry] = []
     for rung in config.backgammon_scored_ladder_roster():
@@ -378,6 +412,7 @@ def _build_roster(
     override_slugs = _apply_model_override(
         [entry.model for entry in roster],
         model_override=model_override,
+        cloud_slug=cloud_slug,
     )
     if override_slugs != [entry.model for entry in roster]:
         roster = [
@@ -1082,34 +1117,38 @@ class RealSessionRunner:
 def _build_real_runner(
     args: argparse.Namespace,
     layout: PathLayout,
+    *,
+    cloud_slug: str | None = None,
 ) -> RealSessionRunner:
     load_bench_env()
     layout.runs_dir.mkdir(parents=True, exist_ok=True)
 
     repo_root = Path(__file__).resolve().parents[1]
-    proxy_base_url_arg = str(getattr(args, "proxy_base_url", "") or "").strip()
-    proxy_base_url = proxy_base_url_arg or resolve_worker_spend_proxy_base_url()
+    proxy_base_url: str | None = None
     proxy_token: str | None = None
-    proxy_token_source = ""
-    proxy_token_file = str(getattr(args, "proxy_token_file", "") or "").strip()
-    if proxy_token_file:
-        proxy_token = Path(proxy_token_file).expanduser().read_text(encoding="utf-8").strip()
-        proxy_token_source = f"proxy_token_file:{Path(proxy_token_file).expanduser()}"
+    if cloud_slug is None:
+        proxy_base_url_arg = str(getattr(args, "proxy_base_url", "") or "").strip()
+        proxy_base_url = proxy_base_url_arg or resolve_worker_spend_proxy_base_url()
+        proxy_token_source = ""
+        proxy_token_file = str(getattr(args, "proxy_token_file", "") or "").strip()
+        if proxy_token_file:
+            proxy_token = Path(proxy_token_file).expanduser().read_text(encoding="utf-8").strip()
+            proxy_token_source = f"proxy_token_file:{Path(proxy_token_file).expanduser()}"
+            _LOG.info(
+                "run_cumulative.proxy_token_loaded file=%s token_sha256_first8=%s",
+                str(Path(proxy_token_file).expanduser()),
+                key_fingerprint(proxy_token),
+            )
+        else:
+            proxy_token, resolved_source = resolve_local_llm_proxy_api_key()
+            proxy_token_source = resolved_source
+
         _LOG.info(
-            "run_cumulative.proxy_token_loaded file=%s token_sha256_first8=%s",
-            str(Path(proxy_token_file).expanduser()),
+            "run_cumulative.proxy_source_resolved source=%s base_url=%s token_fp=%s",
+            proxy_token_source,
+            proxy_base_url,
             key_fingerprint(proxy_token),
         )
-    else:
-        proxy_token, resolved_source = resolve_local_llm_proxy_api_key()
-        proxy_token_source = resolved_source
-
-    _LOG.info(
-        "run_cumulative.proxy_source_resolved source=%s base_url=%s token_fp=%s",
-        proxy_token_source,
-        proxy_base_url,
-        key_fingerprint(proxy_token),
-    )
 
     org_id = str(getattr(args, "org", "") or "").strip() or DEFAULT_ORG_ID
     args.org = org_id
@@ -1129,6 +1168,7 @@ def _build_real_runner(
     accepted_models = _apply_model_override(
         accepted_models,
         model_override=str(getattr(args, "model", "") or "").strip() or None,
+        cloud_slug=cloud_slug,
     )
     verify_worker_model_acceptance(models=accepted_models, logger=_LOG)
 
@@ -1158,11 +1198,16 @@ def _build_context(args: argparse.Namespace, *, require_runtime: bool) -> CliCon
 
     roster_model_filter = str(getattr(args, "roster_model", "") or "").strip() or None
     model_override = str(getattr(args, "model", "") or "").strip() or None
-    roster, _ = _build_roster(roster_model=roster_model_filter, model_override=model_override)
+    cloud_slug = _compose_cloud_slug(args)
+    roster, _ = _build_roster(
+        roster_model=roster_model_filter,
+        model_override=model_override,
+        cloud_slug=cloud_slug,
+    )
     config_fingerprint = config.backgammon_ladder_roster_fingerprint()
 
     if require_runtime:
-        runner = _build_real_runner(args, layout)
+        runner = _build_real_runner(args, layout, cloud_slug=cloud_slug)
     else:
         runner = _NoopSessionRunner()
 
@@ -1314,6 +1359,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "model changes the roster hash, which invalidates an existing "
             "manifest by design: archive runs/cumulative and rerun (RUNBOOK §0)."
         ),
+    )
+    parser.add_argument(
+        "--cloud",
+        action="store_true",
+        default=False,
+        help="Route the cell directly to a cloud provider (OrcaRouter) instead of the local relay proxy.",
+    )
+    parser.add_argument(
+        "--router",
+        default=None,
+        help="Cloud router id for the composed model slug (default: orcarouter). Only used with --cloud.",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Cloud vendor id (e.g. deepseek) — the '{provider}/{model}' key inside the OrcaRouter provider block. Only used with --cloud.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)

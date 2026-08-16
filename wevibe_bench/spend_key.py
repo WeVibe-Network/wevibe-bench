@@ -29,6 +29,12 @@ _DEFAULT_SPEND_PROXY_BASE_URL = "http://127.0.0.1:4545/v1"
 DEFAULT_WORKER_SPEND_PROXY_BASE_URL = "http://host.docker.internal:4545/v1"
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
+# Cloud routing (--cloud): OrcaRouter API-key resolution. The key file is a
+# dotenv-format file (parsed by _read_dotenv); env export always wins.
+CLOUD_API_KEY_ENV = "ORCAROUTER_API_KEY"
+DEFAULT_CLOUD_KEY_FILE = _REPO_ROOT / "config" / "cloud.env"
+_CLOUD_KEY_FILE_ENV = "WEVIBE_BENCH_CLOUD_KEY_FILE"
+
 
 class SpendKeyError(RuntimeError):
     """Raised when spend-proxy key resolution fails."""
@@ -251,3 +257,69 @@ def resolve_worker_spend_proxy_base_url(
 
     logger.info("spend_key.resolve_worker_spend_proxy_base_url outcome=resolved source=default")
     return DEFAULT_WORKER_SPEND_PROXY_BASE_URL
+
+
+def resolve_cloud_key_file(*, env: Mapping[str, str] | None = None) -> Path:
+    """Resolve the cloud API-key file path.
+
+    Env override ``WEVIBE_BENCH_CLOUD_KEY_FILE`` (stripped, non-empty) wins;
+    otherwise the repo default ``config/cloud.env``.
+    """
+    env_map = os.environ if env is None else env
+    override = str(env_map.get(_CLOUD_KEY_FILE_ENV, "")).strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(DEFAULT_CLOUD_KEY_FILE)
+
+
+def resolve_cloud_api_key(
+    *,
+    env: Mapping[str, str] | None = None,
+    key_file: str | os.PathLike[str] | None = None,
+) -> str:
+    """Resolve the required OrcaRouter cloud API key; raises SpendKeyError if absent.
+
+    Resolution order: explicit process-env export ``ORCAROUTER_API_KEY`` wins,
+    else the key file (dotenv format). ``_read_dotenv`` returns {} for a
+    missing file (spend_key guard at its head), so no separate existence
+    guard is needed. The raw value is NEVER logged — fingerprint only.
+    """
+    env_map = os.environ if env is None else env
+
+    from_env = str(env_map.get(CLOUD_API_KEY_ENV, "")).strip()
+    if from_env:
+        fp = key_fingerprint(from_env)
+        logger.info(
+            "spend_key.resolve_cloud_api_key outcome=resolved source=env:%s token_fp=%s",
+            CLOUD_API_KEY_ENV,
+            fp,
+        )
+        return from_env
+
+    kf = (
+        Path(key_file).expanduser()
+        if key_file is not None
+        else resolve_cloud_key_file(env=env_map)
+    )
+    parsed = _read_dotenv(kf, env=env_map)
+    from_file = parsed.get(CLOUD_API_KEY_ENV, "").strip()
+    if from_file:
+        fp = key_fingerprint(from_file)
+        logger.info(
+            "spend_key.resolve_cloud_api_key outcome=resolved source=file path=%s token_fp=%s",
+            str(kf),
+            fp,
+        )
+        return from_file
+
+    message = (
+        f"OrcaRouter API key not found: checked env var {CLOUD_API_KEY_ENV} "
+        f"and file {kf}. Run ./scripts/store-cloud-key.sh to store it, "
+        f"or export {CLOUD_API_KEY_ENV}."
+    )
+    logger.error(
+        "spend_key.resolve_cloud_api_key outcome=missing source=none env_key=%s key_file=%s",
+        CLOUD_API_KEY_ENV,
+        str(kf),
+    )
+    raise SpendKeyError(message)

@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 
 from wevibe_bench.config import RunConfig
+from wevibe_bench.spend_key import resolve_cloud_api_key
 
 
 WORKER_IMAGE = "wevibe-bench-worker:v1"
@@ -189,6 +190,10 @@ class DockerCellConfig:
     plugin_config_host_path: str = "~/.wevibe/plugin-config.json"
     proxy_base_url: str | None = None
     proxy_token: str | None = None
+    # Cloud mode (derived by BackgammonRunner from the model slug's provider id;
+    # never set independently): True swaps the cell's key path from the spend-proxy
+    # token to the OrcaRouter API key resolved on the host.
+    cloud: bool = False
     home_dir: str = "/home/worker"
     output_token_max: int | None = None
     worker_logs_dir: Path | None = None
@@ -227,15 +232,24 @@ class DockerCell:
         if self.config.session_db_host_path is not None:
             self.config.session_db_host_path.mkdir(parents=True, exist_ok=True)
 
-        proxy_token = (self.config.proxy_token or "").strip()
-        if not proxy_token:
-            raise ValueError(
-                "proxy token required; direct OrcaRouter key forwarding is removed "
-                "(worker uses spend-proxy token path only; R-13 one path, no fallback)"
-            )
-
-        key_present = True
-        key_len = len(proxy_token)
+        # Mode-aware key gate: LOCAL cells forward the spend-proxy token exactly
+        # as before (path byte-identical); CLOUD cells resolve the OrcaRouter API
+        # key on the host (env export wins over the key file) and fail loud when
+        # absent. Only the key NAME changes per mode — the value never does here
+        # (sizes only in PROGRESS, never the key itself).
+        if self.config.cloud:
+            cloud_key = resolve_cloud_api_key()
+            key_present = True
+            key_len = len(cloud_key)
+        else:
+            proxy_token = (self.config.proxy_token or "").strip()
+            if not proxy_token:
+                raise ValueError(
+                    "proxy token required; direct OrcaRouter key forwarding is removed "
+                    "(worker uses spend-proxy token path only; R-13 one path, no fallback)"
+                )
+            key_present = True
+            key_len = len(proxy_token)
 
         self._progress(f"PROGRESS docker-network ensure name={self.config.network}")
         ensure_network(self.config.network)
@@ -267,7 +281,10 @@ class DockerCell:
             )
 
         run_env = os.environ.copy()
-        run_env["LOCAL_LLM_PROXY_API_KEY"] = proxy_token
+        if self.config.cloud:
+            run_env["ORCAROUTER_API_KEY"] = cloud_key
+        else:
+            run_env["LOCAL_LLM_PROXY_API_KEY"] = proxy_token
 
         self._progress(
             "PROGRESS docker-run start "
@@ -963,6 +980,13 @@ def _build_run_argv(
         "-v",
         mount,
     ]
+
+    # Cloud cells additionally forward ORCAROUTER_API_KEY. The BARE `-e VAR` form
+    # makes docker read the value from the docker CLI process env (set by
+    # DockerCell.__enter__), so the key never appears literally in argv and cannot
+    # leak via `docker inspect` or run-failure detail.
+    if config.cloud:
+        run_cmd.extend(["-e", "ORCAROUTER_API_KEY"])
 
     if config.session_db_host_path is not None:
         host_session_db = Path(config.session_db_host_path).expanduser().resolve()

@@ -489,6 +489,62 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Cloud routing (--cloud): OrcaRouter provider block for worker opencode config
+# ---------------------------------------------------------------------------
+
+DEFAULT_CLOUD_ROUTER = "orcarouter"
+
+CLOUD_ORCAROUTER_PROVIDER: dict = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "OrcaRouter",
+    "options": {
+        "baseURL": "https://api.orcarouter.ai/v1",
+        "apiKey": "{env:ORCAROUTER_API_KEY}",
+        "headerTimeout": 60000,
+        "chunkTimeout": 300000,
+        "timeout": 900000,
+    },
+    "models": {
+        "anthropic/claude-opus-5": {
+            "name": "Claude Opus 5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 128000},
+            "options": {"reasoningEffort": "medium"},
+        },
+        "deepseek/deepseek-v4-pro-0813": {
+            "name": "DeepSeek V4 Pro 0813",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": False,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "deepseek/deepseek-v4-flash-0731": {
+            "name": "DeepSeek V4 Flash 0731",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": False,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.8-max": {
+            "name": "Qwen3.8 Max",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 65536},
+        },
+        "grok/grok-4.6": {
+            "name": "Grok 4.6",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 500000, "output": 65536},
+        },
+    },
+}
+
 # ── RETIRED BENCH ALIASES ────────────────────────────────────────────────────
 #
 # Aliases the proxy may still serve that the bench must REFUSE to measure, each
