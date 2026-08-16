@@ -273,31 +273,35 @@ function connect() {
 import { renderTopbar, renderProvenance } from "./panels/chrome.js";
 import { renderCurve, setCurveMetric } from "./panels/curve.js";
 import { renderWall } from "./panels/wall.js";
-import { renderLedger, toggleModelRow, toggleProfileRow } from "./panels/ledger.js";
+import { renderLedger, toggleBaselineRow, toggleProfileRow } from "./panels/ledger.js";
 import { renderLive, paintFeed, toggleKind, jumpToLive } from "./panels/live.js";
 import { renderHold } from "./panels/hold.js";
 import { renderRail } from "./panels/rail.js";
 import { renderRecall } from "./panels/recall.js";
 import {
-  openProfileModal,
-  closeProfileModal,
-  toggleModel,
-  setSubject,
-  toggleAck,
-  profileSelection,
-  profileSubject,
-  setRefusal,
-  setPending,
-} from "./panels/profile.js";
+  openCreate,
+  closeCreate,
+  isCreateOpen,
+  createStep,
+  createSelection,
+  chooseBranch,
+  createForward,
+  createBack,
+  setCreateKind,
+  setCreateModel,
+  setCreateQuery,
+  setCreateProvider,
+  setCreateBaseline,
+  toggleCreateMemory,
+  setCreatePending,
+  setCreateRefusal,
+} from "./panels/create.js";
 import {
   setRunSel,
   presetRun,
   armRun,
   startRun,
   disarm as disarmRun,
-  openBaselineModal,
-  closeBaselineModal,
-  isBaselineModalOpen,
   runLifecycleState,
   clearRefusal,
 } from "./panels/runstart.js";
@@ -404,7 +408,7 @@ function bindInteraction() {
 }
 
 function onClick(e) {
-  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-profile-open],[data-profile-cancel],[data-profile-scrim],[data-profile-ack],[data-profile-create],[data-model],[data-subject],[data-run-arm],[data-run-confirm],[data-model-expand],[data-profile-expand],[data-run-baseline],[data-baseline-continue],[data-baseline-back],[data-run-dismiss],[data-run-scrim],[data-new-profile],[data-run-profile],[data-pop-toggle],[data-pop-view]");
+  const t = e.target.closest("[data-metric],[data-kind],#evjump,[data-tui-toggle],[data-tui-detach],[data-tui-detach-yes],[data-tui-cancel],[data-hold-release],[data-create-open],[data-create-cancel],[data-create-scrim],[data-create-branch],[data-create-next],[data-create-back],[data-create-kind],[data-create-model],[data-create-baseline],[data-create-memory],[data-create-baseline-continue],[data-create-accept],[data-run-arm],[data-run-confirm],[data-baseline-expand],[data-profile-expand],[data-run-dismiss],[data-run-scrim],[data-run-profile],[data-pop-toggle],[data-pop-view]");
   if (!t) return;
 
   if (t.dataset.metric) { setCurveMetric(t.dataset.metric); render(); return; }
@@ -419,48 +423,42 @@ function onClick(e) {
   if (t.hasAttribute("data-tui-detach-yes")) { void detachTui(); return; }
   if (t.hasAttribute("data-tui-cancel")) { cancelDetach(); render(); return; }
   if (t.hasAttribute("data-hold-release")) { void releaseHold(); return; }
-  if (t.hasAttribute("data-profile-open")) { openProfileModal(); render(); return; }
-  // The scrim closes the modal, but ONLY when the scrim ITSELF was clicked — a
-  // click that lands inside the dialog also bubbles through it. Its sibling (the
-  // run control) already closes this way; this one silently did not, so an
-  // identical-looking scrim behaved differently depending on which modal was
-  // open.
+
+  // ── THE [+ PROFILE] FLOW ──────────────────────────────────────────────────
+  //
+  // One entry, then a chooser and two three-step sequences (panels/create.js).
+  // Every step below is pure selection held in that module — only the two
+  // handlers at the end of each branch reach the network.
+  if (t.hasAttribute("data-create-open")) { openCreate(); render(); return; }
+  // The scrim closes the flow, but ONLY when the scrim ITSELF was clicked — a
+  // click that lands inside the dialog also bubbles through it.
   if (
-    t.hasAttribute("data-profile-cancel")
-    || (t.hasAttribute("data-profile-scrim") && e.target === t)
-  ) { closeProfileModal(); render(); return; }
-  if (t.hasAttribute("data-profile-ack")) { toggleAck(); render(); return; }
-  // Subject is checked BEFORE model: a row in the subject picker carries only
-  // `data-subject`, but keeping the order explicit stops a future row that
-  // carries both from silently toggling the wrong axis.
-  if (t.dataset.subject) { setSubject(t.dataset.subject); render(); return; }
-  if (t.dataset.model) { toggleModel(t.dataset.model); render(); return; }
-  if (t.hasAttribute("data-profile-create")) { void freezeProfile(); return; }
-  if (t.hasAttribute("data-run-arm")) { void doArmRun(); return; }
-  if (t.hasAttribute("data-run-confirm")) { void doStartRun(); return; }
-  // ── THE MODEL LEDGER ──────────────────────────────────────────────────────
-  // Expansion is checked FIRST, but the three buttons live inside the row and
-  // would otherwise match the row's own closest() hit. They each stopPropagation
-  // by returning here — the button attributes are tested before the row's.
-  if (t.dataset.runBaseline) {
-    // Open the confirmation modal rather than silently pre-filling the form.
-    // A baseline cell costs several hours; the operator must commit explicitly.
-    openBaselineModal(t.dataset.runBaseline);
-    render();
-    return;
-  }
-  if (t.dataset.baselineContinue) {
-    // Operator confirmed. Preset the form and arm immediately.
-    presetRun({ model: t.dataset.baselineContinue, arm: "off" });
-    closeBaselineModal();
+    t.hasAttribute("data-create-cancel")
+    || (t.hasAttribute("data-create-scrim") && e.target === t)
+  ) { closeCreate(); render(); return; }
+  if (t.dataset.createBranch) { chooseBranch(t.dataset.createBranch); render(); return; }
+  if (t.hasAttribute("data-create-next")) { createForward(); render(); return; }
+  if (t.hasAttribute("data-create-back")) { createBack(); render(); return; }
+  if (t.dataset.createKind) { setCreateKind(t.dataset.createKind); render(); return; }
+  if (t.dataset.createModel) { setCreateModel(t.dataset.createModel); render(); return; }
+  if (t.dataset.createBaseline) { setCreateBaseline(t.dataset.createBaseline); render(); return; }
+  if (t.dataset.createMemory) { toggleCreateMemory(t.dataset.createMemory); render(); return; }
+  if (t.hasAttribute("data-create-baseline-continue")) {
+    // THE END OF THE BASELINE BRANCH — and it still does not launch. This arms
+    // the cell through the server's preview, which mints a token and returns
+    // its own restatement; the run control then takes the final click. The
+    // operator therefore confirms against THE SERVER'S words, not this flow's
+    // summary of them.
+    const sel = createSelection();
+    presetRun({ model: sel.model, arm: "off", kind: sel.kind });
+    closeCreate();
     void doArmRun();
     return;
   }
-  if (t.hasAttribute("data-baseline-back")) {
-    closeBaselineModal();
-    render();
-    return;
-  }
+  if (t.hasAttribute("data-create-accept")) { void freezeProfile(); return; }
+
+  if (t.hasAttribute("data-run-arm")) { void doArmRun(); return; }
+  if (t.hasAttribute("data-run-confirm")) { void doStartRun(); return; }
   // DISMISSING THE RUN CONTROL DISARMS IT. Leaving a token armed behind a
   // closed surface is exactly the invisible state this work exists to remove —
   // the operator would have a live token they can no longer see or confirm.
@@ -472,19 +470,27 @@ function onClick(e) {
     render();
     return;
   }
-  if (t.dataset.newProfile) { openProfileModal([], t.dataset.newProfile); render(); return; }
   if (t.dataset.runProfile) {
     // A run under a profile is the ON arm. The org is NOT guessed — the server
     // requires one and the operator picks it in the run panel.
-    presetRun({ model: t.dataset.runProfile, arm: "on" });
+    //
+    // THE SUBSTRATE COMES FROM THE BASELINE THIS PROFILE SITS UNDER, because a
+    // profile's subject is that baseline's model and an ON cell must run on the
+    // same substrate the floor was measured on. Reading it off the row rather
+    // than defaulting to local is what makes [+ run] work on a cloud profile.
+    presetRun({
+      model: t.dataset.runModel,
+      arm: "on",
+      kind: t.dataset.runKind,
+    });
     render();
     return;
   }
-  if (t.dataset.modelExpand) { toggleModelRow(t.dataset.modelExpand); render(); return; }
-  // A PROFILE ROW OPENS ITS FROZEN POLICY. Checked AFTER `data-run-profile`,
-  // which sits inside the row: [+ run] must start a run, never open a drawer.
-  // This is the surface that replaced the MEMORY PROFILE card's OPEN INSPECTOR
-  // button, and it opens the profile the operator actually clicked.
+  // ── THE BASELINES CARD ────────────────────────────────────────────────────
+  // Expansion is checked AFTER the buttons that live inside the rows — [+ run]
+  // must start a run, never open a drawer. Returning here is what keeps a
+  // button click from also toggling the row it sits in.
+  if (t.dataset.baselineExpand) { toggleBaselineRow(t.dataset.baselineExpand); render(); return; }
   if (t.dataset.profileExpand) { toggleProfileRow(t.dataset.profileExpand); render(); return; }
   // POPOUTS. The view switch is checked BEFORE the toggle: a tab click must
   // change the view, never collapse the window out from under the operator.
@@ -499,16 +505,28 @@ function onClick(e) {
 
 function onRunSel(e) {
   const s = e.target.closest("[data-run-sel]");
-  if (!s) return;
-  setRunSel(s.dataset.runSel, s.value);
-  render();
+  if (s) {
+    setRunSel(s.dataset.runSel, s.value);
+    render();
+    return;
+  }
+  // THE CREATE FLOW'S TWO FILTERS. They are re-rendered on every keystroke, so
+  // the caret would be lost if the input were rebuilt — patch() morphs the
+  // existing node in place, which is what makes typing here survive the redraw.
+  if (e.target.closest("[data-create-query]")) { setCreateQuery(e.target.value); render(); return; }
+  if (e.target.closest("[data-create-provider]")) { setCreateProvider(e.target.value); render(); }
 }
 
 function onKeydown(e) {
   if (e.key !== "Escape") return;
-  // The baseline confirm is checked FIRST — it is rendered on top, so Escape
-  // must dismiss what the operator is actually looking at.
-  if (isBaselineModalOpen()) { closeBaselineModal(); render(); return; }
+  // The create flow is checked FIRST — it is rendered on top, so Escape must
+  // dismiss what the operator is actually looking at.
+  //
+  // ESCAPE CLOSES THE WHOLE FLOW, IT DOES NOT STEP BACK. Back is a control on
+  // the frame with a word on it; escape is the universal "I am done with this
+  // dialog". Overloading escape as back would make a three-step sequence take
+  // three escapes to leave, which is not what any operator means by it.
+  if (isCreateOpen()) { closeCreate(); render(); return; }
   // Escape disarms the run control for the same reason DISMISS does: an armed
   // token behind a dismissed surface is an invisible state.
   const lc = runLifecycleState();
@@ -629,13 +647,33 @@ async function freezeProfile() {
   if (!reach.ok) {
     // The refusal the operator sees carries the FIX when one exists. A reason
     // without a remedy leaves them exactly as stuck as silence did.
-    setRefusal(reach.code, reach.fix ? `${reach.reason}\n\n${reach.fix}` : reach.reason);
+    setCreateRefusal(reach.code, reach.fix ? `${reach.reason}\n\n${reach.fix}` : reach.reason);
     console.error(`profile creation unavailable — ${reach.code}: ${reach.reason}`);
     render();
     return;
   }
+
+  // THE SUBJECT IS THE CHOSEN BASELINE'S MODEL — read off the baseline, never
+  // picked separately.
+  //
+  // It used to be its own question in the old modal, which meant an operator
+  // could freeze a profile whose subject had no floor, or whose floor belonged
+  // to a different model. Under this flow that is unspellable: the profile is
+  // measured against a baseline the operator selected, and the subject IS that
+  // baseline's model by construction.
+  const sel = createSelection();
+  const row = (board?.models_ledger?.baseline_rows ?? []).find((b) => b.id === sel.baseline) ?? null;
+  if (!row) {
+    setCreateRefusal(
+      "baseline_missing",
+      `baseline ${sel.baseline ?? "(none)"} is no longer in the index — it may have been archived while this dialog was open. Go back and choose again.`,
+    );
+    render();
+    return;
+  }
+
   const base = board.control.base_url;
-  setPending(true);
+  setCreatePending(true);
   render();
   try {
     const res = await fetch(`${base}/api/profiles/create`, {
@@ -645,8 +683,8 @@ async function freezeProfile() {
         // TWO axes, sent separately. The subject is the measurement; the roster
         // is the variable. The server refuses either being absent, with a
         // distinct code for each.
-        subject_model: profileSubject(),
-        memory_models: profileSelection(),
+        subject_model: row.model,
+        memory_models: sel.memory,
         stack_id: board?.stack?.id ?? null,
       }),
     });
@@ -654,7 +692,7 @@ async function freezeProfile() {
     if (!res.ok || data?.ok === false) {
       // Never swallow: the reason reaches the operator ON SCREEN, not just in
       // the console. The server's prose is passed through verbatim.
-      setRefusal(
+      setCreateRefusal(
         data?.code ?? `http_${res.status}`,
         data?.reason ?? `the control plane answered HTTP ${res.status} without a stated reason`,
       );
@@ -662,8 +700,8 @@ async function freezeProfile() {
       render();
       return;
     }
-    setPending(false);
-    closeProfileModal();
+    setCreatePending(false);
+    closeCreate();
     // The board is PUSHED, so the freeze lands on screen when the server's next
     // assembly observes the new file on disk — within one tick. Nothing is
     // written into `board` here: a local write would be a second source of
@@ -672,7 +710,7 @@ async function freezeProfile() {
     // The request never reached the server. That is a DIFFERENT diagnosis from
     // a refusal and is labelled as such, so "the control plane is down" is
     // never mistaken for "the control plane said no".
-    setRefusal("transport_failed", String(err?.message ?? err));
+    setCreateRefusal("transport_failed", String(err?.message ?? err));
     console.error("profile creation failed:", err);
     render();
   }

@@ -13,7 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,12 +29,13 @@ import {
   refuse,
 } from "./contract.mjs";
 import { matchRuntime, DECLARED_CONTEXT, CONTEXT_CHOICES, RETIRED_ALIASES, readRoster } from "./roster.mjs";
-import { readBaselines, BASELINES_FILE, isArchivedRun } from "./baselines.mjs";
+import { readBaselines, BASELINES_FILE, isArchivedRun, baselineId, identifyCell } from "./baselines.mjs";
 import { manifestArgFor, campaignDirName } from "./campaign.mjs";
+import { readCloud, resolveCloudModel, CLOUD_MODELS, ABSOLUTE_MAX_USD } from "./cloud.mjs";
 import { sessionIdFrom, terminalFrom, pidAlive, newestLog } from "./runstate.mjs";
 import { mapEvent, EventRing } from "./events.mjs";
 import { parseGateEvents, gradingStatus } from "./gate-events.mjs";
-import { createProfile, transferOf } from "./profiles.mjs";
+import { createProfile, readProfiles, transferOf, attachRun } from "./profiles.mjs";
 import { readModelsLedger } from "./models-ledger.mjs";
 import {
   attemptRecords,
@@ -858,6 +859,57 @@ test("the transfer edge is derived on read, never written to the frozen file", a
   assert.equal(onDisk.transfer, undefined, "transfer must not be persisted — it is derived");
   assert.equal(onDisk.subject_model, "m-a", "the two frozen facts ARE persisted");
   assert.deepEqual(onDisk.memory_models, ["m-a"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a profile referencing an archived or vanished campaign is NOT the active profile", async () => {
+  // A profile outlives its campaign: a wipe removes the campaign directory and
+  // the archive convention renames it `cumulative.<why>-<date>`. Either way the
+  // frozen record must stay LISTED but stop being ACTIVE — the active profile
+  // pins the subject model at run start, and a retired campaign may not set the
+  // terms of a new run. This was silent before: prof-bd86 stayed "active" after
+  // its campaign was archived, hijacking the subject pin.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-prof-"));
+
+  const stackId = "org-a|task-a|rosterhash-a|7";
+  const res = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"], stackId });
+  assert.equal(res.ok, true);
+  const id = res.profile.id;
+
+  // No LIVE campaign on disk: the matching manifest sits inside an ARCHIVED
+  // (dotted) directory, which must not count.
+  mkdirSync(join(root, "cumulative.void-test-20260816"), { recursive: true });
+  writeFileSync(
+    join(root, "cumulative.void-test-20260816", "manifest.json"),
+    JSON.stringify({ org_id: "org-a", task: "task-a", roster_hash: "rosterhash-a", seed: 7 }),
+  );
+
+  const excluded = await readProfiles(root);
+  assert.equal(excluded.active, null, "no profile may be active while its campaign is archived");
+  assert.deepEqual(excluded.archived_campaign_ids, [id], "the exclusion must be surfaced, not silent");
+  assert.equal(excluded.count, 1, "the frozen record is still listed");
+  assert.deepEqual(excluded.prior.map((p) => p.id), [id], "an excluded profile remains visible");
+
+  // DURABLE + DEDUPLICATED: the dashboard polls every 2s, so the exclusion is
+  // logged to runs/profile-errors.log exactly ONCE, gated by a marker file.
+  const logPath = join(root, "profile-errors.log");
+  const first = readFileSync(logPath, "utf8");
+  assert.match(first, new RegExp(`profile ${id} references archived/nonexistent campaign`));
+  await readProfiles(root);
+  assert.equal(readFileSync(logPath, "utf8"), first, "a repeated read must not re-log the exclusion");
+  assert.ok(existsSync(join(root, "profiles", `${id}.archived-campaign`)), "the dedup marker exists");
+
+  // The campaign comes back LIVE (bare directory, parseable manifest): the same
+  // profile is active again.
+  mkdirSync(join(root, "cumulative"), { recursive: true });
+  writeFileSync(
+    join(root, "cumulative", "manifest.json"),
+    JSON.stringify({ org_id: "org-a", task: "task-a", roster_hash: "rosterhash-a", seed: 7 }),
+  );
+
+  const revived = await readProfiles(root);
+  assert.equal(revived.active?.id, id, "a profile pointing at a live campaign is active");
+  assert.deepEqual(revived.archived_campaign_ids, []);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -1751,10 +1803,11 @@ test("BASELINES: the index is the single export, and it is written to disk", asy
   rmSync(root, { recursive: true, force: true });
 });
 
-test("LEDGER: a profile reports no measured cell, and says why", async () => {
-  // Runs are not joined to measured cells. The field is null WITH a reason, so
-  // the board states that rather than rendering eight `unobserved` columns that
-  // imply a measurement is merely pending.
+test("LEDGER: a profile with no runs reports no cell and no excuse", async () => {
+  // THREE DIFFERENT NULLS, and this is the first: nothing ran, so there is
+  // nothing to attribute. It must NOT carry an "unavailable" reason — a reason
+  // would send the operator looking for a broken join when the honest answer is
+  // that they have not started a run yet.
   const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
   writeRun(root, "cumulative", { status: OFF_PASS });
   await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
@@ -1766,7 +1819,110 @@ test("LEDGER: a profile reports no measured cell, and says why", async () => {
   });
   const p = led.models[0].profiles[0];
   assert.equal(p.latest_cell, null);
-  assert.match(p.latest_cell_unavailable, /not joined/i);
+  assert.equal(p.latest_cell_unavailable, null);
+  assert.equal(p.runs.length, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a run recorded with a join key resolves to its measured cell", async () => {
+  // THE JOIN, END TO END. The launcher records which campaign directory and
+  // which schedule slot a cell was about to write to; this is what spends it.
+  // Before it existed every measurement column on every profile row was null on
+  // every board, and the panel disclaimed itself in a sentence.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+  // The ON cell the profile's run produced, in its own campaign directory.
+  writeRun(root, "cumulative-m-a", {
+    seq: 0,
+    arm: "on",
+    status: {
+      type: "attempt",
+      sequence_index: 0,
+      attempt: 1,
+      verdict: "PASS",
+      gate_totals: { pass: 70, fail: 1, error: 0, not_run: 0, total: 71 },
+      progress: { turns: 5, total_tokens: 300, wall_seconds: 40 },
+    },
+  });
+
+  const { profile } = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+  await attachRun(root, profile.id, {
+    log_name: "on-cell-x.log",
+    arm: "on",
+    model: "m-a",
+    run_dir: "cumulative-m-a",
+    sequence_index: 0,
+    started_at: Date.now(),
+  });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const p = led.models[0].profiles[0];
+  assert.equal(p.latest_cell_unavailable, null);
+  assert.equal(p.latest_cell.turns, 5);
+  assert.equal(p.latest_cell.gates.total, 71);
+  // 5 turns against a 9-turn floor: four fewer, and BETTER — the polarity is
+  // stated as a word rather than left to be read off the sign.
+  assert.equal(p.runs[0].delta.computable, true);
+  assert.equal(p.runs[0].delta.turns, -4);
+  assert.equal(p.runs[0].delta.better, true);
+  assert.equal(p.best.turns, -4);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a run whose key points at the wrong arm attributes NOTHING", async () => {
+  // `sequence_index` is the manifest's `current_index` read a moment before the
+  // spawn — a claim about what the harness was about to do, not a receipt. So
+  // the arm is verified. Adopting an OFF cell's numbers for an ON run would
+  // invert the sign of every Δ computed from it, and nothing downstream could
+  // detect it.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+
+  const { profile } = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+  await attachRun(root, profile.id, {
+    log_name: "on-cell-x.log",
+    arm: "on",
+    model: "m-a",
+    // Points at the OFF cell above.
+    run_dir: "cumulative",
+    sequence_index: 0,
+    started_at: Date.now(),
+  });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const r = led.models[0].profiles[0].runs[0];
+  assert.equal(r.cell, null);
+  assert.match(r.cell_unavailable, /is a OFF cell and this run was launched as ON/i);
+  assert.equal(r.delta, null);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a run recorded before the join key existed says so, per run", async () => {
+  // The historical case, and it stays legible forever: these runs are real and
+  // are kept, and the reason nothing can be computed from them is stated on the
+  // run rather than as a disclaimer over the whole panel.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  writeRun(root, "cumulative", { status: OFF_PASS });
+
+  const { profile } = await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+  await attachRun(root, profile.id, { log_name: "off-cell-old.log", arm: "off", model: "m-a", started_at: Date.now() });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+  });
+  const r = led.models[0].profiles[0].runs[0];
+  assert.equal(r.cell, null);
+  assert.match(r.cell_unavailable, /before the control plane recorded/i);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -1781,5 +1937,339 @@ test("LEDGER: profiles whose model left the roster are surfaced, not dropped", a
   });
   assert.equal(led.orphaned_profiles.length, 1);
   assert.equal(led.orphaned_profiles[0].subject_model, "gone");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ── CLOUD BASELINES ─────────────────────────────────────────────────────────
+
+test("DRIFT: the cloud catalogue matches CLOUD_ORCAROUTER_PROVIDER in config.py", () => {
+  // The control plane is JS and the provider block is Python, so there is no
+  // shared import — the same standing condition that makes roster.mjs mirror the
+  // worker context registry. This is the test that makes the mirror safe: a
+  // model added on one side and not the other fails here rather than presenting
+  // to the operator as "that model does not exist".
+  const src = readFileSync(join(BENCH, "wevibe_bench", "config.py"), "utf8");
+  const start = src.indexOf("CLOUD_ORCAROUTER_PROVIDER");
+  assert.ok(start > -1, "CLOUD_ORCAROUTER_PROVIDER not found in config.py");
+
+  // THE BLOCK'S ACTUAL EXTENT, not a fixed window. This test first read a
+  // 4000-character slice, which covered the five models the block held at the
+  // time and silently stopped covering it the moment the catalogue grew — the
+  // failure mode being that the test still PASSES while checking a fraction of
+  // the list. The models dict is delimited, so it is read by its delimiters.
+  const mstart = src.indexOf('    "models": {', start);
+  assert.ok(mstart > -1, "the provider block has no models dict");
+  const mend = src.indexOf("\n    },\n", mstart);
+  assert.ok(mend > mstart, "the models dict is not terminated");
+  const block = src.slice(mstart, mend);
+
+  const pyKeys = [...block.matchAll(/^\s{8}"([^"]+\/[^"]+)":\s*\{/gm)].map((m) => m[1]);
+  assert.ok(pyKeys.length > 0, "no {provider}/{model} keys parsed out of the provider block");
+  // THE COUNTS MUST AGREE. Two set-membership loops can both pass while the two
+  // sides hold different numbers of entries if either contains a duplicate key,
+  // so the size is asserted rather than inferred from them.
+  assert.equal(
+    pyKeys.length,
+    Object.keys(CLOUD_MODELS).length,
+    `config.py lists ${pyKeys.length} cloud models and the control plane mirrors ${Object.keys(CLOUD_MODELS).length}`,
+  );
+
+  for (const key of Object.keys(CLOUD_MODELS)) {
+    assert.ok(
+      pyKeys.includes(key),
+      `cloud model '${key}' is mirrored here but absent from config.py's provider block`,
+    );
+  }
+  // AND THE OTHER DIRECTION. A model present in Python and missing here is the
+  // more damaging drift: the bench can run it and the board will not offer it.
+  for (const key of pyKeys) {
+    assert.ok(CLOUD_MODELS[key], `config.py offers '${key}' and the control plane does not mirror it`);
+  }
+
+  // THE LIMITS TRAVEL TOO. `context` and `output` are not decoration: the board
+  // states them on the picker, and an output ceiling set below what the model
+  // can emit truncates a response — which this bench classifies as a VOID
+  // INSTRUMENT, a cell that burns hours and measures the harness. A mirror that
+  // agreed on the model list and disagreed on its ceilings would be worse than
+  // no mirror, because it would look correct.
+  for (const key of pyKeys) {
+    const entry = block.slice(block.indexOf(`"${key}":`));
+    const lim = entry.match(/"limit":\s*\{"context":\s*(\d+),\s*"output":\s*(\d+)\}/);
+    assert.ok(lim, `config.py entry for '${key}' has no parsable limit`);
+    assert.equal(Number(lim[1]), CLOUD_MODELS[key].context, `context drift on '${key}'`);
+    assert.equal(Number(lim[2]), CLOUD_MODELS[key].output, `output drift on '${key}'`);
+  }
+});
+
+test("CLOUD: every mirrored model clears the bench's own eligibility floor", () => {
+  // The provider block is not a catalogue — it is the list of models the harness
+  // will ACCEPT, and the board's picker is generated from it. Every entry is
+  // therefore a claim that a benchmark cell can run on that model.
+  //
+  // THE CONTEXT FLOOR IS THE LOCAL BENCH ALIASES' OWN. A cloud model with a
+  // smaller window than 262144 would be measured under a tighter budget than the
+  // models it is compared against — a confound that presents as a capability
+  // difference and is invisible in the result.
+  for (const [key, m] of Object.entries(CLOUD_MODELS)) {
+    assert.ok(m.context >= 262144, `'${key}' offers ${m.context} context, below the local bench floor of 262144`);
+    assert.ok(m.output > 0, `'${key}' states no output ceiling`);
+    assert.ok(m.name && !m.name.includes("/"), `'${key}' has no readable label (got ${JSON.stringify(m.name)})`);
+    assert.equal(key.split("/").length, 2, `'${key}' is not a {provider}/{model} key`);
+  }
+});
+
+test("DRIFT: the spend ceiling matches ABSOLUTE_MAX_USD in the proxy adapter", () => {
+  // The number an operator is shown before committing to a billed cell must be
+  // the number the proxy actually enforces.
+  const src = readFileSync(join(BENCH, "wevibe_bench", "adapters", "openrouter_proxy.py"), "utf8");
+  const m = src.match(/ABSOLUTE_MAX_USD\s*=\s*([\d.]+)/);
+  assert.ok(m, "ABSOLUTE_MAX_USD not found in openrouter_proxy.py");
+  assert.equal(Number(m[1]), ABSOLUTE_MAX_USD);
+});
+
+test("CLOUD: a model key resolves to the provider and model the harness expects", () => {
+  // `--cloud --provider <vendor> --model <model>` is what run_cumulative.py's
+  // _compose_cloud_slug consumes; passing the whole key as --model would compose
+  // orcarouter/anthropic/anthropic/... and be refused for a model the operator
+  // never picked.
+  const r = resolveCloudModel("anthropic/claude-opus-5");
+  assert.equal(r.ok, true);
+  assert.equal(r.provider, "anthropic");
+  assert.equal(r.model, "claude-opus-5");
+  assert.equal(r.slug, "orcarouter/anthropic/claude-opus-5");
+});
+
+test("CLOUD: an unknown or malformed model is refused BY NAME, with the alternatives", () => {
+  const unknown = resolveCloudModel("acme/does-not-exist");
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.code, "cloud_model_unknown");
+  assert.match(unknown.reason, /available:/);
+
+  // A three-segment key is a composed slug that still carries its router.
+  const malformed = resolveCloudModel("orcarouter/anthropic/claude-opus-5");
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.code, "cloud_model_malformed");
+});
+
+test("CLOUD: the key report carries presence and a fingerprint, never the key", async () => {
+  // This object is published to the browser. A leak here is a credential on the
+  // wire, so the test asserts the absence of the secret rather than only the
+  // presence of the report.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-cloud-"));
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "cloud.env"), "ORCAROUTER_API_KEY=sk-secret-value\n");
+
+  const cloud = await readCloud({ benchRoot: root, env: {} });
+  assert.equal(cloud.key.present, true);
+  assert.equal(cloud.key.source, "key_file");
+  assert.equal(cloud.can_start, true);
+  assert.match(cloud.key.fingerprint, /^[0-9a-f]{8}$/);
+  assert.ok(
+    !JSON.stringify(cloud).includes("sk-secret-value"),
+    "the cloud report contains the API key — it is published to the browser and must never carry the secret",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("CLOUD: no key means the substrate refuses BEFORE anything is written", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wevibe-cloud-"));
+  const cloud = await readCloud({ benchRoot: root, env: {} });
+  assert.equal(cloud.key.present, false);
+  assert.equal(cloud.can_start, false);
+  // The path is named. "No key" with no location is a dead end for an operator
+  // who believes they configured one.
+  assert.match(cloud.can_start_reason, /cloud\.env/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("CLOUD: an exported key wins over the file, mirroring spend_key", async () => {
+  // The spawned harness inherits the control plane's environment, so reporting
+  // the file's key while the harness would use the environment's would be a
+  // report about a run that is not the one about to happen.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-cloud-"));
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "cloud.env"), "ORCAROUTER_API_KEY=from-file\n");
+
+  const cloud = await readCloud({ benchRoot: root, env: { ORCAROUTER_API_KEY: "from-env" } });
+  assert.equal(cloud.key.source, "environment");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("CAMPAIGN: a cloud slug yields a FLAT campaign directory name", () => {
+  // A slash in a directory name is not a name, it is a path. Left in, a cloud
+  // baseline's campaign would land at runs/cumulative-anthropic/claude-opus-5 —
+  // nested under a parent holding no manifest, so every reader that scans runs/
+  // walks straight past it and the measurements are invisible on the board the
+  // cell was launched from.
+  const name = campaignDirName("anthropic/claude-opus-5");
+  assert.ok(!name.includes("/"), `campaign dir '${name}' contains a path separator`);
+  // Dots too: isArchivedRun() treats ANY dot as the archive convention, so a
+  // dotted name would make the baseline silently vanish from the floor index.
+  assert.ok(!isArchivedRun(campaignDirName("qwen/qwen3.8-max")));
+  // Local names are UNCHANGED by the slash rule — no existing campaign moves.
+  assert.equal(campaignDirName("qwen3.6-35b-a3b-bench"), "cumulative-qwen3-6-35b-a3b-bench");
+});
+
+test("BASELINE: a cloud OFF cell is identified by vendor, not by the router", () => {
+  // provider_pin is built by _provider_pin_from_model, which returns the FIRST
+  // segment for anything that is not a local-llm-proxy slug — the router. Read
+  // naively, every cloud baseline in the bench resolves to the single identity
+  // "orcarouter", folding four vendors' floors into one row and attributing all
+  // of them to a model that does not exist.
+  const cloud = identifyCell(
+    { model: "orcarouter/anthropic/claude-opus-5", provider_pin: "orcarouter" },
+    {},
+  );
+  assert.equal(cloud.kind, "cloud");
+  assert.equal(cloud.id, "anthropic/claude-opus-5");
+  assert.equal(cloud.provider, "anthropic");
+
+  const local = identifyCell(
+    { model: "local-llm-proxy/m-a", provider_pin: "m-a" },
+    {},
+  );
+  assert.equal(local.kind, "local");
+  assert.equal(local.id, "m-a");
+});
+
+test("BASELINE: the list is rooted in cells, so a cloud floor appears without a roster", async () => {
+  // `models` is keyed by the local proxy roster because that is what a GATE
+  // needs. `list` is derived from the CELLS, which is the only reason a cloud
+  // floor — whose model the local proxy has never heard of — is findable at all.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-bl-"));
+  const dir = join(root, "cumulative-anthropic-claude-opus-5");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({
+    created_at: "2026-08-15T00:00:00Z",
+    schedule: [{ sequence_index: 0, memory_mode: "off", model: "orcarouter/anthropic/claude-opus-5", provider_pin: "orcarouter" }],
+  }));
+  writeFileSync(join(dir, "manifest.status.jsonl"), `${JSON.stringify({
+    type: "attempt", sequence_index: 0, attempt: 1, verdict: "PASS",
+    gate_totals: { pass: 69, fail: 2, error: 0, not_run: 0, total: 71 },
+    progress: { turns: 31, total_tokens: 900, wall_seconds: 120 },
+  })}\n`);
+
+  // NOTE the empty roster: this is the cold case where the local proxy is down.
+  const idx = await readBaselines({ runsRoot: root, models: [] });
+  assert.equal(idx.list.length, 1);
+  const row = idx.list[0];
+  assert.equal(row.model, "anthropic/claude-opus-5");
+  assert.equal(row.kind, "cloud");
+  assert.equal(row.state, "complete");
+  assert.equal(row.turns, 31);
+  assert.equal(row.gates.total, 71);
+  assert.match(row.id, /^base-[0-9a-f]{4}$/);
+  assert.deepEqual(idx.counts, { complete: 1, running: 0, void: 0 });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BASELINE: an id is stable across derivations and distinct per cell", async () => {
+  // An operator quotes this id in a report. It is derived from the run directory
+  // and the schedule index rather than from a counter, so it survives a service
+  // restart and cannot be reassigned to a different cell.
+  assert.equal(baselineId("cumulative", 0), baselineId("cumulative", 0));
+  assert.notEqual(baselineId("cumulative", 0), baselineId("cumulative", 1));
+  assert.notEqual(baselineId("cumulative", 0), baselineId("cumulative-m-b", 0));
+  assert.match(baselineId("cumulative", 0), /^base-[0-9a-f]{4}$/);
+});
+
+test("TOKEN: the substrate is part of the confirmation fingerprint", () => {
+  // `kind` decides whether the cell runs on the resident local model or is
+  // routed to a vendor that bills for it — the largest difference any single
+  // parameter makes. Omitted from the token, a confirmation minted for a local
+  // cell would be valid for a cloud one carrying the same model id: a run the
+  // operator never saw a restatement for, and one that spends money.
+  const base = { model: "m", arm: "off", org: null, context: null };
+  assert.notEqual(
+    confirmationToken({ ...base, kind: "local" }),
+    confirmationToken({ ...base, kind: "cloud" }),
+  );
+});
+
+test("LEDGER: a cloud profile is not reported as an orphan", async () => {
+  // `eligible` is the LOCAL proxy roster, so testing membership against it alone
+  // declared every cloud profile orphaned the moment cloud baselines existed — a
+  // profile whose subject runs perfectly well, filed under "nothing can run
+  // under this until its model is served again".
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  await createProfile(root, { subjectModel: "anthropic/claude-opus-5", memoryModels: ["anthropic/claude-opus-5"] });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+    cloud: await readCloud({ benchRoot: root, env: {} }),
+  });
+  assert.equal(led.orphaned_profiles.length, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: startable spans both substrates and gates each one separately", async () => {
+  // The [+ PROFILE] modal's baseline branch renders this list. A picker that
+  // offers a model the launch would refuse teaches the operator that the UI
+  // lies, and the lesson generalises to every other control on the board.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "cloud.env"), "ORCAROUTER_API_KEY=k\n");
+  writeRun(root, "cumulative", { status: OFF_PASS });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: false,
+    cloud: await readCloud({ benchRoot: root, env: {} }),
+  });
+
+  const local = led.startable.find((s) => s.id === "m-a");
+  // It already has a floor, so re-baselining is refused — and the refusal names
+  // the declared act that IS the way to do it.
+  assert.equal(local.can_baseline.allowed, false);
+  assert.match(local.can_baseline.reason, /declared act/);
+
+  const cloud = led.startable.find((s) => s.id === "anthropic/claude-opus-5");
+  assert.equal(cloud.kind, "cloud");
+  assert.equal(cloud.can_baseline.allowed, true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: with no key, every cloud model refuses and says which key is missing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [],
+    runInFlight: false,
+    cloud: await readCloud({ benchRoot: root, env: {} }),
+  });
+  const cloudRows = led.startable.filter((s) => s.kind === "cloud");
+  assert.ok(cloudRows.length > 0);
+  for (const row of cloudRows) {
+    assert.equal(row.can_baseline.allowed, false);
+    assert.match(row.can_baseline.reason, /ORCAROUTER_API_KEY/);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("LEDGER: a cell in flight blocks every launch on every row, both substrates", async () => {
+  // The serial rule is a property of the BENCH, not of any row. It is the rule
+  // most easily broken by a per-row UI, because each row looks independent.
+  const root = mkdtempSync(join(tmpdir(), "wevibe-mled-"));
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "cloud.env"), "ORCAROUTER_API_KEY=k\n");
+  writeRun(root, "cumulative", { status: OFF_PASS });
+  await createProfile(root, { subjectModel: "m-a", memoryModels: ["m-a"] });
+
+  const led = await readModelsLedger({
+    runsRoot: root,
+    benchModels: [{ id: "m-a", bench_eligible: true }],
+    runInFlight: true,
+    blockedReason: "a cell is already in flight",
+    cloud: await readCloud({ benchRoot: root, env: {} }),
+  });
+
+  for (const s of led.startable) assert.equal(s.can_baseline.allowed, false);
+  for (const b of led.baseline_rows) {
+    assert.equal(b.can_profile.allowed, false);
+    for (const p of b.profiles) assert.equal(p.can_run.allowed, false);
+  }
   rmSync(root, { recursive: true, force: true });
 });

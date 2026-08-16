@@ -266,9 +266,10 @@ export function emptyBoard() {
     // NO PANEL DRAWS THIS TODAY. The profile inspector did (prior profiles as a
     // hollow overlay, never joined by a line to the active series — they were
     // measured under a different allowlist, so connecting them would draw a
-    // trend across two different experiments), and it is gone: the RUN LEDGER
-    // lists every profile under its subject model and marks the active one, so
-    // "which profiles exist" is answered there without a second list.
+    // trend across two different experiments), and it is gone: the BASELINES
+    // card lists every profile under the baseline it is measured against and
+    // marks the active one, so "which profiles exist" is answered there without
+    // a second list.
     //
     // The field is still SERVED. It is part of a versioned wire contract that
     // other readers may hold, and dropping it silently would break them to save
@@ -357,7 +358,7 @@ export function emptyBoard() {
     // reason lives in `unwired_reasons` and is meant to be shown, not swallowed.
     suite: null,
 
-    // ── THE MODEL LEDGER — one row per bench-eligible model ───────────────────
+    // ── THE LEDGER — the model universe AND the baselines, in one payload ─────
     //
     // Served whole by GET /api/models-ledger (control/models-ledger.mjs), which
     // resolves EVERY launch gate server-side: whether a baseline may be run,
@@ -367,8 +368,22 @@ export function emptyBoard() {
     // enabled state disagreed with the refusal /api/run/start would actually
     // apply is worse than no button at all.
     //
+    // TWO ROOTINGS OF THE SAME FACTS, because two surfaces ask two questions:
+    //
+    //   models        one row per bench-eligible model, floor hanging off each.
+    //                 What a GATE needs — "may this model start a baseline" has
+    //                 to be answerable for a model that has never run anything.
+    //   baseline_rows one row per MEASURED floor, with the profiles resting on
+    //                 it nested inside and their runs inside those. What the
+    //                 BASELINES card is (dashboard/panels/ledger.js).
+    //   startable     every model on BOTH substrates with its own gate — what
+    //                 the [+ PROFILE] flow's baseline branch offers.
+    //   cloud         the vendor catalogue, the spend ceiling, and whether an
+    //                 API key RESOLVES. Never the key itself: what crosses the
+    //                 wire is {present, source, fingerprint}. See control/cloud.mjs.
+    //
     // NULL MEANS THE GATES COULD NOT BE EVALUATED, which is not the same as
-    // "nothing is allowed" — the panel says so and draws no buttons rather than
+    // "nothing is allowed" — the panel says so and draws no controls rather than
     // drawing ungated ones.
     models_ledger: null,
 

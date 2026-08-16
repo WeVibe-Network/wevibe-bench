@@ -196,12 +196,22 @@ export const STALL_THRESHOLD_S = 900;
  * the parameters, so it is verifiable, reproducible, and testable without a
  * session store.
  */
-export function confirmationToken({ model, arm, org, context }) {
+export function confirmationToken({ model, arm, org, context, kind }) {
   const parts = [
     `model=${model ?? ""}`,
     `arm=${arm ?? ""}`,
     `org=${org ?? ""}`,
     `context=${context ?? "default"}`,
+    // ── THE SUBSTRATE IS PART OF THE FINGERPRINT ────────────────────────────
+    //
+    // `kind` decides whether this cell runs on the resident local model or is
+    // routed to a vendor API that bills for it. That is the largest difference
+    // any single parameter here makes, and the token exists precisely so that a
+    // parameter the operator did not confirm cannot be swapped in after the
+    // preview. Omitted, a token minted for a local cell would be a valid
+    // confirmation for a cloud one carrying the same model id — a run the
+    // operator never saw a restatement for, and one that spends money.
+    `kind=${kind ?? "local"}`,
   ];
   return parts.join("|");
 }
@@ -211,11 +221,18 @@ export function confirmationToken({ model, arm, org, context }) {
  * SERVER composes this so the words the operator reads are the words the server
  * will act on — a client-composed summary can drift from the payload.
  */
-export function restatement({ model, arm, org, context }) {
+export function restatement({ model, arm, org, context, kind, cloud = null }) {
   const armWord = arm === "on" ? "MEMORY ON" : arm === "off" ? "CONTROL" : "UNKNOWN ARM";
+  const isCloud = kind === "cloud";
   return [
     `Start a ${armWord} cell`,
     `subject model: ${model ?? "(none)"}`,
+    // NAMED IN THE OPERATOR'S OWN RESTATEMENT, not left to be inferred from the
+    // model id. The restatement is the last thing read before a run starts, and
+    // "this one is billed" must not be the one fact it omits.
+    isCloud
+      ? `substrate: CLOUD — routed to ${cloud?.provider ?? "a vendor"} via ${cloud?.slug ?? "the router"}, and BILLED`
+      : "substrate: LOCAL — the resident model behind the relay proxy, unbilled",
     `context: ${context ? `${context} tokens` : "registry default (262144)"}`,
     org ? `org: ${org}` : "org: not applicable to a control cell",
   ].join("\n");

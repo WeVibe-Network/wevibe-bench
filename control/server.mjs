@@ -78,8 +78,12 @@ import { TuiMirror } from "./tui.mjs";
 import { readHold, releaseHold } from "./hold.mjs";
 // WHERE A CELL'S MEASUREMENT LANDS. One campaign directory per model — see the
 // module header. Split out so the rule is testable without binding a port.
-import { manifestArgFor } from "./campaign.mjs";
+import { campaignTargetFor } from "./campaign.mjs";
 import { readProfiles, createProfile, activeProfile, attachRun } from "./profiles.mjs";
+// CLOUD BASELINES. The catalogue is a mirror of the harness's own provider
+// block and the key is resolved server-side — see the header of cloud.mjs for
+// why no credential ever crosses the wire in either direction.
+import { readCloud, readCloudKey, resolveCloudModel, CLOUD_API_KEY_ENV } from "./cloud.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -200,15 +204,64 @@ async function validateStart(
   const arm = payload?.arm === "on" || payload?.arm === "off" ? payload.arm : null;
   const org = typeof payload?.org === "string" && payload.org.trim() ? payload.org.trim() : null;
   const context = Number.isFinite(payload?.context) ? Number(payload.context) : null;
+  // THE SUBSTRATE IS DECLARED, NEVER SNIFFED. A model id could in principle be
+  // classified by whether it contains a slash, and that would be a rule the
+  // operator cannot see and the roster could break at any time. `kind` is an
+  // explicit parameter, it defaults to local (every cell before this existed
+  // was local), and anything else is refused by name.
+  const kind = payload?.kind === "cloud" ? "cloud" : payload?.kind === "local" || payload?.kind === undefined || payload?.kind === null ? "local" : String(payload.kind);
 
   if (!run.can_start) {
     return refuse("run_in_flight", run.blocked_reason ?? "a cell is already in flight");
+  }
+  if (kind !== "local" && kind !== "cloud") {
+    return refuse("unknown_kind", `'${kind}' is not a substrate — it is 'local' (the relay proxy) or 'cloud' (a routed vendor API)`);
   }
   if (!arm) {
     return refuse("org_required", "arm must be 'on' (memory) or 'off' (control)");
   }
   if (!model) {
     return refuse("unknown_model", "no model selected");
+  }
+
+  // ── CLOUD TAKES A DIFFERENT ROUTE THROUGH EVERY IDENTITY CHECK ──────────
+  //
+  // and only through the identity checks. A cloud cell is not served by the
+  // local proxy, so the roster lookup below cannot find it and residency,
+  // declared context and the retired-alias list have nothing to say about it.
+  // Everything AFTER this block — the subject rule, the org rule, the baseline
+  // gate, the confirmation token — is substrate-blind by construction and
+  // applies to a cloud cell exactly as written. That is the reason this returns
+  // an `entry` in the roster's shape rather than branching the whole function:
+  // two copies of the baseline gate is how a cloud cell eventually launches
+  // against no floor.
+  if (kind === "cloud") {
+    const cloud = resolveCloudModel(model);
+    if (!cloud.ok) return refuse(cloud.code, cloud.reason);
+
+    // THE KEY IS CHECKED HERE, NOT AT THE VENDOR. Without it the harness spawns,
+    // builds a manifest, reserves spend and dies at the first request — leaving
+    // a half-built campaign directory behind for a fault that was knowable
+    // before anything was written.
+    const key = await readCloudKey({ benchRoot: BENCH_ROOT });
+    if (!key.present) {
+      return refuse("cloud_key_missing", key.reason, { env: CLOUD_API_KEY_ENV });
+    }
+
+    const cloudEntry = {
+      id: cloud.key,
+      upstream_model: cloud.slug,
+      bench_eligible: true,
+      purpose: "wevibe-bench",
+      resident: null,
+      declared_context: cloud.context,
+      max_context: cloud.context,
+      retired_reason: null,
+    };
+    return await finishValidate(
+      { model, arm, org, context, kind, entry: cloudEntry, cloud },
+      { requireConfirm, profile, runsRoot, payload },
+    );
   }
 
   const entry = roster.models.find((m) => m.id === model);
@@ -234,6 +287,31 @@ async function validateStart(
     );
   }
 
+  return await finishValidate(
+    { model, arm, org, context, kind, entry, cloud: null },
+    { requireConfirm, profile, runsRoot, payload },
+  );
+}
+
+/**
+ * EVERY RULE THAT IS BLIND TO THE SUBSTRATE — which is every rule except
+ * identity.
+ *
+ * Split out when cloud baselines landed, and split rather than branched for one
+ * reason: the baseline gate. A cloud cell is a benchmark cell, so an ON cloud
+ * cell needs a scorable floor exactly as an ON local cell does, and a second
+ * copy of that check written for the cloud path is a second place for it to be
+ * forgotten, weakened, or accidentally made conditional. There is one copy and
+ * both substrates fall through it.
+ *
+ * `entry` is the roster row for a local model and a SYNTHESISED row of the same
+ * shape for a cloud one, so the context ceiling below reads one field name
+ * rather than asking which substrate it is looking at.
+ */
+async function finishValidate(
+  { model, arm, org, context, kind, entry, cloud },
+  { requireConfirm, profile, runsRoot, payload },
+) {
   // THE SUBJECT RULE — ON CELLS ONLY. A profile freezes ONE subject model, and
   // an ON cell must be that model: it is scored against the OFF floor, so an ON
   // cell on another model produces a Δ measuring A-vs-B capability rather than
@@ -325,17 +403,17 @@ async function validateStart(
     }
   }
 
-  const expected = confirmationToken({ model, arm, org, context });
+  const expected = confirmationToken({ model, arm, org, context, kind });
   if (requireConfirm && payload?.confirm !== expected) {
     return refuse(
       "bad_confirmation",
       "the confirmation did not match these parameters — they changed after the " +
         "preview was shown. Review the restatement and confirm again.",
-      { expected_token: expected, restatement: restatement({ model, arm, org, context }) },
+      { expected_token: expected, restatement: restatement({ model, arm, org, context, kind, cloud }) },
     );
   }
 
-  return { ok: true, model, arm, org, context, entry };
+  return { ok: true, model, arm, org, context, kind, entry, cloud };
 }
 
 // ── routes ───────────────────────────────────────────────────────────────────
@@ -380,11 +458,34 @@ const server = createServer(async (req, res) => {
         // otherwise imply the other.
         profiles: true,
         profile_enforcement: false,
+        // CLOUD BASELINES. Advertised as a capability of this SERVICE, which is
+        // a different question from whether a cloud cell can start right now —
+        // that needs a key, and the answer lives in /api/cloud beside the
+        // catalogue it applies to. A board that read one for the other would
+        // either hide a working feature or offer an unauthenticated launch.
+        cloud_baselines: true,
         stall_threshold_s: STALL_THRESHOLD_S,
         bench_root: BENCH_ROOT,
         python_present: existsSync(PYTHON),
         run_script_present: existsSync(RUN_SCRIPT),
       });
+      return;
+    }
+
+    // ── GET /api/cloud ───────────────────────────────────────────────────
+    //
+    // The cloud catalogue, the router, the spend ceiling, and WHETHER A KEY
+    // RESOLVES — never the key. What comes back about the credential is
+    // `{present, source, fingerprint}`: enough to tell an operator that a cloud
+    // launch will authenticate and where the key came from, and worth nothing
+    // to anyone who reads it off the wire.
+    //
+    // GET ONLY, and there is deliberately no companion POST. A route that
+    // accepted a key would put a live credential in a browser, in a request
+    // body, and in the browser's autofill store — to configure a file that sits
+    // beside this service on the same disk.
+    if (path === "/api/cloud" && req.method === "GET") {
+      sendJson(res, 200, await readCloud({ benchRoot: BENCH_ROOT }));
       return;
     }
 
@@ -449,7 +550,7 @@ const server = createServer(async (req, res) => {
     // ── GET /api/profiles ────────────────────────────────────────────────
     // The frozen memory profiles. `active` is the newest; `prior` are the
     // earlier ones, measured under a different allowlist. No board panel draws
-    // `prior` today — the RUN LEDGER lists every profile under its subject
+    // `prior` today — the BASELINES card lists every profile under the baseline it measures against
     // model — but the split is served because it is the fact a curve overlay
     // would need, and it costs nothing to keep stated.
     if (path === "/api/profiles" && req.method === "GET") {
@@ -509,6 +610,38 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // ── POST /api/profiles/pin-log ───────────────────────────────────────
+    // Durable record of the client-side subject-model pin event: the pin in
+    // the run-start panel overwrote the operator's chosen model and disarmed
+    // the run. `disarm()` is purely local — no network, no trace — so without
+    // this endpoint the failure is silent and undiagnosable. One line per
+    // event, appended to the runs root so it survives wipes.
+    //
+    // BEST-EFFORT BY DESIGN: missing fields log as "-"; only an unparseable
+    // body refuses. The parse is wrapped so a malformed client can never
+    // crash the control plane.
+    if (path === "/api/profiles/pin-log" && req.method === "POST") {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || "{}");
+      } catch {
+        sendJson(res, 400, { ok: false, error: "bad_body" });
+        return;
+      }
+      const line =
+        `${new Date().toISOString()} profile_pin` +
+        ` arm=${payload?.arm ?? "-"} from=${payload?.from ?? "-"} to=${payload?.to ?? "-"}` +
+        " — subject-model pin overwrote the chosen model and disarmed the run\n";
+      const fh = await open(join(RUNS_ROOT, "profile-pin.log"), "a");
+      try {
+        await fh.appendFile(line);
+      } finally {
+        await fh.close().catch(() => {});
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     // ── POST /api/run/preview ────────────────────────────────────────────
     // The restatement the UI must show before START. The SERVER composes it so
     // the words the operator reads are the words the server will act on.
@@ -541,11 +674,18 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const { model, arm, org, context } = check;
+      const { model, arm, org, context, kind, cloud } = check;
       sendJson(res, 200, {
         ok: true,
-        token: confirmationToken({ model, arm, org, context }),
-        restatement: restatement({ model, arm, org, context }),
+        token: confirmationToken({ model, arm, org, context, kind }),
+        restatement: restatement({ model, arm, org, context, kind, cloud }),
+        // What the operator is committing to, in machine form beside the prose.
+        // The confirmation card states the substrate and — for a cloud cell —
+        // the vendor and the per-cell spend ceiling, and it must state the same
+        // ones the token was minted for rather than the ones the form still has
+        // on screen.
+        kind,
+        cloud: cloud ? { provider: cloud.provider, model: cloud.model, slug: cloud.slug, name: cloud.name } : null,
         // Stated so the UI can show the operator that the serial rule will
         // block this run, WITHOUT pretending the parameters are invalid.
         blocked_now: run.can_start === true ? null : (run.blocked_reason ?? "a cell is already in flight"),
@@ -587,18 +727,38 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const { model, arm, org, context } = check;
+      const { model, arm, org, context, kind, cloud } = check;
 
       // ARGV ARRAY, NO SHELL. Main-parser flags MUST precede the subcommand —
       // argparse exits 2 otherwise (verified 2026-08-10). This ordering is the
       // documented RUNBOOK invocation, reproduced exactly.
-      const argv = [RUN_SCRIPT, "--model", model];
+      //
+      // ── THE CLOUD INVOCATION IS THE HARNESS'S OWN, NOT A NEW ONE ──────────
+      //
+      // `--cloud --provider <vendor> --model <model>` is exactly what
+      // `_compose_cloud_slug` in run_cumulative.py consumes: it joins them into
+      // `{router}/{provider}/{model}` and refuses anything absent from the
+      // OrcaRouter provider block. `--model` therefore carries the MODEL HALF of
+      // the key on this path, not the whole key — passing `anthropic/claude-…`
+      // to `--model` would compose `orcarouter/anthropic/anthropic/claude-…`
+      // and be refused by the harness with a message about a model that is not
+      // the one the operator picked.
+      const argv = [RUN_SCRIPT];
+      if (kind === "cloud") {
+        argv.push("--cloud", "--provider", cloud.provider, "--model", cloud.model);
+      } else {
+        argv.push("--model", model);
+      }
       if (org) argv.push("--org", org);
       // A cell writes to ITS MODEL'S campaign, not to whichever campaign the
       // default path happens to hold. Omitted when the default is already this
       // model's, so the live campaign's invocation is unchanged.
-      const manifestArg = await manifestArgFor(model, RUNS_ROOT);
-      if (manifestArg) argv.push("--manifest", manifestArg);
+      //
+      // The target is resolved BEFORE the spawn because it is also the join key
+      // recorded in the attribution below — which directory and which cell
+      // inside it this launch is about to write. Afterwards it is unknowable.
+      const target = await campaignTargetFor(model, RUNS_ROOT);
+      if (target.manifest_arg) argv.push("--manifest", target.manifest_arg);
       argv.push("run", "--until-review", "--mode", arm);
 
       const stamp = new Date()
@@ -649,6 +809,7 @@ const server = createServer(async (req, res) => {
         arm,
         org,
         context,
+        kind,
         started_at: Date.now(),
         log_path: logPath,
       };
@@ -675,6 +836,17 @@ const server = createServer(async (req, res) => {
             model,
             org,
             context,
+            kind,
+            // ── THE JOIN KEY ────────────────────────────────────────────
+            //
+            // Which campaign directory this cell writes to, and which slot in
+            // its schedule it is. Recorded here because HERE IS THE ONLY PLACE
+            // THEY ARE KNOWN: after the spawn, a directory holding four cells
+            // cannot say which of them a given log produced, which is why every
+            // measurement column on every profile row has been null since the
+            // ledger shipped.
+            run_dir: target.run_dir,
+            sequence_index: target.sequence_index,
             pid: child.pid,
             started_at: launcher.started_at,
           });
@@ -700,8 +872,15 @@ const server = createServer(async (req, res) => {
         arm,
         org,
         context,
+        kind,
+        cloud: cloud ? { provider: cloud.provider, model: cloud.model, slug: cloud.slug } : null,
+        // Where this cell will land, echoed back. The operator can check it
+        // against the row that appears on the board a tick later, and a
+        // mismatch is then visible rather than being a silent misattribution.
+        run_dir: target.run_dir,
+        sequence_index: target.sequence_index,
         attribution,
-        restatement: restatement({ model, arm, org, context }),
+        restatement: restatement({ model, arm, org, context, kind, cloud }),
       });
       return;
     }
@@ -916,6 +1095,11 @@ const server = createServer(async (req, res) => {
         benchModels: roster.ok ? (roster.bench_models ?? []) : [],
         runInFlight: runState.can_start !== true,
         blockedReason: runState.blocked_reason,
+        // THE CLOUD HALF OF THE MODEL UNIVERSE. Passed in rather than read
+        // inside the ledger so this route owns every I/O boundary it crosses,
+        // and so the ledger stays a pure assembly over what it is handed —
+        // which is what makes it testable against a fixture directory.
+        cloud: await readCloud({ benchRoot: BENCH_ROOT }),
       });
       // The roster is the model universe; without it there are no rows to
       // draw, and saying so is not the same as saying "no models exist".

@@ -383,7 +383,7 @@ a:hover{color:var(--type)}
    §8.1 measurement; the rewrite had flattened every panel to a 4px box with
    box-shadow:none, which read as a wireframe rather than a raised surface. */
 .curve,.wall,.ledger,.live,.hold,.rail{background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-xl);padding:var(--pad);display:flex;flex-direction:column;gap:12px;min-width:0}
-.curve-frame,.curve-foot,.hold-line,.hold-diag,.modal-title,.tui-head,.tui-foot,.ledger-head,.ledger-cols,.ledger-row,.axis,.big,.prov,.live-spine,.feed-head,.stages{font-family:var(--font)}
+.curve-frame,.curve-foot,.hold-line,.hold-diag,.tui-head,.tui-foot,.ledger-head,.ledger-cols,.ledger-row,.axis,.big,.prov,.live-spine,.feed-head,.stages{font-family:var(--font)}
 .curve-frame{padding:22px;border:1px solid var(--border);border-radius:var(--radius-md);background:linear-gradient(180deg,color-mix(in srgb,var(--bg-2) 85%, transparent),var(--bg-2))}
 .curve-svg{overflow:visible}
 .c-axis,.c-legend,.c-note,.c-base-lbl,.c-annot,.c-val,.c-delta,.c-gate,.c-corpus{fill:var(--dim);font-size:11px}
@@ -391,7 +391,7 @@ a:hover{color:var(--type)}
 .c-pt{fill:var(--fg);stroke:var(--fg);stroke-width:2}
 .c-pt.worse{fill:var(--bg-2);stroke:var(--danger)}
 .c-delta.bad,.c-gate.bad{fill:var(--danger)}
-.ledger-head,.ledger-cols,.ledger-row,.axes,.axis,.prov,.feed-head,.tui-bar,.tui-head,.tui-foot,.modal-actions,.confirm-actions{display:flex;align-items:center;gap:12px;min-width:0}
+.ledger-head,.ledger-cols,.ledger-row,.axes,.axis,.prov,.feed-head,.tui-bar,.tui-head,.tui-foot,.confirm-actions{display:flex;align-items:center;gap:12px;min-width:0}
 .ledger-cols,.ledger-row{display:grid;grid-template-columns:var(--ledger-cols);gap:12px;align-items:center}
 .ledger-cols{font:700 10px var(--font);letter-spacing:.16em;color:var(--dim);padding-bottom:8px;border-bottom:1px solid var(--hairline)}
 .ledger-row{padding:10px 0;border-bottom:1px solid color-mix(in srgb, var(--fg) 8%, transparent)}
@@ -404,7 +404,7 @@ a:hover{color:var(--type)}
 .hold.lan,.hold.dead{border-color:var(--danger)}
 .hold-url,.hold-actions,.hold-diag{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .muted-box{padding:8px 10px;border:1px solid var(--danger);border-radius:var(--radius-sm)}
-.profile-modal .debt{margin-top:2px}
+
 .mrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer}
 .mrow.on{border-color:var(--fg);background:color-mix(in srgb, var(--fg) 8%, transparent)}
 /* The subject row carries a fourth cell (the SUBJECT tag). The model id keeps
@@ -412,7 +412,7 @@ a:hover{color:var(--type)}
    ("memory count unobserved") is the part that can afford to truncate. */
 .mrow.subj{grid-template-columns:24px minmax(0,1.4fr) auto minmax(0,1fr)}
 .mrow .mid{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mrow.radio{cursor:pointer}
+
 .subjtag{font:700 9.5px var(--font);letter-spacing:.16em;color:var(--bg);background:var(--accent);border-radius:var(--radius-pill);padding:2px 8px;white-space:nowrap}
 
 /* ── PROFILE: THE TWO FROZEN AXES ────────────────────────────────────────
@@ -440,13 +440,13 @@ a:hover{color:var(--type)}
 .xfer-dir.settled{color:var(--accent)}
 .xfer-dir.unranked{color:var(--dim)}
 
-/* The creation modal's three numbered sections. */
-.pick-sec{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid var(--hairline)}
-.pick-sec:last-child{border-bottom:0}
-.pick-rows{display:flex;flex-direction:column;gap:5px}
-.ackrow{display:flex;gap:10px;align-items:flex-start}
-.ackbox{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid var(--border-strong);border-radius:4px}
-.ackbox.on{background:var(--fg);color:var(--bg)}
+/* THE OLD CREATION MODAL'S SECTIONS ARE GONE (.pick-sec/.pick-rows/.ackrow/
+   .ackbox). It asked both frozen facts on one tall form with an acknowledgement
+   checkbox at the foot; that is now the three PROFILE frames of the [+ PROFILE]
+   flow, whose rules are `.cframe`/`.c*` above. The rules are deleted rather than
+   left in place because dead CSS is indistinguishable from live CSS to the next
+   reader, and this stylesheet has already lost 78 definitions once to an edit
+   made without knowing which were load-bearing. */
 
 /* THE FREEZE REFUSAL. Rendered where the click happened, because a refusal the
    operator cannot see is a swallowed error no matter where it was logged. The
@@ -468,20 +468,84 @@ a:hover{color:var(--type)}
 .modal-scrim{position:fixed;inset:0;background:rgba(2,16,10,.82);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:24px;z-index:100}
 .modal{width:min(920px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:var(--radius-xl);padding:var(--pad);box-shadow:var(--shadow-term);display:flex;flex-direction:column;gap:12px}
 
-/* ── BASELINE CONFIRM (+ baseline) ─────────────────────────────────────────
-   NARROWER THAN .modal. It carries one question and two buttons; at 920px the
-   sentence spans the screen and the two controls drift far apart, which reads
-   as a form rather than as a decision. The question is the whole dialog. */
-.bmodal{width:min(560px,calc(100vw - 48px))}
-.bm-body{font-size:15px;line-height:1.5;color:var(--fg)}
-/* The consequences are stated at lower emphasis than the question but are NOT
-   hidden behind a hover or a disclosure — an operator committing hours needs to
-   read them without asking. */
-.bm-note{font-size:12px;line-height:1.55;color:var(--fg-dim)}
-/* CONTINUE FIRST, and the destructive-weight control is the one that acts.
-   BACK is deliberately the quieter of the two: dismissing costs nothing, so it
-   must not compete visually with the choice that spends hours. */
-.bm-btns{display:flex;gap:10px;align-items:center;margin-top:4px}
+/* ── THE [+ PROFILE] FLOW ──────────────────────────────────────────────────
+   One chooser, then three steps on either branch. ONE FRAME ON SCREEN AT A
+   TIME — the design sheet lays all eight side by side because it is a specimen
+   of the sequence, not a specimen of the dialog.
+
+   NARROWER THAN .modal, and fixed-height. At 920px a five-line question spans
+   the screen and the two controls drift to opposite corners, which reads as a
+   form rather than as a step. The min-height is what stops the footer jumping
+   as frames of different lengths replace each other: a BACK button that moves
+   between clicks gets misclicked, and on this flow a misclick costs the
+   operator their place in a three-step sequence. */
+.cmodal{width:min(620px,calc(100vw - 48px));padding:0}
+.cframe{display:flex;flex-direction:column;gap:11px;padding:var(--pad);min-height:420px}
+.chead{display:flex;align-items:baseline;gap:9px}
+/* The step label is the operator's position in the sequence. It is the
+   brightest thing in the header for that reason — "which of three am I on" is
+   the question a multi-step dialog most often fails to answer. */
+.cstep{font:700 10px var(--font);letter-spacing:.16em;color:var(--type)}
+.cframe.final .cstep{color:var(--check)}
+.cbranch{font:400 11px var(--font);color:var(--dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cclose{font:400 11px var(--font);color:var(--dim);background:none;border:none;cursor:pointer;padding:2px 4px}
+.cclose:hover{color:var(--fg)}
+.ctitle{font:700 14px/1.35 var(--font);color:var(--type)}
+.cbody{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0}
+.cnote{font:400 11.5px/1.5 var(--font);color:var(--dim)}
+.cframe.final{border-top:2px solid var(--check)}
+
+/* ONE SELECTABLE LINE, and the four states are distinguished by BORDER STYLE
+   as well as colour, so the flow is usable in greyscale and by a viewer with
+   colour vision deficiency — the same rule the arm vocabulary follows. */
+.cline{display:flex;align-items:baseline;gap:9px;border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;min-width:0}
+.cline.off{cursor:pointer}
+.cline.off:hover{border-color:var(--border-strong);background:color-mix(in srgb, var(--fg) 4%, transparent)}
+.cline.on{border-color:var(--check);background:var(--bg-2);cursor:pointer}
+/* DEAD IS DIM AND UNHOVERABLE — it must not read as a control awaiting a click.
+   Its `meta` line carries the refusal, which is why the line is kept at all
+   rather than being hidden: the reason is the thing the operator needs. */
+.cline.dead{border-color:var(--hairline);color:var(--dim);cursor:not-allowed}
+.cline.ghost{border-style:dashed;border-color:var(--border)}
+.cglyph{flex:none;font:400 11.5px var(--font);color:var(--dim);width:12px}
+.cline.on .cglyph{color:var(--check)}
+.cline.dead .cglyph{color:var(--hairline)}
+.ctext{flex:1;display:flex;flex-direction:column;gap:1px;min-width:0}
+.ct{font:400 12.5px/1.35 var(--font);color:var(--fg);overflow-wrap:anywhere}
+.cline.dead .ct{color:var(--dim)}
+.cm{font:400 10.5px/1.4 var(--font);color:var(--dim);overflow-wrap:anywhere}
+
+/* THE MODEL LIST SCROLLS, THE FRAME DOES NOT. A dialog whose own height tracks
+   its longest list makes the footer controls move between steps. */
+.clist{display:flex;flex-direction:column;gap:5px;max-height:230px;overflow-y:auto;overscroll-behavior:contain;min-width:0}
+.cfilters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.csearch,.cprov{font:400 12px var(--font);color:var(--fg);background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:6px 9px}
+.csearch{flex:1;min-width:140px}
+.cshown{font:400 10.5px var(--font);color:var(--dim);white-space:nowrap}
+
+/* THE KEY REPORT. Bordered like a statement, never like a field — there is no
+   input here and the block exists partly to make that obvious. */
+.ckey{display:flex;flex-direction:column;gap:3px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:8px 10px;margin-top:4px}
+.ckey.on{border-color:var(--check)}
+.ckey.bad{border-color:var(--danger)}
+.ckey-head{font:700 10px var(--font);letter-spacing:.14em;color:var(--fg)}
+.ckey.bad .ckey-head{color:var(--danger)}
+.ckey-body{font:400 11.5px/1.45 var(--font);color:var(--fg);overflow-wrap:anywhere}
+.ckey-note{font:400 10.5px/1.45 var(--font);color:var(--dim)}
+
+.cdebt{font:400 11.5px/1.55 var(--font);color:var(--fg)}
+
+/* THE FOOTER. BACK left, CTA right, and the CTA is the only filled control on
+   the frame — dismissing or retreating costs nothing, so neither may compete
+   visually with the choice that spends hours or freezes a file forever. */
+.cfoot{display:flex;align-items:center;gap:10px;padding-top:10px;border-top:1px solid var(--hairline)}
+.cback{font:400 11px var(--font);color:var(--dim);background:none;border:none;cursor:pointer;padding:4px 2px}
+.cback:hover{color:var(--fg)}
+.cta{font:700 10.5px var(--font);letter-spacing:.12em;color:var(--bg);background:var(--fg);border:1px solid var(--fg);border-radius:var(--radius-sm);padding:7px 12px;cursor:pointer}
+.cta.final{background:var(--check);border-color:var(--check);box-shadow:0 0 18px var(--glow)}
+/* DISABLED IS UNFILLED AND DASHED — it must not read as a button awaiting a
+   click, and the frame's own note says what it is waiting for. */
+.cta:disabled{background:transparent;color:var(--dim);border:1px dashed var(--border-strong);box-shadow:none;cursor:not-allowed}
 
 /* ── RUN CONTROL, RAISED ON ITS OWN ────────────────────────────────────────
    The run control used to render ONLY inside the profile inspector, so the
@@ -491,6 +555,11 @@ a:hover{color:var(--type)}
    refusal to read. Narrow, because it is one decision. */
 .rmodal{width:min(640px,calc(100vw - 48px))}
 .rmodal-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px;padding-top:10px;border-top:1px solid var(--hairline)}
+/* A CLOUD CELL IS BILLED, AND THE CONTROL THAT STARTS IT SAYS SO. Ruled top and
+   bottom like the debt badge so it survives greyscale — this is the one fact on
+   the run control that costs money if it goes unread, and it is not the same
+   class of thing as a refusal, so it is not drawn in the failure hue. */
+.rcloud{padding:8px 0;border-top:2px solid var(--link);border-bottom:2px solid var(--link);font:700 11px/1.5 var(--font);letter-spacing:.04em;color:var(--link)}
 
 /* ── THE PROFILE INSPECTOR IS GONE ─────────────────────────────────────────
    It was a 1360px modal that described ONE profile — `board.profile`, the
@@ -655,61 +724,100 @@ a:hover{color:var(--type)}
 .big{flex-direction:row;gap:26px;align-items:baseline;flex-wrap:wrap;font:700 var(--fs-metric)/1.1 var(--font);color:var(--type)}
 .big .null,.big .muted{font:400 14px var(--font)}
 
-/* ── THE MODEL LEDGER ─────────────────────────────────────────────────────
-   Model name leftmost, launch buttons rightmost, profiles in an accordion.
+/* ── THE BASELINES CARD ───────────────────────────────────────────────────
+   One row per measured floor; profiles nested inside it; runs inside those.
 
-   These names are `l*`/`p*` rather than `m*` because `.mrow` is ALREADY the
-   profile modal's model picker (a 24px/1fr/auto grid, above). Reusing it here
-   would have made two unrelated surfaces share one rule, and a later edit to
-   either would silently deform the other. */
-.lrow-wrap{display:flex;flex-direction:column;gap:0;border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden}
-.lrow-wrap+.lrow-wrap{margin-top:8px}
-.lrow-wrap.open{border-color:var(--fg)}
-/* The row is the click target for the accordion, so it gets the pointer and a
+   THE INDENT IS THE ARGUMENT, so it is drawn with RULES rather than padding:
+   each level carries a left border, which is what makes "this profile belongs
+   to that baseline" survive a screenshot, a scroll, and greyscale. Padding
+   alone reads as a layout preference and can be mistaken for one.
+
+   These names are `bl*`/`p*`/`r*` rather than `m*` because `.mrow` is ALREADY
+   the memory-roster picker (a 24px/1fr/auto grid, above). Reusing it here would
+   have made two unrelated surfaces share one rule, and a later edit to either
+   would silently deform the other. */
+
+/* SEVEN COLUMNS, shared by the header and every baseline row so they cannot
+   drift. Lifted from the design specimen: 26 / 210 / 74 / 1fr / 84 / 84 / 128. */
+.blcols,.blrow{display:grid;grid-template-columns:26px minmax(0,210px) 74px minmax(0,1fr) 84px 84px 128px;gap:10px;align-items:baseline;min-width:0}
+.blcols{font:700 10px/1 var(--font);letter-spacing:.14em;color:var(--dim);padding:9px 4px;border-bottom:1px solid var(--hairline)}
+.blcols>span,.blrow>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bl .ledger-head{align-items:center}
+/* THE SUBTITLE IS ONE LINE AND ELLIPSIZES. Wrapped, it pushes the count, the
+   serial chip and [+ PROFILE] onto a second row and the header stops reading as
+   a header — the same rule `.phead .sub` already applies for the same reason. */
+.bl .ledger-head .sub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The count sits next to the title, not in the rows: "how much has this bench
+   measured" is a property of the card. */
+.blcount{font:400 12px var(--font);color:var(--fg);white-space:nowrap}
+.blnew{white-space:nowrap}
+
+.blwrap{border-bottom:1px solid var(--hairline);min-width:0}
+.blwrap.open{background:var(--bg-2);border-bottom-color:var(--fg)}
+/* A RUNNING BASELINE SITS ON THE RAISED SURFACE while its peers sit on the
+   canvas — the same device the pinned floor uses. It is doing something; the
+   others have finished. No animation: a stopped board must never imply motion,
+   and a pulse here would be indistinguishable from one on a dead cell. */
+.blwrap.running{background:var(--bg-2)}
+/* The row is the click target for its contents, so it gets the pointer and a
    hover — a control that expands must look like one. */
-.lrow{display:flex;align-items:center;gap:12px;padding:11px 13px;cursor:pointer;min-width:0;background:var(--bg-2)}
-.lrow:hover{background:color-mix(in srgb, var(--fg) 5%, var(--bg-2))}
-.lrow-wrap.open .lrow{background:var(--bg);border-bottom:1px solid var(--hairline)}
-.lcaret{color:var(--dim);font-size:11px;width:10px;flex:none}
-/* THE MODEL NAME IS THE ANCHOR of the row: it is the only thing at full
-   contrast and full weight, so a four-row ledger scans by model. */
-.lname{font:700 13px/1.3 var(--font);color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.lprof{font:400 11.5px var(--font);color:var(--dim);white-space:nowrap}
-/* THE REFUSAL, printed under the row it belongs to. Never hidden behind a
-   tooltip: a disabled button with no visible cause is the fastest way to
-   waste an operator's time. */
-.lwhy{display:flex;flex-direction:column;gap:3px;padding:0 13px 10px 35px;font:400 11.5px/1.5 var(--font)}
-.lrow-wrap.open .lwhy{padding-top:9px}
+.blrow{padding:10px 4px;cursor:pointer;font:400 12.5px/1.35 var(--font);color:var(--fg)}
+.blrow:hover{background:color-mix(in srgb, var(--fg) 5%, transparent)}
+.blcaret{color:var(--dim);font-size:11px}
+/* THE BASELINE ID IS THE ANCHOR of the row: full contrast, full weight, so a
+   six-row card scans by floor. */
+.blid{font-weight:700;color:var(--type)}
+.blkind{font:700 10.5px var(--font);letter-spacing:.1em;color:var(--fg)}
+/* CLOUD IS THE ONLY OFF-PALETTE MARK ON THIS ROW, and it is not --danger: a
+   cloud baseline is not a fault, it is a different substrate, and colouring it
+   with the failure hue would read as one. */
+.blkind.cloud{color:var(--link)}
+.blmodel{color:var(--fg)}
+.blstate{font:700 10.5px var(--font);letter-spacing:.12em;color:var(--fg)}
+.blstate.running{color:var(--type)}
+.blstate.void{color:var(--danger)}
+/* THE VOID REASON, printed under the row it belongs to. Never a tooltip: a void
+   floor's numbers look ordinary, so the sentence explaining them has to be on
+   screen beside them. */
+.blwhy{padding:0 4px 10px 36px;font:400 11.5px/1.5 var(--font)}
+/* THE TWO SENTENCES THAT ARGUE THE NESTING. Side by side at equal weight,
+   because they are two halves of one claim. */
+.blnest{display:flex;gap:22px;flex-wrap:wrap;padding:11px 4px;border-bottom:1px solid var(--border-strong);font:400 11.5px/1.5 var(--font);color:var(--dim)}
+.blnest>span{flex:1 1 300px;min-width:0}
 
-/* THE ACCORDION. */
-.lacc{padding:11px 13px 13px;background:var(--bg);display:flex;flex-direction:column;gap:7px;min-width:0}
-/* TEN COLUMNS, shared by the header and every row so they cannot drift.
-   Δ VS BASELINE is widest after the name — it is the reason the row exists. */
-.pcols,.prow{display:grid;grid-template-columns:minmax(0,1.6fr) 62px 52px 68px 62px 62px 68px 66px minmax(84px,1fr) auto;gap:10px;align-items:center;min-width:0}
-/* LEAN — the shape used while no cell can be attributed to a profile. Four
-   columns instead of ten, so what IS known gets room to be read rather than
-   eight tracks of `unobserved` overflowing each other. */
-.pcols.lean,.prow.lean{grid-template-columns:minmax(0,2fr) 120px minmax(0,1fr) auto}
-/* NO CELL MAY BLEED INTO ITS NEIGHBOUR. `unobserved` is wider than the 52px
-   TURNS track that holds it; without this the text overran the next column and
-   the row read as one squashed sentence. Identity and prose truncate; they are
+/* LEVEL 2 — the profiles under a baseline. */
+.blacc{padding:2px 0 12px 42px;border-left:1px solid var(--border-strong);margin-left:12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+/* SIX COLUMNS. The specimen's 26 / 186 / 1fr / 96 / 128, plus a trailing track
+   for [+ run] — the design sheet shows no control because it is a specimen of
+   the layout, and the runs it describes have to start somewhere. */
+.pcols,.prow{display:grid;grid-template-columns:26px minmax(0,186px) minmax(0,1fr) 96px 128px auto;gap:10px;align-items:baseline;min-width:0}
+.pcols{font:700 10px/1 var(--font);letter-spacing:.14em;color:var(--dim);padding:0 8px 6px;border-bottom:1px solid var(--hairline)}
+/* NO CELL MAY BLEED INTO ITS NEIGHBOUR. `no measured run` is wider than the
+   track that holds it; without this the text overran the next column and the
+   row read as one squashed sentence. Identity and prose truncate; they are
    never the numbers, which have their own tracks and always fit. */
-.prow>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pcols>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.pcols{font:600 9.5px/1 var(--font);letter-spacing:.09em;color:var(--dim);padding:0 8px 6px;border-bottom:1px solid var(--hairline)}
-/* CLAMPED, NOT PRE-ALLOCATED: the well is sized to the rows that exist, up to
-   ten, and only then scrolls. A fixed height would reserve empty space on a
-   ledger with one profile and imply nine more are missing. */
-.pscroll{display:flex;flex-direction:column;gap:2px;max-height:calc(var(--clamp) * 34px);overflow-y:auto;overscroll-behavior:contain}
-/* THE ROW IS A CONTROL: it opens the frozen policy below. Pointer + hover, the
-   same grammar the model row above it uses. */
-.prow{padding:7px 8px;border-radius:var(--radius-sm);font:400 11.5px/1.35 var(--font);color:var(--type);cursor:pointer}
-.prow:hover{background:var(--bg-2)}
-.prow.open{background:var(--bg-2)}
-.pname{font-weight:600;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pcaret{color:var(--dim);font-size:10px;margin-right:6px}
+.prow>span,.pcols>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prow{padding:8px;border-radius:var(--radius-sm);font:400 12.5px/1.35 var(--font);color:var(--fg);cursor:pointer}
+.prow:hover{background:color-mix(in srgb, var(--fg) 6%, transparent)}
+.prow-wrap{min-width:0}
+.prow-wrap.open .prow{background:var(--bg)}
+.pname{font-weight:600;color:var(--type);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.psrc{color:var(--dim)}
+.pcaret{color:var(--dim);font-size:10px}
+.pbest{font:700 10.5px var(--font);letter-spacing:.12em}
 .pact{display:flex;justify-content:flex-end}
 .pwhy{padding:0 8px 6px 8px;font:400 11px/1.5 var(--font)}
+/* The profile's own expansion: the frozen policy, then the runs. */
+.pbody{padding:4px 0 10px 14px;border-left:1px solid var(--hairline);margin-left:12px;display:flex;flex-direction:column;gap:12px;min-width:0}
+
+/* LEVEL 3 — the runs under a profile. */
+.rsec{display:flex;flex-direction:column;gap:6px;min-width:0}
+.rcols,.rrow{display:grid;grid-template-columns:26px 100px 108px minmax(0,1fr) 96px minmax(128px,auto);gap:10px;align-items:baseline;min-width:0}
+.rcols{font:700 10px/1 var(--font);letter-spacing:.14em;color:var(--dim);padding-bottom:5px;border-bottom:1px solid var(--hairline)}
+.rrow{padding:6px 0;font:400 12px var(--font);color:var(--dim);border-bottom:1px solid var(--hairline)}
+.rcols>span,.rrow>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rseq{color:var(--fg)}
+.rdetail{color:var(--dim)}
 /* ── THE FROZEN POLICY DRAWER ─────────────────────────────────────────────
    What the MEMORY PROFILE card and its inspector modal used to show, opened
    under the profile row it belongs to. It is INSET — a left rule and its own
@@ -865,11 +973,11 @@ a:hover{color:var(--type)}
 .state{font-weight:700;letter-spacing:.1em}
 .fail{color:var(--danger);font-family:var(--font)}
 
-/* ── MEMORY PROFILE ───────────────────────────────────────────────────────*/
-.modal-head{display:flex;flex-direction:column;gap:5px;padding-bottom:12px;border-bottom:1px solid var(--hairline)}
-.modal-title{font:700 17px var(--font);color:var(--type)}
-.modal-body{display:flex;flex-direction:column;gap:5px;max-height:352px;overflow-y:auto;min-height:0}
-.modal-foot{display:flex;flex-direction:column;gap:9px;padding-top:12px;border-top:1px solid var(--hairline)}
+/* ── THE MEMORY ROSTER ROW ────────────────────────────────────────────────
+   `.mrow` is shared by the frozen-policy drawer's roster (read-only) and
+   nothing else now: the creation modal's picker moved into the [+ PROFILE]
+   flow, which draws its own `.cline`. The modal chrome that used to wrap it
+   (.modal-head/.modal-title/.modal-body/.modal-foot) went with it. */
 .mcheck{font-weight:700;text-align:center;color:var(--type)}
 .mid{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .mnote{font-size:11.5px;color:var(--fg);flex:none}

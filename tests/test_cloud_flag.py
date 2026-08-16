@@ -207,7 +207,15 @@ def test_cloud_config_uses_env_ref_not_literal() -> None:
     assert provider["options"]["apiKey"] == "{env:ORCAROUTER_API_KEY}"
     assert provider["options"]["baseURL"] == "https://api.orcarouter.ai/v1"
     assert config["model"] == CLOUD_MODEL_SLUG
-    assert len(provider["models"]) == 5
+    # THE MODEL UNDER TEST MUST BE IN THE BLOCK IT IS ROUTED THROUGH — that is
+    # what makes this config usable at all. The COUNT is deliberately not pinned:
+    # it was `== 5` when the block was hand-written, and the number is a property
+    # of the vendor's catalogue rather than of this code, so pinning it turns
+    # every catalogue refresh into a failure that says nothing about the thing
+    # this test exists to check. The two sides of the block ARE pinned to each
+    # other, by the drift test in control/control.test.mjs.
+    assert provider["models"], "the orcarouter provider block lists no models"
+    assert CLOUD_MODEL_SLUG.split("/", 1)[1] in provider["models"]
     assert "sk-orca" not in json.dumps(config)
 
 

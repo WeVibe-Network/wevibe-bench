@@ -492,6 +492,57 @@ WORKER_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 # Cloud routing (--cloud): OrcaRouter provider block for worker opencode config
 # ---------------------------------------------------------------------------
+#
+# THIS BLOCK IS NOT A CATALOGUE. It is the list of models the harness will
+# ACCEPT: `_compose_cloud_slug` in scripts/run_cumulative.py exits 2 for any
+# `{provider}/{model}` key absent from it, and the board's model picker is
+# generated from it. Every entry is therefore a CLAIM that a benchmark cell can
+# run on that model — and on the cloud branch a wrong claim costs money, not
+# just time.
+#
+# ── PROVENANCE ─────────────────────────────────────────────────────────────
+#
+# Derived from OrcaRouter's own pricing catalogue,
+# https://www.orcarouter.ai/api/pricing — the same endpoint this repo already
+# pins by version hash (ORCAROUTER_PRICING_VERSION_PIN in
+# adapters/openrouter_proxy.py), so it is not a new source of truth. 189 models
+# were published; 87 are listed here.
+#
+# ── WHAT THE OTHER 102 ARE, AND WHY THEY ARE NOT HERE ──────────────────────
+#
+#   no tool calling   the bench drives an agentic build through opencode tool
+#                     calls. A model without them cannot take one turn of this
+#                     task — it fails at the first step, having been offered.
+#   not text output   image, video and speech models (kling, imagen, gpt-image,
+#                     tts-1). They cannot produce a repository.
+#   wrong endpoint    the proxy posts to /v1/chat/completions; a model reachable
+#                     only through another endpoint shape is not reachable here.
+#   context < 262144  the LOCAL bench aliases are pinned at 262144
+#                     (WORKER_MODEL_REGISTRY above). A cloud model with a
+#                     smaller window would be measured under a tighter budget
+#                     than the models it is compared against — a confound that
+#                     presents as a capability difference and is invisible in
+#                     the result.
+#
+# ── `output` IS LOAD-BEARING, NOT METADATA ─────────────────────────────────
+#
+# It is the vendor's stated `max_completion_tokens` where one is published, and
+# 65536 for the 14 models that publish none (the value the hand-written block
+# already used for exactly that case). Setting it BELOW what a model can emit
+# truncates a response, and this bench classifies a provider-side truncation as
+# a VOID INSTRUMENT — a cell that runs for hours and produces numbers measuring
+# the harness rather than the model.
+#
+# ── MIRRORED IN control/cloud.mjs ──────────────────────────────────────────
+#
+# The control plane is JS and cannot import this. The two are pinned against
+# each other — keys, count, context AND output — by a drift test in
+# control/control.test.mjs, so a model added on one side and not the other fails
+# a test rather than reaching an operator as "that model does not exist".
+#
+# `options.reasoningEffort` is set on ONE model and is an operator choice about
+# how much thinking the subject may spend. It is deliberately not invented for
+# the rest: unset takes the provider default, the only neutral value available.
 
 DEFAULT_CLOUD_ROUTER = "orcarouter"
 
@@ -506,6 +557,34 @@ CLOUD_ORCAROUTER_PROVIDER: dict = {
         "timeout": 900000,
     },
     "models": {
+        "anthropic/claude-fable-5": {
+            "name": "Claude Fable 5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 128000},
+        },
+        "anthropic/claude-opus-4.6": {
+            "name": "Claude Opus 4.6",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 128000},
+        },
+        "anthropic/claude-opus-4.7": {
+            "name": "Claude Opus 4.7",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 128000},
+        },
+        "anthropic/claude-opus-4.8": {
+            "name": "Claude Opus 4.8",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 128000},
+        },
         "anthropic/claude-opus-5": {
             "name": "Claude Opus 5",
             "reasoning": True,
@@ -514,19 +593,558 @@ CLOUD_ORCAROUTER_PROVIDER: dict = {
             "limit": {"context": 1000000, "output": 128000},
             "options": {"reasoningEffort": "medium"},
         },
-        "deepseek/deepseek-v4-pro-0813": {
-            "name": "DeepSeek V4 Pro 0813",
+        "anthropic/claude-sonnet-4.5": {
+            "name": "Claude Sonnet 4.5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 64000},
+        },
+        "anthropic/claude-sonnet-4.6": {
+            "name": "Claude Sonnet 4.6",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 64000},
+        },
+        "anthropic/claude-sonnet-5": {
+            "name": "Claude Sonnet 5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 128000},
+        },
+        "deepseek/deepseek-chat": {
+            "name": "DeepSeek V3",
             "reasoning": True,
             "tool_call": True,
             "attachment": False,
-            "limit": {"context": 1048576, "output": 65536},
+            "limit": {"context": 1048576, "output": 384000},
         },
         "deepseek/deepseek-v4-flash-0731": {
             "name": "DeepSeek V4 Flash 0731",
             "reasoning": True,
             "tool_call": True,
             "attachment": False,
+            "limit": {"context": 1048576, "output": 384000},
+        },
+        "deepseek/deepseek-v4-pro-0813": {
+            "name": "DeepSeek V4 Pro 0813",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": False,
+            "limit": {"context": 1048576, "output": 384000},
+        },
+        "google/gemini-2.5-flash": {
+            "name": "Gemini 2.5 Flash",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
             "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-2.5-flash-lite": {
+            "name": "Gemini 2.5 Flash Lite",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-2.5-pro": {
+            "name": "Gemini 2.5 Pro",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3-flash-preview": {
+            "name": "Gemini 3 Flash Preview",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3.1-flash-lite-preview": {
+            "name": "Gemini 3.1 Flash Lite Preview",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3.1-pro-preview": {
+            "name": "Gemini 3.1 Pro Preview",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3.1-pro-preview-customtools": {
+            "name": "Gemini 3.1 Pro Preview Custom Tools",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3.5-flash": {
+            "name": "Gemini 3.5 Flash",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3.5-flash-lite": {
+            "name": "Gemini 3.5 Flash-Lite",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemini-3.6-flash": {
+            "name": "Gemini 3.6 Flash",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "google/gemma-4-26b-a4b-it": {
+            "name": "Gemma 4 26B A4B",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "grok/grok-4.3": {
+            "name": "grok-4.3",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 65536},
+        },
+        "grok/grok-4.5": {
+            "name": "Grok 4.5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 500000, "output": 65536},
+        },
+        "grok/grok-4.6": {
+            "name": "Grok 4.6",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 500000, "output": 65536},
+        },
+        "kimi/kimi-k2.5": {
+            "name": "kimi-k2.5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 32768},
+        },
+        "kimi/kimi-k2.6": {
+            "name": "kimi-k2.6",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 32768},
+        },
+        "kimi/kimi-k2.7-code": {
+            "name": "Kimi K2.7 Code",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 262144},
+        },
+        "kimi/kimi-k3": {
+            "name": "Kimi K3",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "meta/muse-spark-1.1": {
+            "name": "Muse Spark 1.1",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "meta/muse-spark-1.2": {
+            "name": "Muse Spark 1.2",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "minimax/minimax-m3": {
+            "name": "MiniMax M3",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 512000},
+        },
+        "obsidian/Qwen3.6-35B-A3B": {
+            "name": "Qwen3.6 35B A3B Uncensored (Aggressive)",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "obsidian/Qwen3.8-27B": {
+            "name": "Qwen3.8 27B Uncensored (Aggressive)",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "obsidian/gemma-4-26B-A4B": {
+            "name": "Gemma4 26B A4B Uncensored (Balanced)",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "openai/gpt-4.1": {
+            "name": "GPT-4.1",
+            "reasoning": False,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1047576, "output": 32768},
+        },
+        "openai/gpt-4.1-2025-04-14": {
+            "name": "gpt-4.1-2025-04-14",
+            "reasoning": False,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1047576, "output": 32768},
+        },
+        "openai/gpt-4.1-mini": {
+            "name": "GPT-4.1 Mini",
+            "reasoning": False,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1047576, "output": 32768},
+        },
+        "openai/gpt-4.1-mini-2025-04-14": {
+            "name": "gpt-4.1-mini-2025-04-14",
+            "reasoning": False,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1047576, "output": 32768},
+        },
+        "openai/gpt-4.1-nano": {
+            "name": "GPT-4.1 Nano",
+            "reasoning": False,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1047576, "output": 32768},
+        },
+        "openai/gpt-4.1-nano-2025-04-14": {
+            "name": "gpt-4.1-nano-2025-04-14",
+            "reasoning": False,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1047576, "output": 32768},
+        },
+        "openai/gpt-5": {
+            "name": "GPT-5",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-2025-08-07": {
+            "name": "gpt-5-2025-08-07",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-codex": {
+            "name": "GPT-5 Codex",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-mini": {
+            "name": "GPT-5 Mini",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-mini-2025-08-07": {
+            "name": "gpt-5-mini-2025-08-07",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-nano": {
+            "name": "GPT-5 Nano",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-nano-2025-08-07": {
+            "name": "gpt-5-nano-2025-08-07",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5-pro": {
+            "name": "GPT-5 Pro",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 272000},
+        },
+        "openai/gpt-5-pro-2025-10-06": {
+            "name": "gpt-5-pro-2025-10-06",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 272000},
+        },
+        "openai/gpt-5.1": {
+            "name": "GPT-5.1",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.1-2025-11-13": {
+            "name": "gpt-5.1-2025-11-13",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.1-codex": {
+            "name": "GPT-5.1-Codex",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.1-codex-mini": {
+            "name": "GPT-5.1-Codex-Mini",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.2": {
+            "name": "GPT-5.2",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.2-2025-12-11": {
+            "name": "gpt-5.2-2025-12-11",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.2-codex": {
+            "name": "GPT-5.2-Codex",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.2-pro": {
+            "name": "GPT-5.2 Pro",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.2-pro-2025-12-11": {
+            "name": "gpt-5.2-pro-2025-12-11",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.3-codex": {
+            "name": "GPT-5.3-Codex",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.4": {
+            "name": "GPT-5.4",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "openai/gpt-5.4-2026-03-05": {
+            "name": "gpt-5.4-2026-03-05",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "openai/gpt-5.4-mini": {
+            "name": "GPT-5.4 Mini",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.4-nano": {
+            "name": "GPT-5.4 Nano",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 400000, "output": 128000},
+        },
+        "openai/gpt-5.4-pro": {
+            "name": "GPT-5.4 Pro",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "openai/gpt-5.4-pro-2026-03-05": {
+            "name": "gpt-5.4-pro-2026-03-05",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "openai/gpt-5.6-luna": {
+            "name": "GPT-5.6 Luna",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "openai/gpt-5.6-sol": {
+            "name": "GPT-5.6 Sol",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "openai/gpt-5.6-terra": {
+            "name": "GPT-5.6 Terra",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1050000, "output": 128000},
+        },
+        "qwen/qwen3-max": {
+            "name": "Qwen3 Max",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": False,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "qwen/qwen3-max-preview": {
+            "name": "qwen3-max-preview",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": False,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "qwen/qwen3.5-flash": {
+            "name": "qwen3.5-flash",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.5-flash-2026-02-23": {
+            "name": "qwen3.5-flash-2026-02-23",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.5-plus": {
+            "name": "qwen3.5-plus",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.5-plus-2026-02-15": {
+            "name": "qwen3.5-plus-2026-02-15",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.6-35b-a3b": {
+            "name": "Qwen3.6 35B A3B",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "qwen/qwen3.6-flash": {
+            "name": "Qwen3.6 Flash",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.6-flash-2026-04-16": {
+            "name": "qwen3.6-flash-2026-04-16",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.6-plus": {
+            "name": "Qwen3.6 Plus",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.6-plus-2026-04-02": {
+            "name": "qwen3.6-plus-2026-04-02",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1048576, "output": 65536},
+        },
+        "qwen/qwen3.7-flash": {
+            "name": "Qwen3.7 Flash",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 65536},
+        },
+        "qwen/qwen3.7-plus": {
+            "name": "Qwen3.7 Plus",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 1000000, "output": 65536},
+        },
+        "qwen/qwen3.8-27b": {
+            "name": "Qwen3.8 27B",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "qwen/qwen3.8-27b-free": {
+            "name": "Qwen3.8 27B (free)",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": True,
+            "limit": {"context": 262144, "output": 65536},
         },
         "qwen/qwen3.8-max": {
             "name": "Qwen3.8 Max",
@@ -535,12 +1153,19 @@ CLOUD_ORCAROUTER_PROVIDER: dict = {
             "attachment": True,
             "limit": {"context": 1000000, "output": 65536},
         },
-        "grok/grok-4.6": {
-            "name": "Grok 4.6",
+        "tencent/hy3": {
+            "name": "Hy3",
             "reasoning": True,
             "tool_call": True,
-            "attachment": True,
-            "limit": {"context": 500000, "output": 65536},
+            "attachment": False,
+            "limit": {"context": 262144, "output": 65536},
+        },
+        "z-ai/glm-5.2": {
+            "name": "GLM 5.2",
+            "reasoning": True,
+            "tool_call": True,
+            "attachment": False,
+            "limit": {"context": 1000000, "output": 128000},
         },
     },
 }

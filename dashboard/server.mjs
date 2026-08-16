@@ -563,6 +563,7 @@ const STATIC = {
   "/panels/chrome.js": { file: "panels/chrome.js", type: "text/javascript; charset=utf-8" },
   "/panels/curve.js": { file: "panels/curve.js", type: "text/javascript; charset=utf-8" },
   "/panels/ledger.js": { file: "panels/ledger.js", type: "text/javascript; charset=utf-8" },
+  "/panels/create.js": { file: "panels/create.js", type: "text/javascript; charset=utf-8" },
   "/panels/live.js": { file: "panels/live.js", type: "text/javascript; charset=utf-8" },
   "/panels/hold.js": { file: "panels/hold.js", type: "text/javascript; charset=utf-8" },
   "/panels/profile.js": { file: "panels/profile.js", type: "text/javascript; charset=utf-8" },

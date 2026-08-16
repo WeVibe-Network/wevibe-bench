@@ -56,7 +56,13 @@ const ui = {
   // `arm` has NO default on purpose. It decides whether an org is required (ON)
   // or forbidden (OFF), so guessing it would either mint a run against the
   // wrong arm or produce a restatement reading "UNKNOWN ARM".
-  sel: { model: "", arm: "", org: "" },
+  //
+  // `kind` DOES default to local, and that asymmetry is deliberate: local is
+  // what every cell before cloud routing existed was, so it is the state of the
+  // world rather than a guess, and the failure mode of getting it wrong is
+  // one-directional — a cloud cell mislabelled local is refused by the roster
+  // lookup, while a local cell mislabelled cloud would be billed.
+  sel: { model: "", arm: "", org: "", kind: "local" },
   armed: false,
   token: null,
   restatement: null,
@@ -65,12 +71,6 @@ const ui = {
   // Set when START fires, cleared once run state reports a live cell. Drives
   // the STARTING counter.
   startedAt: null,
-  // ── BASELINE CONFIRM MODAL ───────────────────────────────────────────────
-  // Opened by a [+ baseline] click before presetRun() is called, so the
-  // operator explicitly commits to starting a multi-hour OFF cell rather than
-  // doing so by reflex. The model name is shown so the confirmation is
-  // informative, not decorative.
-  baselineModal: null, // null | { model: string }
 };
 
 export function runSel() {
@@ -98,25 +98,19 @@ export function setRunSel(key, value) {
  * cell with no org, and inventing one would either target the wrong corpus or
  * produce a restatement the operator cannot check.
  */
-export function presetRun({ model, arm }) {
+export function presetRun({ model, arm, kind = "local" }) {
   ui.sel.model = model ?? "";
   ui.sel.arm = arm ?? "";
+  // THE SUBSTRATE TRAVELS WITH THE PRESET. It is part of the token's
+  // fingerprint on the server, so a preset that dropped it would arm a local
+  // cell for a model the operator picked on the cloud branch — and the refusal
+  // would arrive as "not served by the proxy roster", which names the wrong
+  // cause entirely.
+  ui.sel.kind = kind === "cloud" ? "cloud" : "local";
   // A preset is a NEW set of parameters, so any token minted for the previous
   // ones must die with it.
   disarm();
   ui.refusal = null;
-}
-
-export function openBaselineModal(model) {
-  ui.baselineModal = { model };
-}
-
-export function closeBaselineModal() {
-  ui.baselineModal = null;
-}
-
-export function isBaselineModalOpen() {
-  return ui.baselineModal !== null;
 }
 
 /**
@@ -144,6 +138,7 @@ export function runLifecycleState() {
     starting: ui.startedAt !== null,
     model: ui.sel.model || null,
     arm: ui.sel.arm || null,
+    kind: ui.sel.kind,
     org: ui.sel.arm === "on" ? ui.sel.org.trim() || null : null,
   };
 }
@@ -244,6 +239,9 @@ function payload() {
   return {
     model: ui.sel.model,
     arm: ui.sel.arm || undefined,
+    // DECLARED, NEVER SNIFFED. The server refuses an unknown substrate by name
+    // rather than inferring one from the model id's shape — see validateStart.
+    kind: ui.sel.kind,
     org: ui.sel.arm === "on" ? ui.sel.org.trim() || undefined : undefined,
     // NO `context` KEY. The server treats an absent context as "use the
     // registry default" (server.mjs:314 gates on `context !== null`, and
@@ -254,40 +252,19 @@ function payload() {
 
 // ── RENDER ───────────────────────────────────────────────────────────────────
 
-/**
- * THE BASELINE CONFIRM MODAL.
- *
- * Shown when [+ baseline] is clicked, BEFORE presetRun() is called. An OFF
- * cell costs several hours; the operator must explicitly commit rather than
- * starting one by reflex. The model name is shown so the confirmation is
- * informative, not decorative.
- *
- * CONTINUE calls armRun() — the same path a manual ARM click takes — so the
- * full arm → confirm → start flow follows with no special-casing.
- */
-export function renderBaselineModal() {
-  if (!ui.baselineModal) return "";
-  const { model } = ui.baselineModal;
-  // Reuses the board's existing .modal-scrim/.modal shells so this dialog can
-  // never drift from the others in width, elevation or scrim treatment.
-  return `
-    <div class="modal-scrim" data-baseline-back="1">
-      <div class="modal bmodal" role="dialog" aria-modal="true" aria-labelledby="bm-title">
-        <span class="kick" id="bm-title">START A BENCHMARK?</span>
-        <div class="bm-body">Are you sure you want to start a benchmark with <strong>${esc(model)}</strong>?</div>
-        <div class="bm-note">${esc(
-          "This arms a CONTROL (memory off) cell — the baseline floor for this model. " +
-            "Runs are strictly serial and a cell takes hours; it cannot be paused or resumed. " +
-            "Continue arms the run and shows the server's restatement for a final confirmation — it does not launch yet.",
-        )}</div>
-        <div class="bm-btns">
-          <button class="runbtn" data-baseline-continue="${esc(model)}">CONTINUE →</button>
-          <button class="btn" data-baseline-back="1">BACK</button>
-        </div>
-      </div>
-    </div>`;
-}
-
+// ── THE BASELINE CONFIRM MODAL IS GONE, AND WAS NOT REPLACED IN KIND ────────
+//
+// A one-card "are you sure you want to start a benchmark with <model>?" used to
+// live here, raised by [+ baseline] on a model row. Its job — make the operator
+// commit deliberately to a multi-hour cell rather than starting one by reflex —
+// is now frame BASELINE·3 of panels/create.js, at the end of a three-step
+// sequence that also establishes WHICH model and WHICH substrate.
+//
+// It is deleted rather than kept beside the new flow because two dialogs that
+// both mean "confirm this baseline" would eventually diverge on what they warn
+// about, and the operator would learn to dismiss whichever one they saw more
+// often. The arm→confirm protocol below is untouched: CONTINUE on that frame
+// calls armRun() exactly as CONTINUE here did.
 
 export function renderRunControl(board) {
   const c = board.control ?? null;
@@ -314,12 +291,34 @@ export function renderRunControl(board) {
   // /api/run/start refuses any other. Leaving a free dropdown here would offer
   // eight choices of which seven produce a refusal — and worse, it is what let
   // the subject be decided by a later click rather than by the profile. When a
-  // profile exists the model is stated, not selected.
+  // profile exists the ON model is stated, not selected.
+  //
+  // THE GATE MIRRORS THE SERVER. validateStart enforces subject ownership ONLY
+  // on `arm === "on"` — an OFF cell is a baseline and the server always allows
+  // it on any eligible model. Pinning an OFF cell overwrote a legally-armable
+  // floor and disarmed it for nothing, so the pin fires ONLY when the cell is
+  // ON.
   const subject = p.exists ? (p.subject_model ?? null) : null;
-  if (subject && ui.sel.model !== subject) {
+  if (ui.sel.arm === "on" && subject && ui.sel.model !== subject) {
+    const from = ui.sel.model;
     ui.sel.model = subject;
     // A pin that changed invalidates any armed token — it fingerprints the model.
     disarm();
+    // THE PIN IS A REAL MUTATION — overwrite plus disarm — and `disarm()` is
+    // purely local, so without a record the event is silent and undiagnosable.
+    // Log it fire-and-forget to runs/profile-pin.log, where it survives wipes;
+    // logging must NEVER break the render/arm flow. The arm is reported as-is,
+    // not hardcoded: if the gate above ever regressed to arm-blind, the log
+    // would still show arm=off.
+    try {
+      fetch(`${c.base_url}/api/profiles/pin-log`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "profile_pin", from, to: subject, arm: ui.sel.arm }),
+      }).catch(() => {});
+    } catch {
+      // Best-effort by design: a failed log never blocks a render or an arm.
+    }
   }
 
   // THE BASELINE GATE. An ON cell measured against no floor, or against a floor
@@ -341,7 +340,12 @@ export function renderRunControl(board) {
   const live = run.can_start === false;
   const armChosen = ui.sel.arm === "on" || ui.sel.arm === "off";
   const orgOk = !wantsOn || Boolean(ui.sel.org.trim());
-  const complete = armChosen && orgOk && Boolean(ui.sel.model) && eligible.length > 0;
+  // A CLOUD CELL DOES NOT NEED THE PROXY ROSTER. `eligible` is the local relay's
+  // model list, and gating a cloud launch on it would make the entire cloud
+  // branch dead whenever the local proxy is down — which is precisely the
+  // situation in which an operator would reach for a cloud baseline.
+  const rosterOk = ui.sel.kind === "cloud" || eligible.length > 0;
+  const complete = armChosen && orgOk && Boolean(ui.sel.model) && rosterOk;
 
   // STARTING: the request has fired and run state has not yet caught up.
   const starting = ui.startedAt !== null && run.state !== "running";
@@ -355,6 +359,7 @@ export function renderRunControl(board) {
         <span class="note">${esc(runStateWord(run))}</span>
       </div>
 
+      ${substrateLine()}
       ${form(eligible, roster, live, subject)}
       ${ui.armed && ui.restatement ? `<div class="restate">${esc(ui.restatement)}</div>` : ""}
       ${live && ui.armed ? abandonWarning(run) : ""}
@@ -363,6 +368,22 @@ export function renderRunControl(board) {
       ${why(run, armChosen, orgOk, eligible, blockedNoBaseline, live, { baselineWrongModel, baselineModel, subject })}
       ${resumeNote(caps)}
     </div>`;
+}
+
+/**
+ * THE SUBSTRATE, ON THE CONTROL THAT STARTS THE CELL.
+ *
+ * A cloud cell is billed and a local one is not, and that is the single largest
+ * difference between two runs that are otherwise identical in every field on
+ * this form. The server states it in its own restatement too; this states it
+ * BEFORE the arm, so the operator is not relying on reading the restatement
+ * carefully at the moment they have already decided to click.
+ */
+function substrateLine() {
+  if (ui.sel.kind !== "cloud") return "";
+  return `<div class="rcloud">${esc(
+    "CLOUD CELL — routed to the vendor and BILLED. The key is resolved by the control plane; this browser never holds it.",
+  )}</div>`;
 }
 
 function runStateWord(run) {
@@ -379,10 +400,21 @@ function form(eligible, roster, live, subject) {
   // Pinned, with the reason on the row. A frozen subject is not a disabled
   // control awaiting unlock — it is a fact about this stack, so it reads as a
   // statement rather than as a select the operator cannot use.
-  const modelRow = subject
+  //
+  // A CLOUD MODEL IS ALWAYS PINNED, whether or not a profile froze it. It is not
+  // in the proxy roster, so the dropdown below cannot contain it — offering that
+  // dropdown would silently discard the operator's choice and arm a local cell
+  // for whatever they picked instead.
+  const cloudPinned = ui.sel.kind === "cloud" && ui.sel.model;
+  const pin = subject ?? (cloudPinned ? ui.sel.model : null);
+  const modelRow = pin
     ? `<div class="rrow">
          <label>MODEL</label>
-         <span class="rpin">${esc(subject)}<span class="rpin-why">${esc("subject frozen by the profile — both arms are this model")}</span></span>
+         <span class="rpin">${esc(pin)}<span class="rpin-why">${esc(
+           subject
+             ? "subject frozen by the profile — both arms are this model"
+             : "chosen on the cloud branch — not a proxy alias, so it is stated rather than selected",
+         )}</span></span>
        </div>`
     : `<div class="rrow">
          <label>MODEL</label>
@@ -483,7 +515,10 @@ function why(run, armChosen, orgOk, eligible, blockedNoBaseline, live, subj = {}
   if (blockedNoBaseline) {
     return `<div class="rwhy bad">${esc("an ON cell needs a scorable OFF baseline — without a floor there is nothing to measure the delta against")}</div>`;
   }
-  if (!eligible.length) {
+  // Only a LOCAL cell needs the proxy roster to have something in it. Saying
+  // this about a cloud cell would name a cause that has no bearing on it and
+  // send the operator to restart a proxy the run does not use.
+  if (!eligible.length && ui.sel.kind !== "cloud") {
     return `<div class="rwhy bad">${esc("no bench-eligible model in the roster — an interactive slot contends with live daily-driver use and produces a measurement that cannot be defended")}</div>`;
   }
   if (!armChosen) {

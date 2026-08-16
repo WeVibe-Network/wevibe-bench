@@ -82,6 +82,9 @@
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+// Safe import: baselines.mjs imports only node: builtins, so there is no
+// circular dependency (verified 2026-08-16).
+import { isArchivedRun } from "./baselines.mjs";
 
 /** Where profiles live, under the runs root so they survive a service restart. */
 export function profilesDir(runsRoot) {
@@ -232,17 +235,103 @@ export async function listProfiles(runsRoot) {
   return { profiles, unreadable };
 }
 
+// ── CAMPAIGN LIVENESS ────────────────────────────────────────────────────────
+//
+// A profile can outlive the campaign it was frozen for: a wipe removes the
+// campaign directory outright, and the RUNBOOK archive convention renames it
+// `cumulative.<why>-<date>`. Either way the profile is still a frozen record —
+// it stays listed — but it must not stay ACTIVE: the active profile is what
+// pins the subject model at run start, and a retired campaign may not set the
+// terms of a new run.
+
 /**
- * The ACTIVE profile is the newest one.
+ * The set of stack keys of the LIVE campaigns under the runs root.
+ *
+ * A live campaign is a directory whose name is BARE — no ".", which is the
+ * archive convention tested by `isArchivedRun` — and that contains a parseable
+ * `manifest.json`. The key is composed in the SAME field order as the stack
+ * ledger's `stackKey` (dashboard/sources/stack-ledger.mjs), which is what a
+ * profile's `stack_id` was composed from. A missing or unparseable manifest is
+ * not a live campaign — it is skipped, never an error.
+ */
+async function liveCampaignKeys(runsRoot) {
+  const live = new Set();
+  let entries;
+  try {
+    entries = await fs.readdir(runsRoot, { withFileTypes: true });
+  } catch {
+    return live;
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory() || isArchivedRun(ent.name)) continue;
+    const manifest = await readJsonOrNull(join(runsRoot, ent.name, "manifest.json"));
+    if (!manifest || typeof manifest !== "object") continue;
+    live.add(
+      // Same composition, including the "-" fallbacks, as stackKey in
+      // dashboard/sources/stack-ledger.mjs — the key must match byte-for-byte.
+      [manifest.org_id ?? "-", manifest.task ?? "-", manifest.roster_hash ?? "-", manifest.seed ?? "-"].join("|"),
+    );
+  }
+  return live;
+}
+
+/**
+ * True ONLY when the profile references a campaign (`stack_id` present) and
+ * that campaign is not live. A profile with no `stack_id` has no campaign
+ * reference and is never excluded on this ground.
+ */
+function profileCampaignArchived(liveKeys, profile) {
+  return profile?.stack_id != null && !liveKeys.has(String(profile.stack_id));
+}
+
+/**
+ * Log an exclusion from active selection EXACTLY ONCE per profile.
+ *
+ * GET /api/profiles is polled every 2 seconds; logging on every read would
+ * drown the durable log in identical lines. A marker file beside the profile
+ * records that this exclusion was already logged. The marker is never parsed
+ * as a profile because `listProfiles` reads only `*.json` files, and it is NOT
+ * removed when the campaign revives — the spec dedups per profile, and a
+ * re-archive of the same profile is the same fact, already on record.
+ *
+ * Best-effort BY DESIGN: a logging failure must never break the read path the
+ * log rides on.
+ */
+async function logArchivedCampaignExclusion(runsRoot, profile) {
+  const marker = join(profilesDir(runsRoot), `${profile.id}.archived-campaign`);
+  try {
+    await fs.access(marker);
+    return;
+  } catch {
+    // No marker: first time this exclusion is seen.
+  }
+  const line =
+    `${new Date().toISOString()} profile ${profile.id} references archived/nonexistent campaign ` +
+    `${profile.stack_id}; excluded from active selection\n`;
+  try {
+    await fs.appendFile(join(runsRoot, "profile-errors.log"), line, "utf8");
+    await fs.writeFile(marker, "", "utf8");
+  } catch {
+    // The log is bookkeeping — it must never take down the read it rides on.
+  }
+}
+
+/**
+ * The ACTIVE profile is the newest one whose campaign is STILL LIVE.
  *
  * Deliberately derived rather than stored as a pointer. A stored "active" marker
  * is mutable state that can disagree with the files it points at — and the one
  * question it would answer (which profile does a new run belong to?) already has
  * an unambiguous answer, because a new stack means a new profile.
+ *
+ * A profile whose campaign is archived — or vanished in a wipe — is excluded
+ * here: the frozen record survives and stays listed, but it cannot pin the
+ * subject model of a run started after its campaign ended.
  */
 export async function activeProfile(runsRoot) {
   const { profiles } = await listProfiles(runsRoot);
-  return profiles.length ? profiles[0] : null;
+  const live = await liveCampaignKeys(runsRoot);
+  return profiles.find((p) => !profileCampaignArchived(live, p)) ?? null;
 }
 
 /**
@@ -357,6 +446,24 @@ export async function attachRun(runsRoot, profileId_, entry) {
     model: entry?.model ?? null,
     org: entry?.org ?? null,
     context: entry?.context ?? null,
+    // WHICH SUBSTRATE THE CELL RAN ON. A cloud cell and a local one are launched
+    // through the same path and are indistinguishable afterwards without this —
+    // and one of them was billed.
+    kind: entry?.kind ?? null,
+    // ── THE JOIN KEY ───────────────────────────────────────────────────────
+    //
+    // Which campaign directory this cell writes to, and which slot in its
+    // schedule it is. Recorded because THIS IS THE ONLY MOMENT THEY ARE KNOWN:
+    // afterwards, a directory holding four cells cannot say which of them a
+    // given log produced. Without them a profile's run is an entry in a list and
+    // nothing more — which is exactly what every profile row on the board was,
+    // for as long as the ledger has existed.
+    //
+    // A CLAIM, NOT A RECEIPT. `sequence_index` is the manifest's `current_index`
+    // read a moment before the spawn, so the reader VERIFIES it (the arm must
+    // match) rather than trusting it. See joinRuns in models-ledger.mjs.
+    run_dir: entry?.run_dir ?? null,
+    sequence_index: Number.isFinite(entry?.sequence_index) ? Number(entry.sequence_index) : null,
     pid: entry?.pid ?? null,
     started_at: entry?.started_at ?? Date.now(),
   });
@@ -371,16 +478,30 @@ export async function attachRun(runsRoot, profileId_, entry) {
  * is false when profiles exist but this service launched none of the runs (the
  * CLI-launch case), and the board must then say the history is incomplete
  * instead of drawing an empty list that looks like "no runs happened" — today
- * that surface is the RUN LEDGER's profile drawer (dashboard/panels/ledger.js).
+ * that surface is the BASELINES card's profile expansion (dashboard/panels/ledger.js).
  */
 export async function readProfiles(runsRoot) {
   const { profiles, unreadable } = await listProfiles(runsRoot);
-  const active = profiles.length ? profiles[0] : null;
+  const live = await liveCampaignKeys(runsRoot);
+  const archivedIds = [];
+  for (const p of profiles) {
+    if (profileCampaignArchived(live, p)) {
+      archivedIds.push(p.id);
+      await logArchivedCampaignExclusion(runsRoot, p);
+    }
+  }
+  // The newest profile that still points at a live campaign — or none.
+  const active = profiles.find((p) => !archivedIds.includes(p.id)) ?? null;
   return {
     active,
-    prior: profiles.slice(1),
+    // EVERY other profile, including the ones excluded from active: a frozen
+    // record is listed, never dropped, whatever its campaign did.
+    prior: profiles.filter((p) => p.id !== active?.id),
     count: profiles.length,
     unreadable,
+    // Profiles excluded from active selection because their campaign is
+    // archived or nonexistent. Empty when every reference still resolves.
+    archived_campaign_ids: archivedIds,
     enforced: false,
     enforcement_note:
       "recall cannot filter by producing model today — producer_model_id is written to the " +

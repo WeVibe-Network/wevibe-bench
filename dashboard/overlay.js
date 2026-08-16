@@ -11,17 +11,19 @@
 // operator unsure which dialog a click belongs to.
 //
 // THE PROFILE INSPECTOR IS NOT HERE ANY MORE. Reading a frozen profile is not a
-// dialog: it is a drawer in the RUN LEDGER, under the row it describes. As a
-// modal it had to answer "which profile?" on its own, and it answered with
-// `board.profile` — one global profile — while the ledger below it listed four.
+// dialog: it is part of the profile's own expansion in the BASELINES card, under
+// the row it describes. As a modal it had to answer "which profile?" on its own,
+// and it answered with `board.profile` — one global profile — while the card
+// below it listed four.
+//
+// NEITHER IS THE BASELINE CONFIRM. It was a one-card "are you sure?" raised by a
+// per-row [+ baseline]; both the card and the dialog are gone, replaced by the
+// single [+ PROFILE] flow whose third frame does the same job with the model and
+// the substrate already established.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import {
-  renderProfileModal,
-  isProfileModalOpen,
-  closeProfileModal,
-} from "./panels/profile.js";
-import { renderRunControl, renderBaselineModal, isBaselineModalOpen, closeBaselineModal, runLifecycleState } from "./panels/runstart.js";
+import { renderCreate, isCreateOpen, closeCreate } from "./panels/create.js";
+import { renderRunControl, runLifecycleState } from "./panels/runstart.js";
 import { patch } from "./dom.js";
 
 export function renderOverlay(board) {
@@ -32,21 +34,21 @@ export function renderOverlay(board) {
     document.body.appendChild(root);
   }
 
-  // THE BASELINE CONFIRM OUTRANKS EVERYTHING. It is the only dialog raised by a
-  // direct operator action that starts a multi-hour cell, so it must never be
-  // hidden behind a panel that happens to be open.
-  if (isBaselineModalOpen()) {
-    patch(root, renderBaselineModal());
-    return;
-  }
-
+  // ── THE CREATE FLOW SITS ABOVE THE BOARD, BELOW THE RUN CONTROL ───────────
+  //
   // PATCHED, NOT REPLACED. Mounting outside #root saved the dialog from the
   // board's swap, but this function then did the same thing to it: `innerHTML`
   // every 2s rebuilt the dialog, so a scrolled model list snapped back to the
-  // top and a half-typed org id lost its caret. Surviving one wholesale swap
-  // only to be destroyed by another is not survival. See dom.js.
-  if (isProfileModalOpen()) {
-    patch(root, renderProfileModal(board));
+  // top and a half-typed search box lost its caret. Surviving one wholesale
+  // swap only to be destroyed by another is not survival. See dom.js.
+  //
+  // IT IS CHECKED BEFORE THE RUN CONTROL AND THAT ORDER IS LOAD-BEARING IN ONE
+  // DIRECTION ONLY: the baseline branch CLOSES this flow before arming, so the
+  // two are never open together. If a future path left both open, the run
+  // control — the one that spends hours — is the one that must be on top, which
+  // is why its check follows rather than precedes.
+  if (isCreateOpen()) {
+    patch(root, renderCreate(board));
     return;
   }
 
@@ -91,6 +93,5 @@ export function renderOverlay(board) {
 }
 
 export function closeOverlays() {
-  closeProfileModal();
-  closeBaselineModal();
+  closeCreate();
 }
