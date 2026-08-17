@@ -759,7 +759,15 @@ const server = createServer(async (req, res) => {
       // inside it this launch is about to write. Afterwards it is unknowable.
       const target = await campaignTargetFor(model, RUNS_ROOT);
       if (target.manifest_arg) argv.push("--manifest", target.manifest_arg);
-      argv.push("run", "--until-review", "--mode", arm);
+      // `run` ACCEPTS EXACTLY --mode, --proxy-base-url, --proxy-token-file.
+      // `--until-review` was removed from the harness by ba2947a (2026-08-14)
+      // and kept here, so argparse rejected the whole invocation before the
+      // harness did anything: the child exited on a usage error, the log held
+      // nothing but that error, and the board — which infers "running" from the
+      // log's existence — reported BUSY over a process that was already dead.
+      // Every board-launched cell failed this way. Flags here must be checked
+      // against the run subparser, not against memory.
+      argv.push("run", "--mode", arm);
 
       const stamp = new Date()
         .toISOString()

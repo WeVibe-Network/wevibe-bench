@@ -299,7 +299,31 @@ export function renderRunControl(board) {
   // floor and disarmed it for nothing, so the pin fires ONLY when the cell is
   // ON.
   const subject = p.exists ? (p.subject_model ?? null) : null;
-  if (ui.sel.arm === "on" && subject && ui.sel.model !== subject) {
+  // AND THE PIN IS LOCAL-ONLY. `subject_model` is a proxy roster id — a bare
+  // alias like `qwen3.6-35b-a3b-bench`. A cloud cell is named by a
+  // `{provider}/{model}` key, so the subject cannot compose a cloud slug and
+  // overwriting a chosen cloud model with it produces a payload the server
+  // refuses as `cloud_model_malformed` — a message about the slug's SHAPE that
+  // names nothing about the pin that replaced it. Worse, the overwrite outlives
+  // the arm that caused it: pinning on ON and then switching to OFF leaves the
+  // local subject sitting in a cloud payload. Profiles predate the cloud branch;
+  // until a profile can freeze a cloud subject, cloud is simply out of its scope.
+  // AND IT NEVER FIRES ON AN ARMED RUN. This block lives inside a RENDER
+  // function that overlay.js calls on every 2s poll, and `disarm()` is the
+  // condition that keeps the run modal mounted at all
+  // (`lc.armed || lc.pending || lc.refusal || lc.starting`). overlay.js reads
+  // the lifecycle BEFORE calling this, so a pin that fires while armed paints
+  // the modal one last time and deletes it on the next tick — the operator gets
+  // a single ≤2s window to hit CONFIRM, and the dialog then vanishes with no
+  // refusal, no message, and no trace on screen. A render must never mutate the
+  // state that decides whether it is rendered.
+  //
+  // Once armed the parameters are already frozen in a server-minted token that
+  // fingerprints the model, so there is nothing left for the pin to correct
+  // here: it belongs to the pre-arm form, and any genuine mismatch is refused
+  // by /api/run/start on its own terms with words the operator can read.
+  const settled = !ui.armed && !ui.pending && ui.startedAt === null;
+  if (settled && ui.sel.kind !== "cloud" && ui.sel.arm === "on" && subject && ui.sel.model !== subject) {
     const from = ui.sel.model;
     ui.sel.model = subject;
     // A pin that changed invalidates any armed token — it fingerprints the model.
@@ -406,14 +430,19 @@ function form(eligible, roster, live, subject) {
   // dropdown would silently discard the operator's choice and arm a local cell
   // for whatever they picked instead.
   const cloudPinned = ui.sel.kind === "cloud" && ui.sel.model;
-  const pin = subject ?? (cloudPinned ? ui.sel.model : null);
+  // THE SUBSTRATE DECIDES WHICH PIN WINS, and the cloud choice wins on the cloud
+  // branch. `subject ?? cloudModel` stated the profile's LOCAL subject on a cloud
+  // cell — a model the operator did not choose, cannot select away from (the row
+  // is a statement, not a control), and which the server then refuses. The
+  // displayed identity must be the one that will be sent.
+  const pin = cloudPinned ? ui.sel.model : subject;
   const modelRow = pin
     ? `<div class="rrow">
          <label>MODEL</label>
          <span class="rpin">${esc(pin)}<span class="rpin-why">${esc(
-           subject
-             ? "subject frozen by the profile — both arms are this model"
-             : "chosen on the cloud branch — not a proxy alias, so it is stated rather than selected",
+           cloudPinned
+             ? "chosen on the cloud branch — not a proxy alias, so it is stated rather than selected"
+             : "subject frozen by the profile — both arms are this model",
          )}</span></span>
        </div>`
     : `<div class="rrow">

@@ -260,7 +260,7 @@ def main() -> int:
     on_flags = f" --mode on --org {args.org or '<org>'}" if args.mode == "on" else " --mode off"
     print("\nGO — all blocking checks passed. Launch:\n")
     print("  TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \\")
-    print(f"    --model {args.model} run --until-review{on_flags} \\")
+    print(f"    --model {args.model} run{on_flags} \\")
     print('    < /dev/null > "runs/off-cell-$TS.log" 2>&1 & disown')
     print("\n  `< /dev/null` is MANDATORY (zsh suspends the job on stdin touch).")
     print("  Main-parser flags go BEFORE `run` — argparse exits 2 otherwise.")
