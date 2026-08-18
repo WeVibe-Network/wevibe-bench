@@ -11,6 +11,7 @@ import {
   makeMatcher,
   playwrightGateResults,
   vitestGateResults,
+  runnerFailureObserved,
 } from "./gate-results.mjs";
 
 const GATES_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -340,6 +341,11 @@ function spawnPhase(phase, cmd, args) {
   return {
     ok: run.status === 0 && !run.error,
     status: run.status,
+    // A RUNNER THAT WAS KILLED IS NOT A RUNNER THAT FAILED. `spawnSync` reports
+    // the terminating signal and nothing recorded it, so "vitest was killed
+    // mid-suite" and "vitest exited 1 on a broken test" reached the report as
+    // the same nonzero status.
+    signal: run.signal ?? null,
     error: run.error,
     stdout,
     stderr,
@@ -500,13 +506,22 @@ function runBackendPhase() {
   }
 
   if (!run.ok && problems.length === 0) {
-    const observed = truncate(
-      stripAnsi(
-        firstNonEmptyLine(run.stderr || run.stdout || run.error?.message || "backend phase failed"),
-      ),
-      400,
+    // How many gates the runner actually spoke for, against how many the roster
+    // says this phase owns. The GAP is the finding, and it was never recorded.
+    const reported = (report?.testResults ?? []).reduce(
+      (n, suite) => n + (suite.assertionResults?.length ?? 0),
+      0,
     );
-    problems.push(safeProblem("backend:runner", "backend gates execute and pass", observed));
+    const expected = ROSTER.available
+      ? ROSTER.gates.filter((g) => g.phase === "backend").length
+      : null;
+    problems.push(
+      safeProblem(
+        "backend:runner",
+        "backend gates execute and pass",
+        runnerFailureObserved("backend", run, { reported, expected }),
+      ),
+    );
     failedGates.push("backend:runner");
   }
 
@@ -606,18 +621,10 @@ function runFrontendPhase() {
   }
 
   if (!run.ok && problems.length === 0) {
-    const observed = truncate(
-      stripAnsi(
-        firstNonEmptyLine(
-          extractPlaywrightRunError(report)
-          || run.stderr
-          || run.stdout
-          || run.error?.message
-          || "frontend phase failed",
-        ),
-      ),
-      400,
-    );
+    const runError = stripAnsi(String(extractPlaywrightRunError(report) ?? "")).trim();
+    const observed = runError
+      ? truncate(firstNonEmptyLine(runError), 400)
+      : runnerFailureObserved("frontend", run);
     problems.push(safeProblem("frontend:boot", "frontend gates execute and pass", observed));
     failedGates.push("frontend:boot");
   }

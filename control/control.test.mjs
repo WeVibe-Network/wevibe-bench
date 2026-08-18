@@ -53,8 +53,10 @@ import {
   tierOf,
 } from "../tasks/backgammon/gates/roster.mjs";
 import {
+  firstMeaningfulLine,
   foldGateResults,
   normalizeStatus,
+  runnerFailureObserved,
 } from "../tasks/backgammon/gates/gate-results.mjs";
 import {
   FEEDBACK_CONTRACT_VERSION,
@@ -2367,4 +2369,72 @@ test("WALL: a per-model campaign's outcomes are served, never a zeroed suite", a
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION: 53 UNMEASURED GATES, EXPLAINED BY A NODE WARNING.
+//
+// When a runner exits nonzero with no failing test, the suite did not finish and
+// every gate it never reached is recorded `not_run`. That string is the ONLY
+// account of why. On the 2026-08-17 minimax-m3 cell it was
+// "(node:43741) PromiseRejectionHandledWarning: ... (rejection id: 19)" —
+// stderr's first line, and pure boilerplate — recorded against 53 gates, twice.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Verbatim stderr from that cell's aborted backend phase. */
+const NODE_WARNING_STDERR = [
+  "(node:43741) PromiseRejectionHandledWarning: Promise rejection was handled asynchronously (rejection id: 19)",
+  "(Use `node --trace-warnings ...` to show where the warning was created)",
+  "(node:43741) PromiseRejectionHandledWarning: Promise rejection was handled asynchronously (rejection id: 250)",
+].join("\n");
+
+test("DIAGNOSTIC: Node's own warnings are never mistaken for the failure", () => {
+  assert.equal(
+    firstMeaningfulLine(NODE_WARNING_STDERR),
+    "",
+    "a stderr made entirely of Node boilerplate yields NO explanation, rather than a confident wrong one",
+  );
+  assert.equal(
+    firstMeaningfulLine(`${NODE_WARNING_STDERR}\nError: listen EADDRINUSE :::8002`),
+    "Error: listen EADDRINUSE :::8002",
+    "the real line is selected even when warnings precede it",
+  );
+});
+
+test("DIAGNOSTIC: an aborted runner reports how it died and how far it got", () => {
+  const observed = runnerFailureObserved(
+    "backend",
+    { status: 1, signal: null, stderr: NODE_WARNING_STDERR },
+    { reported: 7, expected: 56 },
+  );
+
+  assert.match(observed, /runner exited 1/, "how the process ended");
+  assert.match(observed, /reported 7 of 56 gate results/, "how far it got — the gap IS the finding");
+  assert.match(observed, /no test failed/, "and that nothing was measured as failing");
+  assert.ok(
+    !observed.includes("PromiseRejectionHandledWarning"),
+    "the warning that used to be the entire explanation does not appear",
+  );
+});
+
+test("DIAGNOSTIC: a KILLED runner is not reported as one that merely exited", () => {
+  const killed = runnerFailureObserved(
+    "backend",
+    { status: null, signal: "SIGKILL", stderr: "" },
+    { reported: 0, expected: 56 },
+  );
+  assert.match(killed, /killed by SIGKILL/);
+
+  const exited = runnerFailureObserved("backend", { status: 2, signal: null, stderr: "" }, {});
+  assert.match(exited, /exited 2/);
+  assert.ok(!exited.includes("killed"), "and the two are never conflated");
+});
+
+test("DIAGNOSTIC: a spawn failure names itself rather than the exit code", () => {
+  const observed = runnerFailureObserved(
+    "frontend",
+    { error: new Error("spawn npx ENOENT"), stderr: "" },
+    {},
+  );
+  assert.match(observed, /spawn failed: spawn npx ENOENT/);
 });
