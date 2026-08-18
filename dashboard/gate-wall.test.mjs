@@ -291,3 +291,51 @@ test("a run-backed suite carries NO enumerated-suite warning", () => {
   assert.ok(!html.includes("NO RUN — SUITE ENUMERATED"), "the warning is for the enumerated case only");
   assert.ok(!html.includes("no run at runs/"), "and so is its legend line");
 });
+
+// ── AN ABORTED RUNNER IS NOT A SCORE ────────────────────────────────────────
+
+test("an ungradable attempt is labelled, and its reason is stated", () => {
+  const gates = [
+    { id: "a", state: "passing" },
+    { id: "b", state: "untested" },
+    { id: "c", state: "untested" },
+  ];
+  const html = renderWall(
+    boardWith(
+      suiteWith(gates, {
+        gradable: false,
+        ungradable_reason: "backend gates-13-16.test.ts aborted, leaving 2 gates unmeasured",
+        aborted_runners: ["backend gates-13-16.test.ts"],
+      }),
+    ),
+  );
+
+  assert.ok(html.includes("NOT A SCORE — RUNNER ABORTED"), "the headline refuses the ratio");
+  assert.ok(html.includes("leaving 2 gates unmeasured"), "and the harness's own reason is shown");
+});
+
+test("gradability NEVER repaints a square — it answers 'was this measured'", () => {
+  const gates = [
+    { id: "a", state: "passing" },
+    { id: "b", state: "failing" },
+    { id: "c", state: "untested" },
+  ];
+  const ok = renderWall(boardWith(suiteWith(gates, { gradable: true })));
+  const bad = renderWall(boardWith(suiteWith(gates, { gradable: false, ungradable_reason: "r" })));
+
+  assert.deepEqual(
+    cellClassList(bad).filter((c) => !c.includes("sm")),
+    cellClassList(ok).filter((c) => !c.includes("sm")),
+    "the same gate states must draw the same squares regardless of gradability",
+  );
+});
+
+test("a gradable run carries no abort badge", () => {
+  const html = renderWall(boardWith(suiteWith(GATES, { gradable: true })));
+  assert.ok(!html.includes("NOT A SCORE"), "the badge belongs to the aborted case only");
+});
+
+test("an attempt from before the field existed is not badged either way", () => {
+  const html = renderWall(boardWith(suiteWith(GATES)));
+  assert.ok(!html.includes("NOT A SCORE"), "unknown gradability is not an accusation");
+});

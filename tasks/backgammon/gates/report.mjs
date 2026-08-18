@@ -313,9 +313,30 @@ function extractPlaywrightRunError(report) {
   return "";
 }
 
+/**
+ * Announce a phase, then run its one command.
+ *
+ * `[report] phase=<name> …` IS A WIRE FORMAT. The python adapter
+ * (`wevibe_bench/adapters/backgammon.py`) parses these lines out of stderr and
+ * turns them into the board's live `gate-phase-start` / `gate-phase-end`
+ * events: a line WITHOUT `status=` opens the phase, one WITH it closes it.
+ * A second opener for the same phase would tell the board a new phase had
+ * begun, so anything spawning more than one process per phase must use
+ * `spawnRunner` and keep exactly one open/close pair around the whole set.
+ */
 function spawnPhase(phase, cmd, args) {
   process.stderr.write(`\n[report] phase=${phase} target=${TARGET}\n`);
-  process.stderr.write(`[report] cmd=${cmd} ${args.join(" ")}\n`);
+  return spawnRunner(phase, cmd, args);
+}
+
+/**
+ * Run one command inside an ALREADY-ANNOUNCED phase.
+ *
+ * Logs under `[report] runner=…`, which the adapter ignores — deliberately.
+ * The phase boundary belongs to the caller.
+ */
+function spawnRunner(label, cmd, args) {
+  process.stderr.write(`[report] runner=${label} cmd=${cmd} ${args.join(" ")}\n`);
 
   const run = spawnSync(cmd, args, {
     cwd: GATES_DIR,
@@ -450,100 +471,176 @@ function extractExpectedObserved(failureMessage, fallbackExpected) {
   };
 }
 
-function runBackendPhase() {
-  const tmpOutput = path.join(
-    os.tmpdir(),
-    `bg-vitest-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
-  );
+/**
+ * Every backend gate file, in a stable order.
+ *
+ * Mirrors the `include` glob in `vitest.config.ts` — the runner decides WHICH
+ * files exist; this only decides that they are invoked one at a time. Sorted so
+ * slot order is reproducible across hosts.
+ */
+function backendTestFiles() {
+  const root = path.join(GATES_DIR, "backend");
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".test.ts")) {
+        out.push(path.relative(GATES_DIR, full));
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
 
+/**
+ * THE BACKEND PHASE — ONE VITEST INVOCATION PER FILE.
+ *
+ * ── WHY NOT ONE INVOCATION FOR THE WHOLE SUITE ──────────────────────────────
+ *
+ * `vitest.config.ts` pins `fileParallelism:false` + `singleFork:true` because
+ * every backend file binds the fixed port 8002 and they must not overlap. That
+ * is correct and is preserved here: `spawnSync` is blocking, so these run
+ * strictly one at a time, exactly as before.
+ *
+ * What is NOT preserved is the blast radius. In a single invocation all seven
+ * files share one worker fork, and that fork's RPC to the vitest main process
+ * has a fixed timeout which is NOT configurable in vitest 2.1.9. A test that
+ * blocks the worker's event loop long enough kills the RPC —
+ *
+ *   Error: [vitest-worker]: Timeout calling "onTaskUpdate"
+ *
+ * — and the run collapses, taking every file that had not run yet with it.
+ *
+ * MEASURED, 2026-08-17 minimax-m3 cell. `backend/gates-13-16.test.ts` holds two
+ * SYNCHRONOUS CPU-bound gates (G14: 200 samples × 3 difficulties of
+ * `chooseMoves`, then 25 seeded self-play games × 400 half-turns). Against the
+ * golden implementation the whole backend suite finishes in 1.63s. Against that
+ * cell's code the same two gates took 30.6s and 44.3s, blocked the loop, killed
+ * the RPC, and cost the run all six OTHER files: 53 of 56 gates recorded
+ * `not_run` on attempts 2 AND 3. Re-grading that worktree scores 69/71.
+ *
+ * The suite is not at fault and neither is the config — the file passes 7/7 when
+ * run alone. The fault is that one slow file could silently un-measure six
+ * others. Per-file invocation makes a stall cost ITS OWN file and nothing more,
+ * and changes no assertion, so results stay comparable across the change.
+ *
+ * ONE PHASE, ONE OPEN/CLOSE PAIR. The `[report] phase=backend` lines bracket the
+ * whole set (see `spawnPhase`) — the board must see one backend phase, not seven.
+ */
+function runBackendPhase() {
   announceGateSet("backend");
-  const run = spawnPhase("backend", "npx", [
-    "vitest",
-    "run",
-    "backend",
-    "--reporter=json",
-    `--outputFile=${tmpOutput}`,
-  ]);
+  process.stderr.write(`\n[report] phase=backend target=${TARGET}\n`);
 
   const problems = [];
   const failedGates = [];
+  const merged = { testResults: [] };
+  const abortedFiles = [];
+  let allOk = true;
 
-  let report = null;
-  if (fs.existsSync(tmpOutput)) {
-    try {
-      report = JSON.parse(fs.readFileSync(tmpOutput, "utf8"));
-    } catch (error) {
-      const observed = truncate(stripAnsi(error instanceof Error ? error.message : String(error)), 400);
-      problems.push(
-        safeProblem(
-          "backend:report-parse",
-          "vitest json report can be parsed",
-          observed,
-        ),
-      );
-      failedGates.push("backend:report-parse");
-    }
-  }
+  const expected = ROSTER.available
+    ? ROSTER.gates.filter((g) => g.phase === "backend").length
+    : null;
 
-  if (report && Array.isArray(report.testResults)) {
-    for (const suite of report.testResults) {
-      for (const assertion of suite.assertionResults || []) {
-        if (assertion.status !== "failed") {
-          continue;
-        }
+  for (const file of backendTestFiles()) {
+    const tmpOutput = path.join(
+      os.tmpdir(),
+      `bg-vitest-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
+    );
 
-        const check =
-          String(assertion.title || "").trim()
-          || String(assertion.fullName || "").match(/(\[[A-Z]\d{2}\][^\n]*)/)?.[1]
-          || String(assertion.fullName || "backend:unknown").trim()
-          || "backend:unknown";
-        const rawFailure = (assertion.failureMessages || []).join("\n\n");
-        const eo = extractExpectedObserved(rawFailure, "backend gate assertion passes");
-        problems.push(safeProblem(check, eo.expected, eo.observed));
-        failedGates.push(check);
+    const run = spawnRunner(`backend ${file}`, "npx", [
+      "vitest",
+      "run",
+      file,
+      "--reporter=json",
+      `--outputFile=${tmpOutput}`,
+    ]);
+    if (!run.ok) allOk = false;
+
+    let report = null;
+    if (fs.existsSync(tmpOutput)) {
+      try {
+        report = JSON.parse(fs.readFileSync(tmpOutput, "utf8"));
+      } catch (error) {
+        const observed = truncate(
+          stripAnsi(error instanceof Error ? error.message : String(error)),
+          400,
+        );
+        problems.push(
+          safeProblem(`backend:report-parse ${file}`, "vitest json report can be parsed", observed),
+        );
+        failedGates.push(`backend:report-parse ${file}`);
       }
     }
-  }
 
-  if (!run.ok && problems.length === 0) {
-    // How many gates the runner actually spoke for, against how many the roster
-    // says this phase owns. The GAP is the finding, and it was never recorded.
-    const reported = (report?.testResults ?? []).reduce(
-      (n, suite) => n + (suite.assertionResults?.length ?? 0),
-      0,
-    );
-    const expected = ROSTER.available
-      ? ROSTER.gates.filter((g) => g.phase === "backend").length
-      : null;
-    problems.push(
-      safeProblem(
-        "backend:runner",
-        "backend gates execute and pass",
-        runnerFailureObserved("backend", run, { reported, expected }),
-      ),
-    );
-    failedGates.push("backend:runner");
-  }
+    let failuresHere = 0;
+    if (report && Array.isArray(report.testResults)) {
+      merged.testResults.push(...report.testResults);
+      for (const suite of report.testResults) {
+        for (const assertion of suite.assertionResults || []) {
+          if (assertion.status !== "failed") continue;
+          failuresHere += 1;
 
-  try {
-    if (fs.existsSync(tmpOutput)) {
-      fs.unlinkSync(tmpOutput);
+          const check =
+            String(assertion.title || "").trim()
+            || String(assertion.fullName || "").match(/(\[[A-Z]\d{2}\][^\n]*)/)?.[1]
+            || String(assertion.fullName || "backend:unknown").trim()
+            || "backend:unknown";
+          const rawFailure = (assertion.failureMessages || []).join("\n\n");
+          const eo = extractExpectedObserved(rawFailure, "backend gate assertion passes");
+          problems.push(safeProblem(check, eo.expected, eo.observed));
+          failedGates.push(check);
+        }
+      }
     }
-  } catch {
-    // best effort
+
+    // THE ABORT CASE, NOW NAMED. A file that exits nonzero with no failing
+    // assertion did not finish, and the gate is attributed to THAT FILE rather
+    // than to "backend" — which is the difference between "one file stalled"
+    // and "the backend phase is broken".
+    if (!run.ok && failuresHere === 0) {
+      const reported = (report?.testResults ?? []).reduce(
+        (n, suite) => n + (suite.assertionResults?.length ?? 0),
+        0,
+      );
+      const gate = `backend:runner ${file}`;
+      problems.push(
+        safeProblem(
+          gate,
+          "backend gates execute and pass",
+          runnerFailureObserved(`backend ${file}`, run, { reported, expected }),
+        ),
+      );
+      failedGates.push(gate);
+      abortedFiles.push(file);
+    }
+
+    try {
+      if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
+    } catch {
+      // best effort
+    }
   }
 
   const uniqueFailedGates = dedupeStrings(failedGates);
   process.stderr.write(
-    `[report] phase=backend status=${run.ok ? "pass" : "fail"} problems=${problems.length}\n`,
+    `[report] phase=backend status=${allOk ? "pass" : "fail"} problems=${problems.length}\n`,
   );
   return {
-    passed: run.ok,
+    passed: allOk,
     problems: dedupeProblems(problems),
     failedGates: uniqueFailedGates,
     // EVERY assertion is recorded, not only the failures — recording only
     // failures is exactly what made a pass indistinguishable from an absence.
-    gateResults: vitestGateResults(report, MATCHER),
+    gateResults: vitestGateResults(merged, MATCHER),
+    abortedFiles,
   };
 }
 
@@ -620,7 +717,10 @@ function runFrontendPhase() {
     }
   }
 
-  if (!run.ok && problems.length === 0) {
+  // Same shape as the backend abort: nonzero exit, no failing test, so the
+  // phase did not finish and its unreached gates are unmeasured, not failed.
+  const aborted = !run.ok && problems.length === 0;
+  if (aborted) {
     const runError = stripAnsi(String(extractPlaywrightRunError(report) ?? "")).trim();
     const observed = runError
       ? truncate(firstNonEmptyLine(runError), 400)
@@ -638,12 +738,57 @@ function runFrontendPhase() {
     problems: dedupeProblems(problems),
     failedGates: uniqueFailedGates,
     gateResults: playwrightGateResults(report, MATCHER),
+    aborted,
   };
 }
 
 function writeReport(outPath, payload) {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+/**
+ * GRADABLE, OR NOT A SCORE.
+ *
+ * ── WHY AN ATTEMPT NEEDS THIS ───────────────────────────────────────────────
+ *
+ * `not_run` is honest about a single gate: it was not measured. What the report
+ * could not say is that the ATTEMPT as a whole stopped being a measurement.
+ *
+ * On the 2026-08-17 minimax-m3 cell a stalled worker cost six of seven backend
+ * files. The report published `16/71 pass` and pushed `backend:runner` into
+ * `failed_gates` — so a harness abort arrived at the board as a gate the MODEL
+ * failed, inside a ratio that read like a score. Re-grading that worktree gives
+ * 69/71. Nothing in the artifact marked the number as unusable.
+ *
+ * A runner that aborts leaves gates unmeasured FOR HARNESS REASONS. The pass
+ * count that survives is a lower bound on an unknown, not a result, and it must
+ * never be compared against a run that completed. This states that in the
+ * artifact so a consumer can refuse it rather than average it in.
+ *
+ * THE VERDICT IS UNTOUCHED. A cell that genuinely failed a gate still reads
+ * FAIL — gradability answers "was this measured", not "did it pass", and
+ * collapsing the two would let a broken harness launder a real failure.
+ */
+function gradability({ backend, frontend, folded }) {
+  const aborted = [
+    ...(backend.abortedFiles ?? []).map((f) => `backend ${f}`),
+    ...(frontend.aborted ? ["frontend"] : []),
+  ];
+
+  if (aborted.length === 0) {
+    return { gradable: true, ungradable_reason: null, aborted_runners: [] };
+  }
+
+  const unmeasured = (folded.gate_results ?? []).filter((g) => g.status === "not_run").length;
+  return {
+    gradable: false,
+    ungradable_reason:
+      `${aborted.join(", ")} aborted without reporting a failing test, leaving ${unmeasured} `
+      + "gate(s) unmeasured — the pass count below is a lower bound on an unknown, not a score, "
+      + "and must not be compared against a completed run",
+    aborted_runners: aborted,
+  };
 }
 
 function main() {
@@ -698,6 +843,8 @@ function main() {
     failed_gates: failedGates,
     // WO-GATE-ROSTER additions. Purely additive — nothing above is altered.
     ...folded,
+    // ── IS THIS ATTEMPT A MEASUREMENT AT ALL? ────────────────────────────
+    ...gradability({ backend, frontend, folded }),
   };
 
   writeReport(OUT_FILE, report);
@@ -731,6 +878,12 @@ try {
       },
     ],
     failed_gates: ["runner:exception"],
+    // The runner threw. Nothing was measured, so there is no score to publish.
+    gradable: false,
+    ungradable_reason:
+      "the gate runner threw before it could grade — no phase produced results, so this attempt "
+      + "is not a measurement of the code under test",
+    aborted_runners: [],
     // The runner died. NOTHING was measured, so every roster gate is not_run —
     // never fail (the gates did not fail, the harness did) and never absent
     // (absence reads as pass). Invariants I-3 and I-4.

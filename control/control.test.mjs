@@ -2438,3 +2438,107 @@ test("DIAGNOSTIC: a spawn failure names itself rather than the exit code", () =>
   );
   assert.match(observed, /spawn failed: spawn npx ENOENT/);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRADABILITY — an aborted runner does not publish a score.
+//
+// The minimax-m3 cell published `16/71 pass` with `backend:runner` sitting in
+// `failed_gates`, so a harness abort reached the board as a gate the MODEL
+// failed, inside a ratio that read like a result. That worktree scores 69/71.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A status stream whose newest attempt carries an explicit gradability. */
+function writeGradabilityRun(runs, dir, attempt) {
+  mkdirSync(join(runs, dir), { recursive: true });
+  writeFileSync(
+    join(runs, dir, "gate-roster.json"),
+    JSON.stringify({ total: 2, enumeration: { complete: true }, gates: [{ id: "A" }, { id: "B" }] }),
+  );
+  writeFileSync(
+    join(runs, dir, "manifest.status.jsonl"),
+    JSON.stringify({
+      type: "attempt",
+      attempt: 1,
+      gate_results: [
+        { id: "A", status: "pass" },
+        { id: "B", status: "not_run" },
+      ],
+      ...attempt,
+    }) + "\n",
+  );
+}
+
+test("WALL: an ungradable attempt is published as ungradable, with its reason", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gradable-"));
+  try {
+    const runs = join(root, "runs");
+    writeGradabilityRun(runs, "cumulative", {
+      gradable: false,
+      ungradable_reason: "backend gates-13-16.test.ts aborted without reporting a failing test",
+      aborted_runners: ["backend gates-13-16.test.ts"],
+    });
+
+    const wall = await readWall({ runsRoot: runs, runDir: "cumulative" });
+    assert.equal(wall.gradable, false);
+    assert.match(wall.ungradable_reason, /aborted without reporting a failing test/);
+    assert.deepEqual(wall.aborted_runners, ["backend gates-13-16.test.ts"]);
+
+    // The squares are UNAFFECTED — gradability answers "was this measured",
+    // never "did it pass", and must not repaint a single gate.
+    assert.deepEqual(wall.totals, { passing: 1, failing: 0, untested: 1 });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WALL: gradability is null — never true — for an attempt recorded before the field", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gradable-legacy-"));
+  try {
+    const runs = join(root, "runs");
+    writeGradabilityRun(runs, "cumulative", {});
+
+    const wall = await readWall({ runsRoot: runs, runDir: "cumulative" });
+    assert.equal(
+      wall.gradable,
+      null,
+      "an attempt nothing checked is of UNKNOWN gradability; defaulting to true would vouch for it",
+    );
+    assert.equal(wall.ungradable_reason, null);
+    assert.deepEqual(wall.aborted_runners, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WALL: a completed run is gradable and carries no reason", async () => {
+  const root = mkdtempSync(join(tmpdir(), "gradable-ok-"));
+  try {
+    const runs = join(root, "runs");
+    writeGradabilityRun(runs, "cumulative", { gradable: true, ungradable_reason: null, aborted_runners: [] });
+
+    const wall = await readWall({ runsRoot: runs, runDir: "cumulative" });
+    assert.equal(wall.gradable, true);
+    assert.equal(wall.ungradable_reason, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── PER-FILE BACKEND INVOCATION ─────────────────────────────────────────────
+
+test("REPORT: the backend phase spawns one runner PER FILE, under one phase marker", () => {
+  const src = readFileSync(join(BENCH, "tasks", "backgammon", "gates", "report.mjs"), "utf8");
+  const body = src.slice(src.indexOf("function runBackendPhase()"), src.indexOf("function firstFrontendFailureMessage"));
+
+  assert.match(body, /for \(const file of backendTestFiles\(\)\)/, "the suite is invoked file by file");
+  assert.match(body, /spawnRunner\(`backend \$\{file\}`/, "each file gets its own process");
+  assert.ok(
+    !/spawnPhase\(/.test(body),
+    "and NOT via spawnPhase — a second `[report] phase=backend` opener would tell the board a new phase began",
+  );
+
+  // Exactly one open and one close for the whole set: the python adapter turns
+  // these two lines into the board's gate-phase-start / gate-phase-end events.
+  assert.equal((body.match(/\[report\] phase=backend target=/g) ?? []).length, 1, "one phase opener");
+  assert.equal((body.match(/\[report\] phase=backend status=/g) ?? []).length, 1, "one phase closer");
+});

@@ -851,6 +851,22 @@ class RealSessionRunner:
                     attempt_record["gate_results"] = attempt.get("gate_results")
                     attempt_record["gate_totals"] = attempt.get("gate_totals")
                     attempt_record["conformed"] = attempt.get("conformed")
+                    # IS THIS ATTEMPT A MEASUREMENT AT ALL?
+                    #
+                    # A gate runner that aborts leaves gates unmeasured for
+                    # HARNESS reasons, and the pass count that survives is a
+                    # lower bound on an unknown rather than a score. Carried
+                    # through verbatim so a reader can refuse the number instead
+                    # of averaging it into a comparison.
+                    #
+                    # `None` (not True) when the report predates the field: an
+                    # older attempt is of UNKNOWN gradability, and defaulting it
+                    # to gradable would silently vouch for runs nothing checked.
+                    attempt_record["gradable"] = attempt.get("gradable")
+                    attempt_record["ungradable_reason"] = attempt.get("ungradable_reason")
+                    attempt_record["aborted_runners"] = list(
+                        attempt.get("aborted_runners", []) or []
+                    )
                     attempt_record["attempt_cost_usd"] = attempt.get("attempt_cost_usd")
                 else:
                     attempt_record["attempt"] = idx

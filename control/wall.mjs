@@ -358,6 +358,22 @@ export async function readWall({ runsRoot, runDir, benchRoot = null }) {
 
   const currentAttempt = attempts.length > 0 ? attempts[attempts.length - 1].attempt : null;
 
+  // ── IS THE RATIO A SCORE, OR A LOWER BOUND ON AN UNKNOWN? ────────────────
+  //
+  // A gate runner that aborts leaves gates unmeasured for HARNESS reasons. The
+  // wall already draws those squares as untested, which is right — but the
+  // HEADLINE still reads `16/71 passing`, and a ratio reads as a result.
+  //
+  // The harness now states this per attempt (`report.mjs:gradability`). It is
+  // passed through untouched, exactly like every other verdict on this surface:
+  // the wall reports gradability, it does not decide it.
+  //
+  // `null` means UNKNOWN — an attempt recorded before the field existed. It is
+  // not `true`: vouching for runs that nothing checked is the fabrication this
+  // file exists to refuse.
+  const last = attempts.length > 0 ? attempts[attempts.length - 1] : null;
+  const gradable = last ? (last.gradable ?? null) : null;
+
   return {
     ok: true,
     contract_version: WALL_CONTRACT_VERSION,
@@ -378,6 +394,11 @@ export async function readWall({ runsRoot, runDir, benchRoot = null }) {
     // Which test run these results came from. Context for the squares, not a
     // state of them.
     attempt: Number.isFinite(currentAttempt) ? currentAttempt : null,
+    // Whether the last attempt's numbers are a measurement. Three states:
+    // true, false, and null for "recorded before anyone asked".
+    gradable,
+    ungradable_reason: last?.ungradable_reason ?? null,
+    aborted_runners: Array.isArray(last?.aborted_runners) ? last.aborted_runners : [],
     gates: folded.gates,
     totals: folded.totals,
     unwired,

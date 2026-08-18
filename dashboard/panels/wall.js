@@ -103,6 +103,17 @@ function headline(suite) {
   // deriving it — the panel still decides nothing.
   const norun = suite.suite_source === "enumerated" ? `<span class="tag">NO RUN — SUITE ENUMERATED</span>` : "";
 
+  // A RATIO READS AS A RESULT, SO SAY WHEN IT IS NOT ONE.
+  //
+  // `gradable:false` means a gate runner aborted and left gates unmeasured for
+  // harness reasons — the pass count is a lower bound on an unknown, not a
+  // score, and must not be compared against a completed run. The squares
+  // already draw those gates as untested; without this the HEADLINE still reads
+  // like a verdict. `16/71 passing` on a cell that actually scores 69/71 is the
+  // exact reading this prevents.
+  const ungradable =
+    suite.gradable === false ? `<span class="tag bad">NOT A SCORE — RUNNER ABORTED</span>` : "";
+
   // A partial enumeration is still a true count of what was enumerated — it is
   // labelled rather than hidden, because the ratio's denominator moved.
   const partial = suite.suite?.complete === false ? `<span class="tag">PARTIAL ENUMERATION</span>` : "";
@@ -112,6 +123,7 @@ function headline(suite) {
     ${failing > 0 ? `<span class="tag bad">${failing} FAILING</span>` : ""}
     ${untested > 0 ? `<span class="sub">${untested} not yet tested</span>` : ""}
     ${norun}
+    ${ungradable}
     ${partial}`;
 }
 
@@ -206,7 +218,25 @@ function legend(suite) {
       )}</span>
       <span class="note">${esc(denom)}</span>
       <span class="note">${esc(provenance(suite))}</span>
+      ${suite?.gradable === false ? `<span class="note">${esc(gradabilityNote(suite))}</span>` : ""}
     </div>`;
+}
+
+/**
+ * WHY THIS ATTEMPT IS NOT A MEASUREMENT.
+ *
+ * The control plane passes the harness's own sentence through; this renders it
+ * and names the runners that aborted. Stating the reason is the whole point — an
+ * unexplained "not a score" badge is the same dead end as an unexplained empty
+ * grid, which is what this panel keeps having to be rescued from.
+ */
+function gradabilityNote(suite) {
+  const reason = suite?.ungradable_reason ?? null;
+  const aborted = Array.isArray(suite?.aborted_runners) ? suite.aborted_runners : [];
+  if (reason) return reason;
+  return aborted.length
+    ? `${aborted.join(", ")} aborted, so gates below were left unmeasured by the harness`
+    : "a gate runner aborted, so the pass count is a lower bound rather than a score";
 }
 
 /**
