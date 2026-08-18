@@ -132,6 +132,45 @@ const RUNS_ROOT = join(BENCH_ROOT, "runs");
 const PYTHON = args.python ?? join(BENCH_ROOT, ".venv", "bin", "python");
 const RUN_SCRIPT = join(BENCH_ROOT, "scripts", "run_cumulative.py");
 
+/**
+ * WHICH RUN DIRECTORY A RUN-SCOPED READ SHOULD DEFAULT TO.
+ *
+ * ── THE HOLE THIS FILLS ─────────────────────────────────────────────────────
+ *
+ * Run-scoped surfaces (`/api/wall`, `/api/feedback`) take `?run_dir=` and fell
+ * back to the literal `"cumulative"` when the caller named none. That was true
+ * while every cell wrote to `runs/cumulative`, and stopped being true when
+ * campaigns became per-model: `campaign.mjs:campaignDirName` now lands a cell in
+ * `runs/cumulative-<model>`, and the legacy directory is ARCHIVED on a wipe
+ * (RUNBOOK §2) rather than reused.
+ *
+ * So the default addressed a directory that does not exist. `readWall` handled
+ * that exactly as designed — no pinned roster, so it enumerated the live suite,
+ * and no `manifest.status.jsonl`, so no gate carried an outcome — and served a
+ * TRUE 71-gate denominator with zero results against it. The board rendered
+ * what it was sent: `0/71 passing` over 71 empty squares, on a run whose own
+ * artifacts recorded 16 passing, 2 failing, 53 not run.
+ *
+ * THE LOG IS THE AUTHORITY, not a name pattern. `newestLog` (via `readRunState`)
+ * resolves the run directory from the harness's own PROGRESS lines and rejects a
+ * log whose directory is gone, so this follows a rename, a per-model campaign,
+ * and the legacy layout without knowing about any of them — `readGateActivity`
+ * already resolves the live run this way.
+ *
+ * NULL IS A REAL ANSWER. A bench with no cell log has no active run, and this
+ * returns null so `resolveRunDir` falls through to `DEFAULT_RUN_DIR` and the
+ * reader reports `unwired` with its reason. An invented directory would be the
+ * fabrication invariant I-2 forbids.
+ */
+async function activeRunDir() {
+  try {
+    const run = await readRunState({ runsRoot: RUNS_ROOT, launcher });
+    return run?.run_dir ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── mutable state: the ONLY things this service owns ─────────────────────────
 
 /** The launcher process this service spawned, if any. */
@@ -958,7 +997,7 @@ const server = createServer(async (req, res) => {
       // feed to judge.
       let feedback = { rows: [], error: null };
       try {
-        const fb = await readFeedback({ runsRoot: RUNS_ROOT, runDir: null, limit });
+        const fb = await readFeedback({ runsRoot: RUNS_ROOT, runDir: await activeRunDir(), limit });
         feedback = { rows: fb.ok ? feedbackRows(fb.messages) : [], error: null };
       } catch (err) {
         // Additive instrumentation: a read failure must degrade the feed to its
@@ -1025,7 +1064,7 @@ const server = createServer(async (req, res) => {
     // surface that prettified the text would answer a different question than
     // the one an operator is asking when they open it.
     //
-    //   ?run_dir=<name>   default "cumulative"
+    //   ?run_dir=<name>   default: the ACTIVE run (see `activeRunDir`)
     //   ?cell=<name>      default: the most recently written cell
     //   ?limit=<n>        default 50, newest-last
     //   ?text=0           omit bodies (index only)
@@ -1033,7 +1072,7 @@ const server = createServer(async (req, res) => {
       const limitRaw = Number(url.searchParams.get("limit"));
       const result = await readFeedback({
         runsRoot: RUNS_ROOT,
-        runDir: url.searchParams.get("run_dir"),
+        runDir: url.searchParams.get("run_dir") ?? (await activeRunDir()),
         cell: url.searchParams.get("cell"),
         limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50,
         includeText: url.searchParams.get("text") !== "0",
@@ -1056,9 +1095,13 @@ const server = createServer(async (req, res) => {
     // Never 500s on a missing roster: that is a real state (the run predates
     // the artifact), reported as ok:true + unwired + a reason.
     if (path === "/api/wall" && req.method === "GET") {
+      // An explicit ?run_dir= always wins — that is how an operator inspects an
+      // archived run. With none, the ACTIVE run is the answer, resolved from the
+      // cell log rather than from a directory name this file would have to keep
+      // in step with the campaign layout. See `activeRunDir`.
       const wall = await readWall({
         runsRoot: RUNS_ROOT,
-        runDir: url.searchParams.get("run_dir"),
+        runDir: url.searchParams.get("run_dir") ?? (await activeRunDir()),
         benchRoot: BENCH_ROOT,
       });
       sendJson(res, wall.ok ? 200 : 400, wall);

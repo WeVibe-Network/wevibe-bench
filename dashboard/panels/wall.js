@@ -90,6 +90,19 @@ function headline(suite) {
   const failing = suite.totals?.failing ?? 0;
   const untested = suite.totals?.untested ?? 0;
 
+  // A SUITE WITH NO RUN BEHIND IT SAYS SO, IN THE HEADLINE.
+  //
+  // `suite_source:"enumerated"` means the server found no run at the directory
+  // it read and enumerated the live harness suite instead — a true denominator
+  // with nothing measured against it. That renders as `0/N passing`, which is
+  // indistinguishable from a run that genuinely passed nothing, and it is how a
+  // stale run-directory default went unnoticed for three days: the wall showed
+  // `0/71 passing` while the run on disk had recorded 16 passing and 2 failing.
+  //
+  // The server already publishes which it is. This states it rather than
+  // deriving it — the panel still decides nothing.
+  const norun = suite.suite_source === "enumerated" ? `<span class="tag">NO RUN — SUITE ENUMERATED</span>` : "";
+
   // A partial enumeration is still a true count of what was enumerated — it is
   // labelled rather than hidden, because the ratio's denominator moved.
   const partial = suite.suite?.complete === false ? `<span class="tag">PARTIAL ENUMERATION</span>` : "";
@@ -98,6 +111,7 @@ function headline(suite) {
     <span class="sub"><span class="bright">${passing}</span>/${total} passing</span>
     ${failing > 0 ? `<span class="tag bad">${failing} FAILING</span>` : ""}
     ${untested > 0 ? `<span class="sub">${untested} not yet tested</span>` : ""}
+    ${norun}
     ${partial}`;
 }
 
@@ -191,5 +205,44 @@ function legend(suite) {
           : `these are the results of the last completed test run (attempt ${attempt})`,
       )}</span>
       <span class="note">${esc(denom)}</span>
+      <span class="note">${esc(provenance(suite))}</span>
     </div>`;
+}
+
+/**
+ * WHICH RUN THESE SQUARES CAME FROM, in words.
+ *
+ * ── WHY THE WALL NOW NAMES ITS OWN SOURCE ───────────────────────────────────
+ *
+ * The payload always carried `run_dir` and `suite_source`; nothing rendered
+ * them. So when the control plane's default run directory went stale against a
+ * per-model campaign layout, the wall drew a fully enumerated 71-gate suite with
+ * every square empty and gave the operator NO WAY TO TELL that it was reading a
+ * directory the run had never written to. It read as "the wall is broken" for
+ * three days. It was reading the wrong run, and saying which run would have made
+ * that the first thing anyone noticed.
+ *
+ * A panel that shows measurements must be able to say what it measured. This is
+ * a straight restatement of two published fields — no derivation, no second
+ * opinion about state, consistent with the rest of this file.
+ */
+function provenance(suite) {
+  const dir = suite?.run_dir ?? null;
+  if (!dir) return "the control plane did not say which run these results came from";
+
+  switch (suite?.suite_source) {
+    case "run":
+      // The strong case: a roster pinned to the run it graded.
+      return `from runs/${dir}, graded against that run's own pinned roster`;
+    case "enumerated":
+      // The case that hid the defect. The suite is real and the run is not:
+      // these squares are empty because nothing was read, not because nothing
+      // passed, and the difference is the whole point of the panel.
+      return (
+        `no run at runs/${dir} — the suite below is enumerated live from the harness and NO run's ` +
+        "outcomes are being shown, so every square is unmeasured rather than failed"
+      );
+    default:
+      return `from runs/${dir}, source unstated`;
+  }
 }

@@ -246,3 +246,48 @@ test("the grid is a fixed 12 columns at every suite size", () => {
     assert.ok(html.includes("repeat(12,1fr)"), `suite size ${n} must still draw 12 columns`);
   }
 });
+
+// ── PROVENANCE: the wall names the run it is showing ─────────────────────────
+//
+// These pin the defect that made a stale run-directory default invisible: the
+// panel rendered a real 71-gate denominator with every square empty and said
+// nothing about WHICH run it had read. `run_dir` and `suite_source` were in the
+// payload the whole time.
+
+test("the legend names the run directory the squares came from", () => {
+  const html = renderWall(boardWith(suiteWith(GATES, { run_dir: "cumulative-minimax-minimax-m3" })));
+  assert.ok(
+    html.includes("runs/cumulative-minimax-minimax-m3"),
+    "a panel that shows measurements must say what it measured",
+  );
+  assert.ok(html.includes("pinned roster"), "and that the roster was pinned to that run");
+});
+
+test("AN ENUMERATED SUITE IS LABELLED: no run behind it, so no square is a verdict", () => {
+  // The exact payload the stale default produced: a true denominator, a live
+  // enumeration, and not one outcome.
+  const gates = GATES.map((g) => ({ ...g, state: "untested" }));
+  const html = renderWall(
+    boardWith(
+      suiteWith(gates, {
+        run_dir: "cumulative",
+        suite_source: "enumerated",
+        attempt: null,
+        unwired: ["gate-outcomes"],
+      }),
+    ),
+  );
+
+  assert.ok(html.includes("NO RUN — SUITE ENUMERATED"), "the headline states it");
+  assert.ok(html.includes("no run at runs/cumulative"), "the legend names the directory that was read");
+  assert.ok(
+    html.includes("unmeasured rather than failed"),
+    "and says the squares are empty because nothing was read, not because nothing passed",
+  );
+});
+
+test("a run-backed suite carries NO enumerated-suite warning", () => {
+  const html = renderWall(boardWith(suiteWith(GATES)));
+  assert.ok(!html.includes("NO RUN — SUITE ENUMERATED"), "the warning is for the enumerated case only");
+  assert.ok(!html.includes("no run at runs/"), "and so is its legend line");
+});

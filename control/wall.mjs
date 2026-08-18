@@ -54,7 +54,20 @@ export const WALL_CONTRACT_VERSION = 2;
 /** The published per-gate state vocabulary. Three states, and no more. */
 export const GATE_STATES = /** @type {const} */ (["passing", "failing", "untested"]);
 
-/** The campaign run directory when the caller does not name one. */
+/**
+ * LAST-RESORT run directory, and nothing more.
+ *
+ * This is NOT "the current run". Campaigns are per-model
+ * (`campaign.mjs:campaignDirName` → `runs/cumulative-<model>`) and the legacy
+ * directory is archived on a wipe, so the caller resolves the ACTIVE run from
+ * the cell log (`server.mjs:activeRunDir`) and passes it. This constant only
+ * covers a bench with no cell log at all, where naming a directory that happens
+ * not to exist is the honest outcome: the reader reports `unwired` with its
+ * reason rather than inventing results.
+ *
+ * Serving this as a silent default is what put `0/71 passing` over an empty
+ * wall while the run's own artifacts recorded 16 passing and 2 failing.
+ */
 export const DEFAULT_RUN_DIR = "cumulative";
 
 /**

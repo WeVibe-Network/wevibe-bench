@@ -213,7 +213,16 @@ export async function readRunState({ runsRoot, launcher }) {
 
   return {
     state,
-    run_dir: null,
+    // THE RUN DIRECTORY THIS CELL WRITES INTO, propagated from the log's own
+    // text (`newestLog` already resolves it, and rejects the log outright when
+    // the directory is gone). It was published as a hardcoded null, so every
+    // reader that asked the control plane "which run is this?" was told
+    // "none" — and the surfaces that key off a run directory silently fell
+    // back to the legacy default. That default stopped being correct when
+    // campaigns became per-model (`campaign.mjs:campaignDirName`), at which
+    // point the gate wall began reading `runs/cumulative`, a directory that no
+    // longer exists, and served a fully enumerated suite with zero outcomes.
+    run_dir: log.run_dir ?? null,
     log_path: log.path,
     log_name: log.name,
     pid: launcher?.pid ?? null,

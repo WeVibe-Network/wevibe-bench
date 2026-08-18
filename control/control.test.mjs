@@ -32,13 +32,14 @@ import { matchRuntime, DECLARED_CONTEXT, CONTEXT_CHOICES, RETIRED_ALIASES, readR
 import { readBaselines, BASELINES_FILE, isArchivedRun, baselineId, identifyCell } from "./baselines.mjs";
 import { manifestArgFor, campaignDirName } from "./campaign.mjs";
 import { readCloud, resolveCloudModel, CLOUD_MODELS, ABSOLUTE_MAX_USD } from "./cloud.mjs";
-import { sessionIdFrom, terminalFrom, pidAlive, newestLog } from "./runstate.mjs";
+import { sessionIdFrom, terminalFrom, pidAlive, newestLog, readRunState } from "./runstate.mjs";
 import { mapEvent, EventRing } from "./events.mjs";
 import { parseGateEvents, gradingStatus } from "./gate-events.mjs";
 import { createProfile, readProfiles, transferOf, attachRun } from "./profiles.mjs";
 import { readModelsLedger } from "./models-ledger.mjs";
 import {
   attemptRecords,
+  DEFAULT_RUN_DIR,
   foldGateStates,
   readStatusRecords,
   readWall,
@@ -2272,4 +2273,98 @@ test("LEDGER: a cell in flight blocks every launch on every row, both substrates
     for (const p of b.profiles) assert.equal(p.can_run.allowed, false);
   }
   rmSync(root, { recursive: true, force: true });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION: THE GATE WALL READ A RUN DIRECTORY THAT NO LONGER EXISTS.
+//
+// Campaigns became per-model (`campaignDirName` → `runs/cumulative-<model>`)
+// while every run-scoped read still defaulted to the literal `"cumulative"`.
+// Nothing failed loudly: `readWall` found no pinned roster there, enumerated the
+// live suite instead, found no `manifest.status.jsonl`, and served a TRUE
+// denominator with zero outcomes against it. The board printed `0/71 passing`
+// over 71 empty squares while the run's own artifacts recorded 16 passing and
+// 2 failing — the exact "measured and passed" vs "not measured" confusion the
+// wall was rebuilt to make impossible.
+//
+// The old suite could not catch this: every fixture named its run directory
+// `cumulative`, so the stale default was correct in the tests and wrong only on
+// disk. These two assert the join the server actually depends on — the run
+// directory is RESOLVED FROM THE LOG, and a per-model campaign folds normally.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A campaign directory with a pinned roster and one attempt's outcomes. */
+function writeCampaignCell(runs, dir, { gates, results }) {
+  mkdirSync(join(runs, dir, "sessions"), { recursive: true });
+  writeFileSync(
+    join(runs, dir, "gate-roster.json"),
+    JSON.stringify({ total: gates.length, enumeration: { complete: true }, gates }),
+  );
+  writeFileSync(
+    join(runs, dir, "manifest.status.jsonl"),
+    JSON.stringify({ type: "attempt", attempt: 1, gate_results: results }) + "\n",
+  );
+  writeFileSync(
+    join(runs, "off-cell-live.log"),
+    "PROGRESS step=worktree-git-init path=" + join(runs, dir, "sessions", "cell", "worktree") + "\n",
+  );
+}
+
+test("RUN STATE: the resolved run directory is PUBLISHED, not dropped as null", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rundir-"));
+  try {
+    const runs = join(root, "runs");
+    const dir = campaignDirName("minimax/minimax-m3");
+    writeCampaignCell(runs, dir, {
+      gates: [{ id: "CONF" }],
+      results: [{ id: "CONF", status: "pass" }],
+    });
+
+    const state = await readRunState({ runsRoot: runs, launcher: null });
+    assert.equal(
+      state.run_dir,
+      dir,
+      "the log names its run directory and the contract declares the field — publishing null " +
+        "forces every run-scoped reader back onto a default that a per-model campaign invalidates",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WALL: a per-model campaign's outcomes are served, never a zeroed suite", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wall-campaign-"));
+  try {
+    const runs = join(root, "runs");
+    const dir = campaignDirName("minimax/minimax-m3");
+    writeCampaignCell(runs, dir, {
+      gates: [{ id: "CONF" }, { id: "A" }, { id: "B" }],
+      results: [
+        { id: "CONF", status: "pass" },
+        { id: "A", status: "fail" },
+        { id: "B", status: "not_run" },
+      ],
+    });
+
+    // What the server now passes: the run directory resolved from the log.
+    const runDir = (await readRunState({ runsRoot: runs, launcher: null })).run_dir;
+    const wall = await readWall({ runsRoot: runs, runDir });
+
+    assert.equal(wall.run_dir, dir);
+    assert.equal(wall.suite_source, "run", "the run's own pinned roster is authoritative");
+    assert.deepEqual(wall.totals, { passing: 1, failing: 1, untested: 1 });
+    assert.deepEqual(wall.unwired, [], "outcomes exist, so nothing is unwired");
+
+    // AND THE DEFAULT ALONE IS NOT THE ANSWER. Naming no run directory falls
+    // back to `cumulative`, which this campaign never wrote — the read must
+    // report that as unwired rather than as a suite nobody passed.
+    const stale = await readWall({ runsRoot: runs, runDir: null });
+    assert.equal(stale.run_dir, DEFAULT_RUN_DIR);
+    assert.ok(
+      stale.unwired.includes("gate-roster"),
+      "an absent run directory is unwired-with-a-reason, never a wall of zeroes",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
