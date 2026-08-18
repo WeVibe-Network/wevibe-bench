@@ -26,7 +26,7 @@ Read these once. Each one has cost a real run.
    --task --seed --manifest` precede `run`. After `run`, argparse exits 2.
 4. **One wipe, before the first cell. Never after.** A wipe once cells exist silently
    converts every later ON cell into an OFF cell and the campaign reports no lift.
-5. **The stack must be verified clean before you launch** — 14/14, no exceptions.
+5. **The stack must be verified clean before you launch** — 13/13, no exceptions.
 
 ---
 
@@ -90,18 +90,17 @@ rules (§0 rule 4).
 All four must answer:
 
 ```bash
-for p in 4545 4550 4451 4440; do nc -z 127.0.0.1 $p && echo "$p OK" || echo "$p FAIL"; done
+for p in 4545 4550 4440; do nc -z 127.0.0.1 $p && echo "$p OK" || echo "$p FAIL"; done
 ```
 
 | Port | What | If it fails |
 |---|---|---|
 | 4545 | local relay proxy (subject + extraction models) | Do NOT restart it. Escalate. |
-| 4550 | **leader** bench clone MCP (identity `f7733d6e`) | `cd ../wevibe-meta && bash scripts/bench-clone.sh start leader` |
-| 4451 | **contributor** bench clone MCP (identity `5292550d`) | `cd ../wevibe-meta && bash scripts/bench-clone.sh start contributor` |
+| 4550 | the ONE bench MCP (identity `aa2aa706`) | `cd ../wevibe-meta && make bench-mcp-start` |
 | 4440 | hub | Part of the docker stack — see §3 wipe. |
 
-Both clones are **managed services**: the harness connects to them, it never spawns
-them. See §7 for why this matters and what it broke.
+The bench MCP is a **managed service**: the harness connects to it, it never spawns
+it. See §7 for why this matters and what it broke.
 
 **Worker image** — rebuild ONLY if `docker/worker/` changed since the last build. The
 vendored opencode plugin is baked in at build time, so a stale image silently runs a
@@ -146,10 +145,10 @@ do not pass `-p no:xdist`, it conflicts with the configured addopts and errors.
 cd ../wevibe-meta && make redeploy 2>&1 | tail -20
 ```
 
-This stops both clones, sweeps strays, destroys compose volumes, wipes bench + host
-state, brings the stack back up, rebuilds, restarts both clones, and verifies.
+This stops the bench MCP, sweeps strays, destroys compose volumes, wipes bench + host
+state, brings the stack back up, rebuilds, restarts the bench MCP, and verifies.
 
-**Gate: `=== VERIFY-CLEAN: PASS (14/14) ===`.** Any FAIL: STOP and fix. The 14 checks:
+**Gate: `=== VERIFY-CLEAN: PASS (13/13) ===`.** Any FAIL: STOP and fix. The 13 checks:
 
 | # | Check | What it protects |
 |---|---|---|
@@ -158,19 +157,20 @@ state, brings the stack back up, rebuilds, restarts both clones, and verifies.
 | 5 | chain-young | fresh chain (height ≤ 1500) |
 | 6 | postgres-zero | orgs=0 members=0 |
 | 7-8 | host-state-clean, preserved-intact | host residue gone, your keys untouched |
-| 9-10 | bench-keystores-fresh, bench-state-clean | stale `K_master` cannot survive |
-| 11 | clone-fresh-4550 | leader clone live **and identity `f7733d6e`** |
-| 12 | clone-fresh-4451 | contributor clone live **and identity `5292550d`** |
-| 13 | contributor-3001 | dashboard |
-| 14 | no-stray-clones | no orphan clones from aborted runs |
+| 9-10 | bench-keystore-fresh, bench-state-clean | stale `K_master` cannot survive |
+| 11 | mcp-fresh-4550 | the ONE bench MCP live **and identity `aa2aa706`** |
+| 12 | contributor-3001 | dashboard |
+| 13 | no-stray-mcp | retired ports 4451/4460-4463 silent |
 
-Checks 11/12 assert the served ed25519 fingerprint, not just liveness — a live clone
+Check 11 asserts the served ed25519 fingerprint, not just liveness — a live MCP
 serving the WRONG identity is exactly the defect that burned 2026-08-11 (§7).
 
-**Why the keystore wipe is mandatory:** the chain wipe destroys the on-chain org and
-its epoch key, so local `K_master` goes stale. Skip it and the next `register-org`
-creates an org whose epoch key mismatches, and recall returns `decrypt_failed` — which
-surfaces hours later on the first ON cell, looking like a recall bug.
+**Why the keystore wipe is mandatory:** the keystore is re-commissioned from the leader
+seed by `bench-mcp-start` on every wipe; the seed + mnemonic
+(`~/.wevibe/bench/leader-seed.txt` / `leader-mnemonic.txt`) survive. A stale keystore
+breaks recall with `decrypt_failed` — which surfaces hours later on the first ON cell,
+looking like a recall bug. (The retired `~/.wevibe/bench/contrib-keystore/` is NOT
+auto-wiped — Walter deletes it manually.)
 
 ### 3.3 OFF CELL — the first cell, always unscored
 
@@ -180,7 +180,7 @@ The corpus is empty by construction, so the first OFF cell exists to build one.
 cd /Users/jerrysmith/Desktop/wevibe-workspace/wevibe-bench
 TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
   --model qwen3.6-35b-a3b-bench \
-  run --until-review --mode off \
+  run --mode off \
   < /dev/null > "runs/off-cell-$TS.log" 2>&1 & disown
 echo "log=runs/off-cell-$TS.log"
 ```
@@ -191,32 +191,29 @@ Note the three things that matter: `--model` **before** `run`, `< /dev/null`, an
 `--mode off` only *validates* that the current cell is an OFF cell — it does not
 restructure the schedule. `--org` is optional for OFF (falls back to `wevibe-org-0`).
 
-### 3.4 EXTRACT — separate invocation, after every cell
+### 3.4 EXTRACT — dashboard-driven, after every cell
 
-```bash
-.venv/bin/python scripts/run_cumulative.py \
-  --org wevibe-org-0 --model qwen3.6-35b-a3b-bench extract
-```
+The CLI `extract` subcommand is **DEAD** (removed by `ba2947a`). Extraction is now
+dashboard-driven: point the dashboard at the cell's exported session DB
+(`OPENCODE_DB_PATH=<cell>/session-db/opencode.db`) → Sessions page → "Extract with this
+model" → `/v1/extract`. Never fold this into the run command.
 
-Never fold this into the run command.
-
-**`--model` must match the manifest's model on EVERY subcommand**, not just `run`.
-The model pin feeds the roster hash, so omitting it makes the tool compute a different
-hash and refuse:
+**`--model` must match the manifest's model on EVERY subcommand** (`run`, `state`), not
+just `run`. The model pin feeds the roster hash, so omitting it makes the tool compute a
+different hash and refuse:
 
 ```
 ValueError: cannot resume: roster hash drift detected (manifest=0e99e683… expected=2a8f3ecd…); start a fresh run
 ```
 
-That error means "you forgot `--model`", not "your manifest is corrupt". Same applies
-to `state`, `resume`, `list-pending`, and the rest.
+That error means "you forgot `--model`", not "your manifest is corrupt".
 
 ### 3.5 ON CELL — the first scored cell
 
 ```bash
 TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
   --org wevibe-org-0 --model qwen3.6-35b-a3b-bench \
-  run --until-review --mode on \
+  run --mode on \
   < /dev/null > "runs/on-cell-$TS.log" 2>&1 & disown
 echo "log=runs/on-cell-$TS.log"
 ```
@@ -316,10 +313,9 @@ grep -E "org_setup_mcp_identity_verified|step=create_org |poll_leader_membership
 Healthy looks exactly like this:
 
 ```
-phase=org_setup_mcp_identity_verified mcp_url=http://127.0.0.1:4550 leader_ed_fp=f7733d6e status=ok
+phase=org_setup_mcp_identity_verified mcp_url=http://127.0.0.1:4550 leader_ed_fp=aa2aa706 status=ok
 step=create_org status=ok dur_ms=5312
 step=poll_leader_membership status=ok dur_ms=7
-step=contributor_pubkeys status=ok dur_ms=2
 ```
 
 Any `ERROR` in that window: stop, read §7, do not wait.
@@ -398,22 +394,23 @@ The chain of consequences:
 2. leader-signer calls `POST /v1/org-setup` on it.
 3. That endpoint stamps **that MCP's** pubkey as the org's leader → `05c4b8cb…`.
 4. The hub writes it as the org's only `members` row.
-5. The harness then polls for membership as **itself** (`8d46fc08…`, fp `f7733d6e`).
+5. The harness then polls for membership as **itself** (ed fp `aa2aa706`).
 6. It never finds itself. 30 s later: RuntimeError.
 
 The Touch ID prompt was the tell: it appeared only when the run took the *fresh-create*
 path. Every earlier run reused an existing org (`phase=reuse`) and never called
 org-setup at all — which is why the prompt seemed to come and go at random.
 
-**Fix:** default is now `:4550`, the seed-derived bench leader clone. Plus a fail-fast
+**Fix:** default is now `:4550`, the seed-derived bench MCP. Plus a fail-fast
 guard in `create_org` that probes `/v1/identity/pubkeys` and refuses to register unless
 the org-setup MCP's ed25519 key IS the harness leader's. Unreachable is also a hard
 fail — a run on an unverified seam is VOID-INSTRUMENT by construction.
 
-### Cause 2 — the contributor MCP was an orphan process
+### Cause 2 — the contributor MCP was an orphan process (SUPERSEDED)
 
-The cumulative run path **never calls `bring_up()`**. It assumes both MCPs are already
-running. But only `:4550` was a managed service — nothing started `:4451`.
+The cumulative run path **never calls `bring_up()`**. It assumes the MCP is already
+running. But only `:4550` was a managed service — nothing started `:4451` (the retired
+contributor clone).
 
 The campaign had been silently depending on an **Aug-7 orphan process** to serve the
 contributor identity. It survived every wipe and predated the current dist by days.
@@ -423,14 +420,10 @@ When it was finally swept, runs failed at:
 step=contributor_pubkeys err=mcp unreachable for /v1/identity/pubkeys
 ```
 
-**Fix:** `bench-clone.sh` now takes a role (`leader`|`contributor`), `make redeploy`
-starts both, and verify-clean checks 11/12 assert BOTH clones' identity fingerprints.
-
-**A subtle trap this exposed:** `config/bench.env` exports `WEVIBE_IDENTITY_SEED_HEX`
-globally as the **leader** seed. A contributor started without an explicit per-role
-seed override silently serves the **leader's** identity on `:4451` — two ports, one
-identity, contributor memories attributed to the leader. `bench-clone.sh` now sets the
-seed per role explicitly, and check 12 would catch it.
+**Superseded (2026-08-16).** The two-clone model is deleted (`27aeb07`/`ba2947a`/`d7ae146`);
+there is no contributor MCP and no `contributor_pubkeys` step. The ONE bench MCP on
+`:4550` is a managed service (`bench-mcp.sh start`); verify-clean check 11
+(`mcp-fresh-4550`) asserts its served fingerprint `aa2aa706` against the leader seed's.
 
 ### The general lesson
 
@@ -444,7 +437,7 @@ identity asserted, not assumed — which is why the checks now compare fingerpri
 
 ```bash
 # preflight
-for p in 4545 4550 4451 4440; do nc -z 127.0.0.1 $p && echo "$p OK" || echo "$p FAIL"; done
+for p in 4545 4550 4440; do nc -z 127.0.0.1 $p && echo "$p OK" || echo "$p FAIL"; done
 
 # test
 .venv/bin/python -m pytest -q
@@ -452,24 +445,21 @@ for p in 4545 4550 4451 4440; do nc -z 127.0.0.1 $p && echo "$p OK" || echo "$p 
 # wipe (once, before first cell)
 cd ../wevibe-meta && make redeploy 2>&1 | tail -20
 
-# start either clone by hand
-cd ../wevibe-meta && bash scripts/bench-clone.sh start leader
-cd ../wevibe-meta && bash scripts/bench-clone.sh start contributor
-cd ../wevibe-meta && bash scripts/bench-clone.sh sweep     # kill orphans, keep managed
+# start the bench MCP by hand
+cd ../wevibe-meta && make bench-mcp-start
 
 # OFF cell
 TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
-  --model qwen3.6-35b-a3b-bench run --until-review --mode off \
+  --model qwen3.6-35b-a3b-bench run --mode off \
   < /dev/null > "runs/off-cell-$TS.log" 2>&1 & disown
 
 # ON cell
 TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
-  --org wevibe-org-0 --model qwen3.6-35b-a3b-bench run --until-review --mode on \
+  --org wevibe-org-0 --model qwen3.6-35b-a3b-bench run --mode on \
   < /dev/null > "runs/on-cell-$TS.log" 2>&1 & disown
 
-# extract (after every cell) — --model REQUIRED, must match the manifest
-.venv/bin/python scripts/run_cumulative.py \
-  --org wevibe-org-0 --model qwen3.6-35b-a3b-bench extract
+# extract (after every cell) — dashboard-driven; the CLI `extract` subcommand is DEAD
+#   OPENCODE_DB_PATH=<cell>/session-db/opencode.db → Sessions page → "Extract with this model"
 
 # session id + attach — prints the FULL command, id is per-run
 sed -n 's/^attach_cmd=//p' runs/cumulative/sessions/*/live-view.txt

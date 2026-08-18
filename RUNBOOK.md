@@ -54,13 +54,12 @@ launches; those stay operator decisions (step 3a, §2).
 The manual equivalents are kept below as reference for debugging a NO-GO.
 
 ```bash
-# 1. Preflight — all four must succeed (§7 for bring-up if any fail):
+# 1. Preflight — all three must succeed (§7 for bring-up if any fail):
 nc -z 127.0.0.1 4545   # local relay (session + extraction models)
-nc -z 127.0.0.1 4550   # leader clone MCP (identity f7733d6e)
-nc -z 127.0.0.1 4451   # contributor clone MCP (identity 5292550d)
+nc -z 127.0.0.1 4550   # the ONE bench MCP (identity aa2aa706)
 nc -z 127.0.0.1 4440   # hub
 #    A PORT ANSWERING IS NOT AN IDENTITY (AGENTS.md §2.1). `nc` proves liveness
-#    only; it proved nothing in two real failures. The fingerprints above are
+#    only; it proved nothing in two real failures. The fingerprint above is
 #    fp(ed_pubkey_bytes) and MUST be asserted via GET /v1/identity/pubkeys —
 #    which bench_preflight.py does for you. NEVER point any bench component at
 #    :4450 (the operator's real host MCP).
@@ -79,7 +78,7 @@ docker build -t wevibe-bench-worker:v1 docker/worker
 #    rejects them after `run` (verified 2026-08-10: exit 2).
 #    Omit --model and the run uses the neutral auto-resident slug.
 TS=$(date +%Y%m%dT%H%M%S) && nohup .venv/bin/python scripts/run_cumulative.py \
-  --model qwen3.6-35b-a3b-bench run --until-review --mode off \
+  --model qwen3.6-35b-a3b-bench run --mode off \
   < /dev/null > "runs/off-cell-$TS.log" 2>&1 & disown
 #    `< /dev/null` is MANDATORY: without it zsh suspends the job the instant the
 #    process touches stdin ("suspended (tty input)"), leaving a half-built
@@ -149,7 +148,7 @@ this fixes.)
 | | |
 |---|---|
 | Subject model | **operator-selected via `--model <alias>`** (WO-MODEL-FLAG, 2026-08-10): the flag names a pinned proxy bench alias; the proxy makes that exact model resident on the first request. Omitting it keeps the neutral auto-resident slug. Identity is always read from the API response and recorded (RC-7) |
-| Org | **one org for the entire campaign**, recorded in the manifest; chain assigned `wevibe-org-0`, leader fp `f534aa02` |
+| Org | **one org for the entire campaign**, recorded in the manifest; pre-provisioned via the dashboard (`wevibe-org-0`), leader ed fp `aa2aa706` |
 | Runtime | **oMLX.** The `--model` alias pins which checkpoint the proxy loads. Identity is read from the API response and recorded in the manifest, so this row is documentation, never a gate |
 | Transport | session production model AND session extraction model → local relay proxy `:4545` → resident oMLX model. **ONLY** the embedding/vector-dim path bypasses the proxy to the local embedding endpoint directly |
 | Harness | OpenCode in a Docker worker image + plugin. **The version is not asserted here** — the worker image fingerprint is measured at run time and recorded in the manifest (RC-5); the operator confirms it matches the commit under test before the campaign (§0 step 2) |
@@ -212,23 +211,21 @@ walk-back class.
 A wipe is destructive across three separate stores, and doing only the first is the failure that
 silently ruins a campaign.
 
-1. **Run the wipe target** (it lives outside this repo). It stops the clone, brings the compose
+1. **Run the wipe target** (it lives outside this repo). It stops the bench MCP, brings the compose
    project down destroying its volumes, wipes bench state, wipes host state, brings the stack back
-   up, rebuilds, restarts and verifies clean. It prints two manual operator steps; the
-   `backend-restart` error it emits is **expected and harmless** — the redeploy still succeeds.
-2. **Clear the bench keystores in the same step.** Remove `$WEVIBE_BENCH_LEADER_KEYSTORE` and
-   `$WEVIBE_BENCH_CONTRIB_KEYSTORE` (defaulting to `~/.wevibe/bench/{leader,contrib}-keystore`).
-   **Never `~/.wevibe/keys`** — that is Walter's canonical key directory.
-   **Why this is mandatory:** the chain wipe destroys the on-chain org and its epoch key, so the
-   local `K_master` in the bench keystores becomes **stale**. Skip this and the next `register-org`
-   creates a fresh org whose epoch key mismatches the stale `K_master`, and recall returns
-   `decrypt_failed`. The failure surfaces on the first ON cell, hours later, looking like a recall
-   bug.
+   up, rebuilds, restarts the bench MCP and verifies clean. Gate is the final line
+   `=== VERIFY-CLEAN: PASS (13/13) ===`.
+2. **The leader keystore is cleared by the wipe target** (`bench-wipe` removes
+   `~/.wevibe/bench/leader-keystore` + `wevibe-bench/.wevibe`). **Never `~/.wevibe/keys`** — that is
+   Walter's canonical key directory. The leader seed + mnemonic (`~/.wevibe/bench/leader-seed.txt` /
+   `leader-mnemonic.txt`) survive every wipe; `bench-mcp-start` re-commissions the keystore from the
+   seed. **The retired `~/.wevibe/bench/contrib-keystore/` is NOT auto-wiped** — Walter deletes it
+   manually (residue from the deleted two-clone model).
 3. **Run the residue check.** All four must hold before anything proceeds:
    Qdrant memory collections empty or absent · chain and Postgres state fresh · served cache cleared
-   · both bench keystores gone. **Any residue: STOP and FIX.** Do not proceed.
-4. **Start the recall clone** (§7). Finalising org setup regenerates a fresh matching `K_master`
-   into the leader keystore.
+   · the bench keystore gone (absent or fresh). **Any residue: STOP and FIX.** Do not proceed.
+4. **Start the bench MCP** (§7). `bench-mcp-start` re-commissions the leader keystore from the seed
+   and seam-asserts the served fingerprint (`aa2aa706`).
 
 **The wipe is sanctioned only BEFORE THE FIRST CELL — a wipe AFTER THE FIRST CELL is barred.** The
 boundary is the first cell, not "exactly once, ever": a genesis wipe at campaign start, when zero
@@ -261,23 +258,22 @@ the corpus empty, so a wipe would destroy nothing AND still be barred.
 **`--org`** — a first-class input to the run command, with mode-dependent requirement.
 **CLI syntax:** `--org`, `--model`, `--roster-model`, `--task`, `--seed`, `--manifest` are
 MAIN-parser flags and must precede the subcommand
-(`run_cumulative.py --org <org> run --until-review --mode on`). argparse rejects them after `run`
-with exit 2 (verified 2026-08-10).
-- **ON cells: REQUIRED.** `run_cumulative.py --org <org> run --until-review --mode on` — omitting
+(`run_cumulative.py --org <org> --model <alias> run --mode on`). argparse rejects them after `run`
+with exit 2 (verified 2026-08-10). `--until-review` is DEAD (removed by `ba2947a`).
+- **ON cells: REQUIRED.** `run_cumulative.py --org <org> --model <alias> run --mode on` — omitting
   `--org` with `--mode on` errors before any run begins ("`--mode on requires --org <org>`").
 - **OFF cells: OPTIONAL.** Omit `--org` and the run falls back to `wevibe-org-0`.
-- **When `--org` is passed**, the run idempotently ensures the org exists first: it reuses the
-  established `run_m1`/create-org path (seeds keywords + org profile — exactly what the preflight
-  gate checks), reusing an existing org as specified or creating an absent one. **No separate manual
-  `bootstrap_org_m1.py` run is required before a run.** The leader MCP endpoint comes from
-  `WEVIBE_BENCH_LEADER_MCP_URL` (the run's existing source; live leader clone **:4550**, NOT :4450 —
-  see §7 "Known failure: org bootstrap"). Hub :4440.
-- The chain assigns fresh-mint org ids. When `--org` names an absent org on a fresh stack, the run
-  proceeds with the chain-assigned id returned by creation, reported in the run log as
-  `run_cumulative.org_ensured`.
+- **The org must already exist.** The bench no longer auto-provisions orgs
+  (`run_cumulative.py:1337-1339`): Walter pre-provisions the campaign org via the production
+  dashboard first (connects wallet + imports the 24-word mnemonic), and `--org` names that org. The
+  leader MCP endpoint comes from `WEVIBE_BENCH_LEADER_MCP_URL` (the run's existing source; live bench
+  MCP **:4550**, NOT :4450 — see §7 "Known failure: org bootstrap"). Hub :4440.
 
-**EXTRACT** — a separate invocation after each bench, never folded inside the bench command. The
-integrity gate and the smart-leader procedure are §9.
+**EXTRACT** — a separate step after each bench, never folded inside the bench command. Extraction is
+now **dashboard-driven**: point the dashboard at the cell's exported session DB
+(`OPENCODE_DB_PATH=<cell>/session-db/opencode.db`) → Sessions page → "Extract with this model" →
+`/v1/extract`. The CLI `extract` subcommand is DEAD (removed by `ba2947a`). The integrity gate and
+the smart-leader procedure are §9.
 
 ### Consequences — these follow from the sequence and are not separately negotiable
 
@@ -637,22 +633,19 @@ latency seam is VOID-INSTRUMENT by construction. **Latency must be measured, nev
 
 ### The two tiers. Confusing them is the #1 bench failure mode.
 
-The recall data path is: **bench script → MCP `/v1/recall` (`:4450`, or `:4550` for the clone) → hub
+The recall data path is: **bench script → MCP `/v1/recall` (`:4550`) → hub
 `/v1/orgs/{org}/query` (`:4440`)**. These are two separate services with **different ports,
 different health paths and different auth**.
 
 | Tier | What it is | Address | Health | Auth |
 |---|---|---|---|---|
 | **Hub** | Docker container `wevibe-hub` — the ONE hub, normally already running | `127.0.0.1:4440` | `GET /health` | none |
-| **MCP recall client** | `wevibe-mcp` process, or the bench clone | `127.0.0.1:4450`, clone `:4550` | `GET /v1/health` | bearer token |
-| **Bench leader clone** | managed service — seed-derived identity `f7733d6e` | `127.0.0.1:4550` | `GET /v1/health` (401 = up) | bearer token |
-| **Bench contributor clone** | managed service — seed-derived identity `5292550d` | `127.0.0.1:4451` | `GET /v1/health` (401 = up) | bearer token |
+| **Bench MCP** (recall client) | commissioned `wevibe-mcp` — managed service, seed-derived identity `aa2aa706` | `127.0.0.1:4550` | `GET /v1/health` (401 = up) | bearer token |
 
-**BOTH bench clones are managed services started by `make redeploy`** (`bench-clone.sh start
-leader|contributor`). The harness CONNECTS to them; it never spawns them — the cumulative run path
-never calls `bring_up()`. `:4450` is the operator's daily-driver host MCP and is **never** part of
-the bench identity path; pointing any bench component at it mints orgs under the operator's keychain
-identity (§7 Cause B).
+**The bench MCP is a managed service started by `make redeploy`** (`bench-mcp.sh start`). The harness
+CONNECTS to it; it never spawns it — the cumulative run path never calls `bring_up()`. `:4450` is the
+operator's daily-driver host MCP and is **never** part of the bench identity path; pointing any bench
+component at it mints orgs under the operator's keychain identity (§7 Cause B).
 
 - **The hub is a container, not a host process.** `ps`/`lsof` finding nothing is **normal** and is
   not evidence the hub is down. Check `GET :4440/health`.
@@ -669,25 +662,25 @@ identity (§7 Cause B).
 the preflight error, bring the named service up, and if you cannot — **STOP and report.** Do not
 improvise infrastructure. Do not compile a new hub or MCP. Do not invent a fallback.
 
-### Bringing up the recall clone
+### Bringing up the bench MCP
 
-The preferred path is the lifecycle bring-up, which injects the environment for you. A standalone
-start must reproduce the same environment exactly. **The identity seed must be the bench leader
-seed** or recall cannot decrypt the seeded corpus. Six requirements are non-obvious, and each has a
-known failure mode:
+The preferred path is the lifecycle bring-up (`bench-mcp.sh start`), which commissions from the seed
+for you. A standalone start must reproduce the same environment exactly. **The identity seed must be
+the bench leader seed** or recall cannot decrypt the seeded corpus. Six requirements are non-obvious,
+and each has a known failure mode:
 
 | Requirement | What breaks without it |
 |---|---|
 | `WEVIBE_GUARD_BIN`, derived from the workspace root | Guard scanning fails. The plugin normally injects it; a manual start does not. **Umbral no longer belongs in this row** — it ships as WASM inside `wevibe-mcp` and needs no variable. The 2026-07-13 cell-1 abort and the 2026-08-14 recurrence were both caused by the old `WEVIBE_UMBRAL_SIDECAR_BIN` requirement, which no longer exists |
-| `WEVIBE_MCP_HTTP_ONLY=1` | The clone also runs the stdio server, which treats a backgrounded stdin-EOF as shutdown. Required for any backgrounded start |
+| `WEVIBE_MCP_HTTP_ONLY=1` | The bench MCP also runs the stdio server, which treats a backgrounded stdin-EOF as shutdown. Required for any backgrounded start |
 | `< /dev/null` on the launch | Belt-and-braces so the stdio path never sees an open-then-closed stdin |
 | `WEVIBE_RECALL_MODE=test` | Recall is prod-governed (floor 0.55, budget 3) and a fresh low-trust memory is filtered out — **prove-delivery and the ON recall arm both return nothing.** Test mode also **auto-approves** recalled memories; prod or unset **headless injects NOTHING**, because it waits on a human approval popup that no headless run can answer |
-| `WEVIBE_KEYSTORE_PATH="$WEVIBE_BENCH_LEADER_KEYSTORE"` | The org master-key envelope is written by the clone and read by the invite and provision-recall subprocesses. Omit it and the writer uses the default directory while the readers look in the bench keystore — `decrypt_failed` on recall, `no master key found` on invite. **Writer and readers must share this path.** This was the other half of the 2026-07-13 blocker |
+| `WEVIBE_KEYSTORE_PATH="$WEVIBE_BENCH_LEADER_KEYSTORE"` | The org master-key envelope is written by the MCP and read by the invite and provision-recall subprocesses. Omit it and the writer uses the default directory while the readers look in the bench keystore — `decrypt_failed` on recall, `no master key found` on invite. **Writer and readers must share this path.** This was the other half of the 2026-07-13 blocker |
 | `WEVIBE_BENCH_ENDPOINTS=1` | The bench-only `/v1/submit` and `/v1/identity/pubkeys` endpoints are absent. `/v1/health` is always present |
 
-**The clone serves from its build output.** Code changes require a rebuild **and a restart** before
-they take effect. **Decryption happens in the clone, not in the worker plugin** — the worker needs
-only HTTP to the clone, and no host keys or corpus ever enter the container.
+**The bench MCP serves from its build output.** Code changes require a rebuild **and a restart** before
+they take effect. **Decryption happens in the bench MCP, not in the worker plugin** — the worker needs
+only HTTP to the bench MCP, and no host keys or corpus ever enter the container.
 
 To measure *filtered* recall headless, override the relevance floor and injection cap in the plugin
 config while keeping test-mode auto-approve. That is the clean way; changing the mode is not.
@@ -696,7 +689,7 @@ config while keeping test-mode auto-approve. That is the clean way; changing the
 
 - The worktree is mounted read-write as the worker's only view.
 - **Gate and golden material is NEVER mounted.** Gates run host-side after the worker exits.
-- The worker reaches the clone, and through it the hub and the embedding service, on the recall path
+- The worker reaches the bench MCP, and through it the hub and the embedding service, on the recall path
   only, and only on ON cells.
 - Egress is **not** domain-allowlisted — the worker retains general outbound network access. This is
   a known, accepted residual, not an oversight to rediscover.
@@ -721,12 +714,12 @@ leader's `members.active=true` row existed. The route `POST /v1/orgs/{org}/keywo
 `RequireVerifiedMembership` (wevibe-server/wevibe-hub/internal/auth/middleware.go:38, 403 at line 62,
 existence check at lines 55-62). The only membership poll ran for the *contributor*, after seeding.
 
-**Narrow disproven hypothesis (still disproven).** That the clone's *keystore-derived* identity
-differs from the seed-derived leader after a wipe. It does not: `WEVIBE_IDENTITY_SEED_HEX` is
-injected on both launch paths (mcp_process.py:193; preflight.py:54), both from
-`WEVIBE_BENCH_LEADER_SEED_HEX`, and the clone keystore is only a fallback when that env var is
-absent. A wipe regenerating the keystore does NOT change the clone identity. **This disproves one
-specific mechanism — it does NOT mean "identity can never be the problem" (see Cause B).**
+**Narrow disproven hypothesis (still disproven).** That a wipe regenerating the bench keystore
+changes the bench MCP's identity. It does not: identity is seed-derived — `load_leader_seed()`
+(`lib.sh:104-121`) reads `WEVIBE_BENCH_MCP_SEED` (priority) or `~/.wevibe/bench/leader-seed.txt`,
+and the keystore is re-commissioned from that seed on every `bench-mcp-start`. A wipe regenerating
+the keystore does NOT change the identity. **This disproves one specific mechanism — it does NOT
+mean "identity can never be the problem" (see Cause B).**
 
 **Fix.** `poll_leader_membership` between `create_org` and `seed_keywords` (orchestrator.py), raising
 `RuntimeError("leader membership did not include org_id=...")` before seeding, plus regression tests.
@@ -743,19 +736,19 @@ prompt**.
 which has no seed support and always loads the operator's biometric keychain identity `05c4b8cb…`.
 `create_org` hands that URL to leader-signer as `WEVIBE_MCP_URL`; `POST /v1/org-setup` stamps *that
 MCP's* pubkey as the org leader; the hub writes it as the org's only `members` row. The harness then
-polls for its own membership (`8d46fc08…`, pubkey fp `f7733d6e`) and never finds it.
+polls for its own membership (ed pubkey fp `aa2aa706`) and never finds it.
 
 **Why it hid for weeks.** Every earlier run took the `reuse` path (`phase=reuse`,
 `tx_hash=reuse-existing`) and never called org-setup. The first true fresh-create after a genuine
 wipe triggered it — and the Touch ID prompt appearing "randomly" was the same defect, not a separate
 annoyance.
 
-**Vocabulary trap that misled the earlier diagnosis:** `f534aa02` is `fp(seed_bytes)` and `f7733d6e`
+**Vocabulary trap that misled the earlier diagnosis:** `0e93b599` is `fp(seed_bytes)` and `aa2aa706`
 is `fp(ed_pubkey_bytes)` — **the same leader identity, two different hashed inputs.** Seeing an
 unfamiliar fingerprint does not by itself indicate a different identity. Always state which input a
 fingerprint hashes.
 
-**Fix.** Default is now `:4550` (the seed-derived bench leader clone), plus a fail-fast guard in
+**Fix.** Default is now `:4550` (the seed-derived bench MCP), plus a fail-fast guard in
 `create_org` that probes `GET /v1/identity/pubkeys` and refuses to register unless the org-setup
 MCP's ed25519 key IS the harness leader's. Unreachable is also a hard failure — a run on an
 unverified seam is VOID-INSTRUMENT (§6).
@@ -763,13 +756,12 @@ unverified seam is VOID-INSTRUMENT (§6).
 **Healthy bootstrap looks exactly like this:**
 
 ```
-phase=org_setup_mcp_identity_verified mcp_url=http://127.0.0.1:4550 leader_ed_fp=f7733d6e status=ok
+phase=org_setup_mcp_identity_verified mcp_url=http://127.0.0.1:4550 leader_ed_fp=aa2aa706 status=ok
 step=create_org status=ok
 step=poll_leader_membership status=ok dur_ms=7
-step=contributor_pubkeys status=ok dur_ms=2
 ```
 
-#### Cause C — contributor MCP `:4451` not running (FIXED 2026-08-11)
+#### Cause C — contributor MCP `:4451` not running (SUPERSEDED — contributor clone retired)
 
 **Symptom.** `step=contributor_pubkeys err=mcp unreachable for /v1/identity/pubkeys`.
 
@@ -778,10 +770,10 @@ assumes are running. Only `:4550` was a managed service; `:4451` was started by 
 had been silently relying on an **Aug-7 orphan process** that survived every wipe and predated the
 clone dist by days.
 
-**Fix.** `bench-clone.sh` takes a role (`leader`|`contributor`), `make redeploy` starts both, and
-verify-clean checks 11/12 assert BOTH clones' identity fingerprints (`f7733d6e` / `5292550d`).
-`config/bench.env` exports `WEVIBE_IDENTITY_SEED_HEX` globally as the **leader** seed, so the
-contributor start MUST override it per-role or `:4451` silently serves the leader's identity.
+**Superseded (2026-08-16).** The two-clone model is deleted (`27aeb07`/`ba2947a`/`d7ae146`); there
+is no contributor MCP and no `contributor_pubkeys` step. The ONE bench MCP on `:4550` is a managed
+service (`bench-mcp.sh start`); verify-clean check 11 (`mcp-fresh-4550`) asserts its served
+fingerprint `aa2aa706` against the leader seed's.
 
 **Value.** The next benchmark start recognizes these signatures by name and proceeds to the known
 fix instead of re-deriving it. **Liveness is not identity** — a process being up, a port answering,
