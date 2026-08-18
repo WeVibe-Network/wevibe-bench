@@ -26,12 +26,29 @@
 // tailer, and a stall detector, all to describe the GRADER's situation rather
 // than the gates'. A gate's phase is not a fact about the gate's result.
 //
-// ── THE WALL IS THE LAST COMPLETED TEST RUN, AND NOTHING ELSE ────────────────
+// ── THE VERDICT IS THE LAST COMPLETED TEST RUN, AND NOTHING ELSE ─────────────
 //
 // `gate_results` is published when a test run finishes. Between runs the wall
 // holds its last state. There is deliberately no live, provisional, or
 // in-flight signal: a square either carries a real recorded verdict or it
 // carries none.
+//
+// ── AND, SEPARATELY, THE TRAJECTORY ──────────────────────────────────────────
+//
+// Each gate also carries `first_pass_attempt` and `ever_failed`, folded across
+// ALL attempts rather than only the last. This is not a second verdict and must
+// never be read as one — `state` remains the single answer to "does this gate
+// pass". The trajectory answers a different question the bench is actually for:
+// how many attempts the model needed to get there.
+//
+// This is a deliberate, narrow reversal of 03a2650 ("make the gate wall dumb
+// again"), which removed an attempt axis. What that commit correctly killed was
+// a SECOND, DISAGREEING derivation of gate STATE — in-flight ambers and slate
+// squares describing the grader's situation rather than the gate's. Two facts
+// about recorded history, derived once here and rendered without reinterpretation,
+// are not that: no square's pass/fail meaning changes, and nothing here reads a
+// live signal. The phase axis (conformance/backend/frontend) stays out entirely;
+// a gate's phase is still not a fact about its result.
 //
 // READ-ONLY. Reads two files. Never writes, never spawns, never signals.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -252,6 +269,23 @@ export function foldGateStates({ roster, attempts }) {
   // gate id → the most recent status seen, scanning attempts oldest → newest so
   // the last write wins.
   const latest = new Map();
+  // ── THE TRAJECTORY, ALONGSIDE THE VERDICT ──────────────────────────────
+  //
+  // The verdict answers "does this gate pass now". The trajectory answers "how
+  // many tries did that take" — a different measurement, and the one the bench
+  // exists to make: a gate green on the first attempt and a gate green only
+  // after two rounds of repair are not the same result, and `attempts_to_green`
+  // has always been recorded per ATTEMPT without ever being visible per GATE.
+  //
+  // Two facts, both derived here so no surface derives them twice:
+  //   first_pass_attempt  the earliest attempt whose result for this gate was
+  //                       `pass`, or null if none ever was.
+  //   ever_failed         whether any attempt recorded an outright failure.
+  //                       `not_run` is EXCLUDED — an unmeasured gate has not
+  //                       been shown to fail, and colouring it as damaged would
+  //                       repeat the absence-reads-as-a-verdict defect.
+  const firstPass = new Map();
+  const everFailed = new Map();
   let anyOutcomesPublished = false;
 
   for (const record of attempts) {
@@ -261,6 +295,12 @@ export function foldGateStates({ roster, attempts }) {
     for (const result of results) {
       if (!result?.id) continue;
       latest.set(result.id, result.status);
+
+      if (result.status === "pass") {
+        if (!firstPass.has(result.id)) firstPass.set(result.id, record.attempt);
+      } else if (result.status !== "not_run" && result.status !== undefined && result.status !== null) {
+        everFailed.set(result.id, true);
+      }
     }
   }
 
@@ -290,6 +330,10 @@ export function foldGateStates({ roster, attempts }) {
       req: gate.req ?? null,
       title: gate.title ?? null,
       state,
+      // Published for EVERY gate, including failing and untested ones, so the
+      // board never has to infer a missing field's meaning.
+      first_pass_attempt: firstPass.get(gate.id) ?? null,
+      ever_failed: everFailed.get(gate.id) === true,
     };
   });
 

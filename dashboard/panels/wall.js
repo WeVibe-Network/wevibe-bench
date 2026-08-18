@@ -41,13 +41,34 @@ import { esc } from "../board.js";
 const WALL_COLUMNS = 12;
 
 /**
- * Server state → visual class. Total, pure, and the ONLY place the mapping
- * exists. Three inputs, three outputs, no branching on anything else.
+ * Server facts → visual class. Total, pure, and the ONLY place the mapping
+ * exists.
+ *
+ * FOUR VISUALS FROM THREE PUBLISHED FACTS — `state`, `first_pass_attempt`,
+ * `ever_failed` — and no others. This file still decides nothing: it does not
+ * read attempts, does not fold history, and cannot disagree with the server
+ * about whether a gate passes. `state` remains the sole verdict; the trajectory
+ * only splits the PASSING square into "green first try" and "green eventually".
+ *
+ *   green      passed on the first attempt and never broke
+ *   recovered  passing now, but not from the start — red rim, green core
+ *   red        failing in the last completed test run — carries an ✕
+ *   unobserved no result yet; dashed and empty, NOT a weaker pass
+ *
+ * WHY THE SPLIT EARNS ITS COMPLEXITY. A suite where every gate went green on
+ * attempt 1 and one where half needed two rounds of repair produce the SAME
+ * wall under a two-colour scheme, and they are not the same result — the number
+ * of attempts to green is a headline measurement of this bench, and it was
+ * visible only as a per-attempt scalar, never per gate.
+ *
+ * A MISSING TRAJECTORY DEGRADES TO PLAIN GREEN, never to `recovered`. Runs
+ * recorded before these fields existed publish neither, and an absent fact must
+ * not be rendered as an adverse one.
  */
 export function gateVisual(g) {
   switch (g.state) {
     case "passing":
-      return "green";
+      return g.ever_failed === true || (g.first_pass_attempt ?? 1) > 1 ? "recovered" : "green";
     case "failing":
       return "red";
     default:
@@ -177,7 +198,14 @@ function grid(gates) {
     .map((g) => {
       const st = gateVisual(g);
       const label = `${g.id} ${g.req ?? ""} ${g.title ?? ""}`.trim();
-      return `<span class="gcell ${esc(st)}" title="${esc(`${label} — ${VISUAL_WORD[st]}`)}"></span>`;
+      // The attempt number is stated in the tooltip rather than encoded in the
+      // square. A rim says "this needed repair"; WHICH round it took is detail,
+      // and detail belongs on hover, not in a 12-column grid of 9px cells.
+      const when =
+        st === "recovered" && Number.isFinite(g.first_pass_attempt)
+          ? ` (first passed on attempt ${g.first_pass_attempt})`
+          : "";
+      return `<span class="gcell ${esc(st)}" title="${esc(`${label} — ${VISUAL_WORD[st]}${when}`)}"></span>`;
     })
     .join("");
   return `<div class="gwall" style="grid-template-columns:repeat(${WALL_COLUMNS},1fr)">${cells}</div>`;
@@ -185,7 +213,8 @@ function grid(gates) {
 
 /** The tooltip gloss, kept beside the colours so the two cannot drift apart. */
 const VISUAL_WORD = {
-  green: "passing",
+  green: "passing — green on the first attempt",
+  recovered: "passing — but not on the first attempt",
   red: "failing",
   unobserved: "not yet tested",
 };
@@ -208,7 +237,8 @@ function legend(suite) {
 
   return `
     <div class="wall-legend">
-      <span><span class="gcell green sm"></span> passing</span>
+      <span><span class="gcell green sm"></span> passed first attempt</span>
+      <span><span class="gcell recovered sm"></span> passed on a later attempt</span>
       <span><span class="gcell red sm"></span> failing</span>
       <span><span class="gcell unobserved sm"></span> not yet tested</span>
       <span class="note">${esc(

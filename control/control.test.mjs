@@ -1091,14 +1091,27 @@ test("WALL: a gate that REGRESSED reads red, not green", () => {
 });
 
 test("WALL: a gate row carries NO phase and no live signal", () => {
-  // The wall is a dumb surface: the server hands it three states and the
-  // identity needed to check a square against the log. Anything else is a
-  // second axis the panel would have to decide about, which is exactly what
-  // this rebuild removed.
+  // The wall is a dumb surface: the server hands it the verdict, the identity
+  // needed to check a square against the log, and — since the trajectory split
+  // — two facts about RECORDED HISTORY. Nothing else.
+  //
+  // The invariant this test exists for is unchanged and is asserted explicitly
+  // below: no phase, and nothing live. `first_pass_attempt` / `ever_failed` are
+  // folded from completed attempts already on disk, so they cannot reintroduce
+  // the in-flight ambers this rebuild removed. `state` is still the only field
+  // that answers pass/fail.
   const roster = fakeRoster();
   const attempts = [{ attempt: 1, gate_results: [{ id: "G01", status: "pass" }] }];
   const [row] = foldGateStates({ roster, attempts }).gates;
-  assert.deepEqual(Object.keys(row).sort(), ["id", "req", "state", "title"]);
+  assert.deepEqual(
+    Object.keys(row).sort(),
+    ["ever_failed", "first_pass_attempt", "id", "req", "state", "title"],
+  );
+
+  // THE ACTUAL PROHIBITION, stated as itself rather than as a key count.
+  for (const forbidden of ["phase", "live", "in_flight", "provisional", "attempts", "status"]) {
+    assert.ok(!(forbidden in row), `a gate row must not carry "${forbidden}"`);
+  }
 });
 
 test("WALL: run_dir is confined to a child of the runs root", () => {
@@ -2541,4 +2554,98 @@ test("REPORT: the backend phase spawns one runner PER FILE, under one phase mark
   // these two lines into the board's gate-phase-start / gate-phase-end events.
   assert.equal((body.match(/\[report\] phase=backend target=/g) ?? []).length, 1, "one phase opener");
   assert.equal((body.match(/\[report\] phase=backend status=/g) ?? []).length, 1, "one phase closer");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRAJECTORY — how many attempts a gate needed, folded once, server-side.
+//
+// Shapes taken from the real 2026-08-17 minimax-m3 stream, whose 71 gates
+// followed exactly five paths across three attempts:
+//   5  pass → pass → pass          clean
+//   8  fail → pass → pass          recovered on 2
+//   3  fail → fail → pass          recovered on 3
+//   2  fail → fail → fail          failing
+//  53  pass → not_run → not_run    the harness abort
+// ─────────────────────────────────────────────────────────────────────────────
+
+const trajectoryAttempts = (paths) => {
+  const ids = Object.keys(paths);
+  const rounds = Math.max(...ids.map((id) => paths[id].length));
+  return Array.from({ length: rounds }, (_, i) => ({
+    type: "attempt",
+    attempt: i + 1,
+    gate_results: ids
+      .filter((id) => paths[id][i] !== undefined)
+      .map((id) => ({ id, status: paths[id][i] })),
+  }));
+};
+
+test("TRAJECTORY: first_pass_attempt is the EARLIEST pass, and ever_failed excludes not_run", () => {
+  const paths = {
+    clean: ["pass", "pass", "pass"],
+    late2: ["fail", "pass", "pass"],
+    late3: ["fail", "fail", "pass"],
+    broken: ["fail", "fail", "fail"],
+    aborted: ["pass", "not_run", "not_run"],
+    regressed: ["pass", "fail", "pass"],
+  };
+  const roster = { gates: Object.keys(paths).map((id) => ({ id })) };
+  const { gates } = foldGateStates({ roster, attempts: trajectoryAttempts(paths) });
+  const by = Object.fromEntries(gates.map((g) => [g.id, g]));
+
+  assert.deepEqual(
+    { s: by.clean.state, f: by.clean.first_pass_attempt, e: by.clean.ever_failed },
+    { s: "passing", f: 1, e: false },
+  );
+  assert.deepEqual(
+    { s: by.late2.state, f: by.late2.first_pass_attempt, e: by.late2.ever_failed },
+    { s: "passing", f: 2, e: true },
+  );
+  assert.deepEqual(
+    { s: by.late3.state, f: by.late3.first_pass_attempt, e: by.late3.ever_failed },
+    { s: "passing", f: 3, e: true },
+  );
+  assert.deepEqual(
+    { s: by.broken.state, f: by.broken.first_pass_attempt, e: by.broken.ever_failed },
+    { s: "failing", f: null, e: true },
+  );
+
+  // A gate that passed then went UNMEASURED is untested and has NOT failed —
+  // colouring an abort as damage is the absence-reads-as-a-verdict defect.
+  assert.deepEqual(
+    { s: by.aborted.state, f: by.aborted.first_pass_attempt, e: by.aborted.ever_failed },
+    { s: "untested", f: 1, e: false },
+  );
+
+  // pass → fail → pass: it passed first on attempt 1 AND it broke on the way.
+  // Both facts are published; the panel needs `ever_failed` to render it honestly.
+  assert.deepEqual(
+    { s: by.regressed.state, f: by.regressed.first_pass_attempt, e: by.regressed.ever_failed },
+    { s: "passing", f: 1, e: true },
+  );
+});
+
+test("TRAJECTORY: the verdict is unchanged by it — totals still come from the LAST attempt", () => {
+  const paths = {
+    a: ["fail", "pass", "pass"],
+    b: ["pass", "pass", "fail"],
+    c: ["fail", "fail", "fail"],
+  };
+  const roster = { gates: Object.keys(paths).map((id) => ({ id })) };
+  const { totals } = foldGateStates({ roster, attempts: trajectoryAttempts(paths) });
+  assert.deepEqual(
+    totals,
+    { passing: 1, failing: 2, untested: 0 },
+    "a gate that passed earlier and fails now is FAILING — the wall reports the current state of the code",
+  );
+});
+
+test("TRAJECTORY: a single-attempt run marks every pass as first-attempt green", () => {
+  const roster = { gates: [{ id: "x" }, { id: "y" }] };
+  const attempts = [{ type: "attempt", attempt: 1, gate_results: [{ id: "x", status: "pass" }, { id: "y", status: "fail" }] }];
+  const { gates } = foldGateStates({ roster, attempts });
+  const by = Object.fromEntries(gates.map((g) => [g.id, g]));
+  assert.equal(by.x.first_pass_attempt, 1);
+  assert.equal(by.x.ever_failed, false);
+  assert.equal(by.y.first_pass_attempt, null);
 });

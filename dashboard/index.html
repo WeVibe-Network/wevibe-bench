@@ -664,9 +664,10 @@ a:hover{color:var(--type)}
    per-gate outcome of the last completed test run and nothing else. There is no
    phase, no attempt axis, no live signal, and no motion of any kind.
 
-     green      solid check    — passing in the last completed test run
-     red        solid danger   — failing in the last completed test run
-     unobserved dashed, no fill — no result yet; NOT a weaker pass
+     green      solid check     — passing, green on the FIRST attempt
+     recovered  check + danger rim — passing, but not from the first attempt
+     red        solid danger + ✕  — failing in the last completed test run
+     unobserved dashed, no fill   — no result yet; NOT a weaker pass
 
    The two fills differ in luminance (#6dff9e check · #ff6b6b danger) so a
    greyscale screenshot separates them, and untested keeps a SHAPE difference
@@ -675,7 +676,23 @@ a:hover{color:var(--type)}
 .gwall{display:grid;gap:3px;grid-auto-rows:1fr}
 .gcell{aspect-ratio:1;border-radius:2px;background:var(--check);border:1px solid transparent;min-width:0}
 .gcell.green{background:var(--check);border-color:var(--check)}
-.gcell.red{background:var(--danger);border-color:var(--danger)}
+/* PASSING, BUT NOT FIRST TRY. Green core, danger rim — the fill still says
+   "this passes" and the rim says "it did not always". Read as green at a
+   glance, distinguishable on inspection, which is the correct emphasis: the
+   verdict is the primary fact and the trajectory is the qualifier. The rim is
+   2px so it survives the 9px legend swatch and a greyscale screenshot. */
+.gcell.recovered{background:var(--check);border:2px solid var(--danger)}
+/* FAILING. Fill plus an ✕ drawn in the box, so failure is legible by SHAPE and
+   not by hue alone — the one state a colour-blind or greyscale reader must
+   never miss. Pure CSS: two crossed gradients, no glyph, no font dependency,
+   nothing that reflows the grid. */
+.gcell.red{background:var(--danger);border-color:var(--danger);position:relative}
+.gcell.red::before,.gcell.red::after{content:"";position:absolute;inset:22%;border-top:2px solid var(--bg);top:50%;transform-origin:center}
+.gcell.red::before{transform:rotate(45deg)}
+.gcell.red::after{transform:rotate(-45deg)}
+/* The ✕ is dropped at legend size: a 9px swatch cannot carry a readable mark,
+   and a smudge is worse than a clean fill. The words beside it do that work. */
+.gcell.red.sm::before,.gcell.red.sm::after{display:none}
 .gcell.unobserved{background:transparent;border:1px dashed var(--dim)}
 /* the legend's inline swatches — fixed 9px, never stretched by the grid */
 .gcell.sm{width:9px;height:9px;aspect-ratio:auto;display:inline-block;vertical-align:baseline;flex:none}

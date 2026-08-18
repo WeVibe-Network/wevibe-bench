@@ -117,10 +117,61 @@ test("passing is green, failing is red, untested is the uncoloured square", () =
   assert.equal(gateVisual({ state: "untested" }), "unobserved");
 });
 
-test("only three visual classes can ever reach a square", () => {
-  const html = renderWall(boardWith(suiteWith(GATES)));
+test("only the four published visual classes can ever reach a square", () => {
+  // Was three. `recovered` splits the PASSING square by trajectory — it is not a
+  // fourth verdict, and `state` is still the only thing that decides pass/fail.
+  const gates = [
+    ...GATES,
+    { id: "C:f", req: "REQ-DBL", title: "green eventually", state: "passing", first_pass_attempt: 3, ever_failed: true },
+  ];
+  const html = renderWall(boardWith(suiteWith(gates)));
   const classes = new Set(cellClassList(html).map((c) => c.replace(/\s*sm\s*/, "")));
-  assert.deepEqual([...classes].sort(), ["green", "red", "unobserved"]);
+  assert.deepEqual([...classes].sort(), ["green", "recovered", "red", "unobserved"]);
+});
+
+// ── THE TRAJECTORY SPLIT ────────────────────────────────────────────────────
+
+test("a gate green on the first attempt is plain green; one that recovered is not", () => {
+  assert.equal(
+    gateVisual({ state: "passing", first_pass_attempt: 1, ever_failed: false }),
+    "green",
+  );
+  assert.equal(
+    gateVisual({ state: "passing", first_pass_attempt: 3, ever_failed: true }),
+    "recovered",
+    "fail → fail → pass is a different result from pass → pass → pass",
+  );
+  assert.equal(
+    gateVisual({ state: "passing", first_pass_attempt: 2, ever_failed: true }),
+    "recovered",
+  );
+});
+
+test("a gate that REGRESSED and was repaired reads as recovered, not clean", () => {
+  // pass → fail → pass. `first_pass_attempt` is 1, but it broke on the way, and
+  // a rim is exactly the honest mark for that.
+  assert.equal(
+    gateVisual({ state: "passing", first_pass_attempt: 1, ever_failed: true }),
+    "recovered",
+  );
+});
+
+test("A MISSING TRAJECTORY DEGRADES TO GREEN, never to recovered", () => {
+  // Runs recorded before these fields existed publish neither. An absent fact
+  // must not render as an adverse one.
+  assert.equal(gateVisual({ state: "passing" }), "green");
+  assert.equal(gateVisual({ state: "passing", first_pass_attempt: null, ever_failed: false }), "green");
+});
+
+test("trajectory NEVER overrides the verdict — failing stays failing", () => {
+  assert.equal(gateVisual({ state: "failing", first_pass_attempt: 1, ever_failed: false }), "red");
+  assert.equal(gateVisual({ state: "untested", first_pass_attempt: 2, ever_failed: true }), "unobserved");
+});
+
+test("the recovered tooltip names the attempt the gate first passed on", () => {
+  const gates = [{ id: "G07", req: "REQ-X", title: "late green", state: "passing", first_pass_attempt: 2, ever_failed: true }];
+  const html = renderWall(boardWith(suiteWith(gates)));
+  assert.ok(html.includes("first passed on attempt 2"), "the round is on hover, not encoded in the square");
 });
 
 test("the retired states are gone — no blue, no amber, no slate", () => {
