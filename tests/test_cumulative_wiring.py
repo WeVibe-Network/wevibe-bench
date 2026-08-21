@@ -89,14 +89,14 @@ def test_run_config_env_hooks_default_and_override(monkeypatch: pytest.MonkeyPat
 
     default_cfg = RunConfig()
     assert default_cfg.hub_url == "http://127.0.0.1:4440"
-    assert default_cfg.mcp_recall_url == "http://127.0.0.1:4450"
+    assert default_cfg.mcp_recall_url == "http://127.0.0.1:4550"
 
     monkeypatch.setenv("WEVIBE_BENCH_HUB_URL", "http://127.0.0.1:4444")
-    monkeypatch.setenv("WEVIBE_BENCH_MCP_RECALL_URL", "http://127.0.0.1:4550")
+    monkeypatch.setenv("WEVIBE_BENCH_MCP_RECALL_URL", "http://127.0.0.1:4557")
 
     overridden_cfg = RunConfig()
     assert overridden_cfg.hub_url == "http://127.0.0.1:4444"
-    assert overridden_cfg.mcp_recall_url == "http://127.0.0.1:4550"
+    assert overridden_cfg.mcp_recall_url == "http://127.0.0.1:4557"
 
 
 

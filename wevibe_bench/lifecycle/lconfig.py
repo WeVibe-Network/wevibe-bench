@@ -22,14 +22,14 @@ class LifecycleConfig:
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_HUB_URL")
         or "http://127.0.0.1:4440"
     )
-    # The bench leader MCP is the commissioned prod MCP occupying the bench
-    # MCP slot on :4550 — the MCP serving the harness leader identity (ed
-    # pubkey fp f7733d6e). NEVER default this to :4450: that is the operator's
-    # real host wevibe-mcp (daily driver), which has no seed support at all and
-    # always loads the interactive keychain identity. The bench's org
-    # membership and recall are bound to the leader identity — running under
-    # the :4450 keychain identity means the harness never confirms its own
-    # membership.
+    # The bench MCP on :4550 is the commissioned prod MCP serving the BENCH's
+    # OWN identity, derived from a distinct bench-identity seed (never the
+    # leader's wallet seed); its ed fp is DERIVED at check time, never
+    # hardcoded. NEVER default this to :4450: that is the operator's real host
+    # wevibe-mcp (daily driver), which has no seed support at all and always
+    # loads the interactive keychain identity. The bench joins the leader's org
+    # as a separate member — running under the :4450 keychain identity means
+    # the harness never confirms its own membership.
     leader_mcp_url: str = field(
         default_factory=lambda: os.environ.get("WEVIBE_BENCH_LEADER_MCP_URL")
         or "http://127.0.0.1:4550"
